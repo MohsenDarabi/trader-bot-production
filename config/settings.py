@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # CoinEx API Configuration
-COINEX_ACCESS_ID = os.getenv('COINEX_ACCESS_ID')
-COINEX_SECRET_KEY = os.getenv('COINEX_SECRET_KEY')
+COINEX_ACCESS_ID = os.getenv('COINEX_API_KEY')
+COINEX_SECRET_KEY = os.getenv('COINEX_API_SECRET')
 COINEX_BASE_URL = 'https://api.coinex.com/v2'
 COINEX_WS_URL = 'wss://socket.coinex.com/v2/futures'
 
@@ -68,9 +68,9 @@ def validate_config():
     errors = []
     
     if not COINEX_ACCESS_ID:
-        errors.append("COINEX_ACCESS_ID is not set")
+        errors.append("COINEX_API_KEY is not set")
     if not COINEX_SECRET_KEY:
-        errors.append("COINEX_SECRET_KEY is not set")
+        errors.append("COINEX_API_SECRET is not set")
     
     if TELEGRAM_ENABLED:
         if not TELEGRAM_BOT_TOKEN:

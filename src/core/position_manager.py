@@ -270,7 +270,8 @@ class PositionManager:
         try:
             # Get positions from exchange
             response = self.client.get_positions(market=market)
-            exchange_positions = response.get('items', [])
+            # CoinEx returns a list directly, not a dict with 'items'
+            exchange_positions = response if isinstance(response, list) else response.get('items', [])
             
             synced_count = 0
             

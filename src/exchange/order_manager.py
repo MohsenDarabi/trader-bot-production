@@ -402,7 +402,14 @@ class OrderManager:
         try:
             # Get pending orders from exchange
             response = self.client.get_pending_orders(market=market)
-            orders_data = response.get('items', [])
+            # Handle CoinEx response format: {"code": 0, "data": [...], "pagination": {...}}
+            if isinstance(response, list):
+                orders_data = response
+            elif isinstance(response, dict):
+                # CoinEx format has data array and pagination object
+                orders_data = response.get('data', [])
+            else:
+                orders_data = []
             
             loaded_count = 0
             
@@ -433,5 +440,11 @@ class OrderManager:
             return loaded_count
             
         except Exception as e:
-            logger.error(f"Failed to load existing orders: {e}")
+            # Some CoinEx API endpoints may require specific permissions
+            # or may not be available for all account types
+            if "Signature Incorrect" in str(e):
+                logger.warning(f"Pending orders endpoint authentication failed - this may be a permission issue: {e}")
+                logger.info("Continuing without loading existing orders - new orders will still work")
+            else:
+                logger.error(f"Failed to load existing orders: {e}")
             return 0

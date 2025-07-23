@@ -180,7 +180,7 @@ class CoinExClient:
         if market:
             params['market'] = market
         
-        return self._request('GET', '/futures/market', params=params, auth_required=False)
+        return self._request('GET', '/v2/futures/market', params=params, auth_required=False)
     
     def get_kline(self, market: str, period: str = '1day', 
                   limit: int = 100) -> List[Dict]:
@@ -201,7 +201,7 @@ class CoinExClient:
             'limit': limit
         }
         
-        return self._request('GET', '/futures/kline', params=params, auth_required=False)
+        return self._request('GET', '/v2/futures/kline', params=params, auth_required=False)
     
     def get_ticker(self, market: str) -> Dict:
         """
@@ -214,7 +214,7 @@ class CoinExClient:
             Ticker data dictionary
         """
         params = {'market': market}
-        return self._request('GET', '/futures/ticker', params=params, auth_required=False)
+        return self._request('GET', '/v2/futures/ticker', params=params, auth_required=False)
     
     # Trading Endpoints (Auth Required)
     
@@ -253,7 +253,7 @@ class CoinExClient:
         if is_hide:
             data['is_hide'] = is_hide
         
-        return self._request('POST', '/futures/order', data=data)
+        return self._request('POST', '/v2/futures/order', data=data)
     
     def cancel_order(self, market: str, order_id: Optional[int] = None,
                     client_id: Optional[str] = None) -> Dict:
@@ -280,10 +280,10 @@ class CoinExClient:
         else:
             raise ValueError("Either order_id or client_id must be provided")
         
-        return self._request('DELETE', '/futures/order', data=data)
+        return self._request('DELETE', '/v2/futures/order', data=data)
     
     def get_pending_orders(self, market: Optional[str] = None, 
-                          page: int = 1, limit: int = 100) -> Dict:
+                          page: int = 1, limit: Optional[int] = None) -> Dict:
         """
         Get list of pending orders
         
@@ -297,14 +297,45 @@ class CoinExClient:
         """
         params = {
             'market_type': 'FUTURES',
-            'page': page,
-            'limit': limit
+            'page': page
         }
+        
+        # Only add limit if specified (causes signature issues when set to default value)
+        if limit is not None:
+            params['limit'] = limit
         
         if market:
             params['market'] = market
         
-        return self._request('GET', '/futures/pending-order', params=params)
+        # For pending orders, we need the full response including pagination
+        # So we'll handle this specially instead of using _request
+        url = urljoin(self.base_url, '/v2/futures/pending-order')
+        
+        kwargs = {
+            'timeout': REQUEST_TIMEOUT,
+            'params': params
+        }
+        
+        # Add authentication headers
+        headers = self.auth.get_auth_headers('GET', '/v2/futures/pending-order', params=params)
+        kwargs['headers'] = headers
+        
+        try:
+            response = self.session.request('GET', url, **kwargs)
+            response_data = response.json()
+            
+            # Check for API errors
+            if response_data.get('code') != 0:
+                error_msg = response_data.get('message', 'Unknown error')
+                logger.error(f"API error: {error_msg}")
+                raise ValueError(f"CoinEx API error: {error_msg}")
+            
+            # Return full response for pending orders (includes pagination)
+            return response_data
+            
+        except Exception as e:
+            logger.error(f"Pending orders request failed: {e}")
+            raise
     
     def get_order_status(self, market: str, order_id: Optional[int] = None,
                         client_id: Optional[str] = None) -> Dict:
@@ -331,7 +362,7 @@ class CoinExClient:
         else:
             raise ValueError("Either order_id or client_id must be provided")
         
-        return self._request('GET', '/futures/order-status', params=params)
+        return self._request('GET', '/v2/futures/order-status', params=params)
     
     def get_positions(self, market: Optional[str] = None) -> Dict:
         """
@@ -348,7 +379,7 @@ class CoinExClient:
         if market:
             params['market'] = market
         
-        return self._request('GET', '/futures/pending-position', params=params)
+        return self._request('GET', '/v2/futures/pending-position', params=params)
     
     def get_account_info(self) -> Dict:
         """
@@ -357,7 +388,7 @@ class CoinExClient:
         Returns:
             Account details including balance
         """
-        return self._request('GET', '/assets/futures/balance')
+        return self._request('GET', '/v2/assets/futures/balance')
     
     def close(self):
         """Close the session"""

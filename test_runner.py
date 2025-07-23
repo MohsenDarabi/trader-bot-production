@@ -208,20 +208,29 @@ class SafeTestRunner:
         try:
             account_info = self.client.get_account_info()
             
-            # Display account summary
-            if 'USDT' in account_info:
-                balance_info = account_info['USDT']
-                self.account_balance = float(balance_info.get('available', 0))
+            # Display account summary - account_info is a list of asset balances
+            usdt_balance = None
+            if isinstance(account_info, list):
+                # Find USDT balance in the list
+                for asset in account_info:
+                    if asset.get('ccy') == 'USDT':
+                        usdt_balance = asset
+                        break
+            
+            if usdt_balance:
+                self.account_balance = float(usdt_balance.get('available', 0))
                 
                 table = Table(title="Account Information")
                 table.add_column("Asset", style="cyan")
                 table.add_column("Available", style="green")
                 table.add_column("Frozen", style="yellow")
+                table.add_column("Transferrable", style="blue")
                 
                 table.add_row(
                     "USDT",
-                    f"{balance_info.get('available', 0)}",
-                    f"{balance_info.get('frozen', 0)}"
+                    f"{usdt_balance.get('available', 0)}",
+                    f"{usdt_balance.get('frozen', 0)}",
+                    f"{usdt_balance.get('transferrable', 0)}"
                 )
                 
                 self.console.print(table)
@@ -232,6 +241,7 @@ class SafeTestRunner:
                 
                 return True
             
+            self.console.print("❌ No USDT balance found in account", style="red")
             return False
             
         except Exception as e:

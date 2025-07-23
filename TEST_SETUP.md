@@ -34,8 +34,8 @@ The test runner validates all bot functionality using real API calls with comple
 2. Edit `.env` with your credentials:
    ```bash
    # CoinEx API Credentials
-   COINEX_ACCESS_ID=your_access_id_here
-   COINEX_SECRET_KEY=your_secret_key_here
+   COINEX_API_KEY=your_access_id_here
+   COINEX_API_SECRET=your_secret_key_here
    
    # Trading Configuration
    TRADING_MODE=TEST
