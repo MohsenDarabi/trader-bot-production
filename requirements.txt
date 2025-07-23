@@ -1,0 +1,38 @@
+# Core dependencies
+requests==2.31.0
+websocket-client==1.7.0
+python-dotenv==1.0.0
+
+# Data handling
+pandas==2.1.4
+numpy==1.26.2
+
+# Database
+sqlalchemy==2.0.25
+alembic==1.13.1
+
+# Display and UI
+rich==13.7.0
+click==8.1.7
+
+# Async support
+aiohttp==3.9.1
+asyncio==3.4.3
+
+# Security
+cryptography==41.0.7
+
+# Utilities
+python-dateutil==2.8.2
+pytz==2023.3
+
+# Logging
+loguru==0.7.2
+
+# Testing (optional)
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-mock==3.12.0
+
+# Telegram notifications (low priority)
+python-telegram-bot==20.7
