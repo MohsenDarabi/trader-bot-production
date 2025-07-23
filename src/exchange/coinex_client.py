@@ -497,17 +497,51 @@ class CoinExClient:
         Get current futures positions
         
         Args:
-            market: Optional market filter
+            market: Optional market filter (applied client-side due to API signature issues)
             
         Returns:
             Dictionary with positions list
         """
         params = {'market_type': 'FUTURES'}
         
-        if market:
-            params['market'] = market
+        # NOTE: The 'market' parameter causes signature issues with CoinEx API
+        # We'll fetch all positions and filter client-side if market is specified
         
-        return self._request('GET', '/v2/futures/pending-position', params=params)
+        # Wait for rate limiter
+        self.rate_limiter.wait_if_needed()
+        
+        # Construct full URL
+        url = urljoin(self.base_url, '/v2/futures/pending-position')
+        
+        # Add authentication headers
+        headers = self.auth.get_auth_headers('GET', '/v2/futures/pending-position', params=params)
+        
+        try:
+            response = self.session.request('GET', url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+            response_data = response.json()
+            
+            # Check for API errors
+            if response_data.get('code') != 0:
+                error_msg = response_data.get('message', 'Unknown error')
+                logger.error(f"API error: {error_msg}")
+                raise ValueError(f"CoinEx API error: {error_msg}")
+            
+            # Apply client-side market filter if specified
+            if market and response_data.get('data'):
+                if isinstance(response_data['data'], list):
+                    filtered_positions = [pos for pos in response_data['data'] if pos.get('market') == market]
+                    response_data['data'] = filtered_positions
+                elif isinstance(response_data['data'], dict):
+                    # Handle case where data is a dict with market-keyed positions
+                    filtered_data = {k: v for k, v in response_data['data'].items() 
+                                   if k == market or (isinstance(v, dict) and v.get('market') == market)}
+                    response_data['data'] = filtered_data
+            
+            return response_data
+            
+        except Exception as e:
+            logger.error(f"Positions request failed: {e}")
+            raise
     
     def get_account_info(self) -> Dict:
         """
