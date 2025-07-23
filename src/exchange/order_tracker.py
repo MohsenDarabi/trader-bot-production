@@ -219,31 +219,48 @@ class OrderTracker:
         logger.info(f"Linked sell order {sell_order_id} to buy order {buy_order_id}")
         return True
     
-    def _handle_order_update(self, params: Dict[str, Any]) -> None:
+    def _handle_order_update(self, data: Dict[str, Any]) -> None:
         """Handle order status updates from WebSocket"""
         try:
-            event_type = params.get("event")
-            orders = params.get("orders", [])
+            logger.info(f"Processing order update: {data}")
             
-            for order_data in orders:
+            event_type = data.get("event")
+            # CoinEx sends single "order" object, not "orders" array
+            order_data = data.get("order", {})
+            
+            if order_data:
                 order_id = str(order_data.get("order_id"))
+                logger.info(f"Order update for ID {order_id}: event={event_type}")
                 
                 if order_id in self.tracked_orders:
+                    logger.info(f"Updating tracked order {order_id}")
                     self._update_order_from_data(order_id, order_data, event_type)
+                else:
+                    logger.info(f"Order {order_id} not in tracked orders - might be external order")
+            else:
+                logger.warning("Order update received but no order data found")
                     
         except Exception as e:
-            logger.error(f"Error handling order update: {e}")
+            logger.error(f"Error handling order update: {e}", exc_info=True)
     
-    def _handle_user_deals_update(self, params: Dict[str, Any]) -> None:
+    def _handle_user_deals_update(self, data: Dict[str, Any]) -> None:
         """Handle user deal/fill updates from WebSocket"""
         try:
-            deals = params.get("deals", [])
+            logger.info(f"Processing user deals update: {data}")
+            
+            # Check both possible structures for deals data
+            deals = data.get("deals", [])
+            if not deals and "deal" in data:
+                # Single deal object
+                deals = [data.get("deal")]
             
             for deal_data in deals:
-                self._process_deal(deal_data)
+                if deal_data:
+                    logger.info(f"Processing deal: {deal_data}")
+                    self._process_deal(deal_data)
                 
         except Exception as e:
-            logger.error(f"Error handling user deals update: {e}")
+            logger.error(f"Error handling user deals update: {e}", exc_info=True)
     
     def _process_deal(self, deal_data: Dict[str, Any]) -> None:
         """Process a single deal/fill"""

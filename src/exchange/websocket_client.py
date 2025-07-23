@@ -286,8 +286,12 @@ class CoinExWebSocketClient:
                     message = json.loads(message_str)
                     logger.debug(f"Received WebSocket message: {message}")
                     
-                    # Handle different message types
+                    # Log important messages at info level for debugging
                     method = message.get("method")
+                    if method in ["order.update", "user_deals.update"]:
+                        logger.info(f"📨 Received important message: {method} - {message}")
+                    
+                    # Handle different message types
                     
                     # If message has an ID, it's a response to our request
                     if "id" in message and method is None:
@@ -345,16 +349,19 @@ class CoinExWebSocketClient:
     def _handle_subscription_update(self, message: Dict) -> None:
         """Handle subscription update messages"""
         method = message.get("method")
-        params = message.get("params", {})
+        # CoinEx sends data in "data" field, not "params"
+        data = message.get("data", {})
+        
+        logger.info(f"Received subscription update: {method} with data: {data}")
         
         # Call registered handler if available
         if method in self.message_handlers:
             try:
-                self.message_handlers[method](params)
+                self.message_handlers[method](data)
             except Exception as e:
                 logger.error(f"Error in message handler for {method}: {e}")
         else:
-            logger.debug(f"No handler registered for method: {method}")
+            logger.warning(f"No handler registered for method: {method}")
     
     def _handle_pong_response(self, message: Dict) -> None:
         """Handle pong response to heartbeat"""
