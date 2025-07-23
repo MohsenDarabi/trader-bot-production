@@ -108,8 +108,11 @@ class DailyRangeStrategy:
                 logger.debug(f"Not a new trading day for {market}")
                 return None
             
+            logger.info(f"Generating new signal for {market} - getting previous day OHLC...")
+            
             # Get previous day OHLC
             ohlc = self.market_data.get_previous_day_ohlc(market)
+            logger.info(f"Retrieved OHLC for {market}: {ohlc}")
             
             # Calculate signal prices
             buy_price, sell_price, range_value = self.calculate_signal_prices(
@@ -138,7 +141,7 @@ class DailyRangeStrategy:
             return signal
             
         except Exception as e:
-            logger.error(f"Failed to generate signal for {market}: {e}")
+            logger.error(f"Failed to generate signal for {market}: {e}", exc_info=True)
             return None
     
     def get_current_signal(self, market: str) -> Optional[TradingSignal]:
