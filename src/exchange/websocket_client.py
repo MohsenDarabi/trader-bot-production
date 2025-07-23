@@ -6,6 +6,7 @@ import json
 import time
 import asyncio
 import threading
+import gzip
 from typing import Dict, Optional, Callable, Any, List
 from dataclasses import dataclass
 from enum import Enum
@@ -118,6 +119,9 @@ class CoinExWebSocketClient:
             return False
         
         try:
+            # Reset authentication state
+            self.is_authenticated = False
+            
             # Generate authentication data
             auth_data = self.auth.sign_websocket_message()
             
@@ -131,11 +135,21 @@ class CoinExWebSocketClient:
             await self._send_message(auth_message)
             logger.info("Authentication message sent")
             
-            # Wait for authentication response
-            # Note: The response will be handled in _handle_messages()
-            await asyncio.sleep(1)  # Give time for auth response
+            # Wait for authentication response with timeout
+            max_wait = 5  # seconds
+            wait_interval = 0.1
+            elapsed = 0
             
-            return True
+            while elapsed < max_wait and not self.is_authenticated:
+                await asyncio.sleep(wait_interval)
+                elapsed += wait_interval
+            
+            if self.is_authenticated:
+                logger.info("Authentication confirmed")
+                return True
+            else:
+                logger.error("Authentication timeout - no response received")
+                return False
             
         except Exception as e:
             logger.error(f"Authentication failed: {e}")
@@ -252,27 +266,43 @@ class CoinExWebSocketClient:
         try:
             async for raw_message in self.websocket:
                 try:
-                    message = json.loads(raw_message)
+                    # Check if message is binary (compressed)
+                    if isinstance(raw_message, bytes):
+                        try:
+                            # Decompress gzip message
+                            decompressed = gzip.decompress(raw_message)
+                            message_str = decompressed.decode('utf-8')
+                        except gzip.BadGzipFile:
+                            # Not gzipped, try direct decode
+                            message_str = raw_message.decode('utf-8')
+                    else:
+                        message_str = raw_message
+                    
+                    message = json.loads(message_str)
                     logger.debug(f"Received WebSocket message: {message}")
                     
                     # Handle different message types
                     method = message.get("method")
                     
-                    if method == "server.sign":
+                    # If message has an ID, it's a response to our request
+                    if "id" in message and method is None:
+                        self._handle_generic_response(message)
+                    elif method == "server.sign":
                         # Authentication response
                         self._handle_auth_response(message)
-                    elif method in ["order.update", "user_deals.update", "deals.update"]:
+                    elif method in ["order.update", "user_deals.update", "deals.update", "depth.update"]:
                         # Subscription updates
                         self._handle_subscription_update(message)
-                    elif "error" in message:
-                        # Error response
+                    elif "error" in message and "id" in message:
+                        # Error response to a request
                         self._handle_error_response(message)
                     else:
-                        # Generic response
+                        # Other messages
                         self._handle_generic_response(message)
                         
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse WebSocket message: {e}")
+                    logger.debug(f"Raw message type: {type(raw_message)}, content: {raw_message[:100] if isinstance(raw_message, (str, bytes)) else raw_message}")
                 except Exception as e:
                     logger.error(f"Error handling WebSocket message: {e}")
                     
@@ -286,12 +316,19 @@ class CoinExWebSocketClient:
     
     def _handle_auth_response(self, message: Dict) -> None:
         """Handle authentication response"""
-        if message.get("error"):
-            logger.error(f"Authentication failed: {message['error']}")
+        error = message.get("error")
+        result = message.get("result")
+        
+        if error:
+            logger.error(f"Authentication failed: {error}")
             self.is_authenticated = False
-        else:
+        elif result is not None:
+            # CoinEx returns result for successful operations
             logger.info("WebSocket authentication successful")
             self.is_authenticated = True
+        else:
+            logger.warning(f"Unexpected auth response: {message}")
+            self.is_authenticated = False
     
     def _handle_subscription_update(self, message: Dict) -> None:
         """Handle subscription update messages"""
@@ -314,7 +351,25 @@ class CoinExWebSocketClient:
     
     def _handle_generic_response(self, message: Dict) -> None:
         """Handle generic responses"""
-        logger.debug(f"Generic WebSocket response: {message}")
+        # Check if this is a response to our request
+        msg_id = message.get("id")
+        error = message.get("error")
+        result = message.get("result")
+        
+        if msg_id is not None:
+            # This is a response to a specific request
+            if error:
+                logger.error(f"Request {msg_id} failed: {error}")
+            else:
+                logger.debug(f"Request {msg_id} successful: {result}")
+                
+                # Check if this was an auth request by looking at recent message IDs
+                # (auth requests typically have low IDs)
+                if msg_id <= 5 and not self.is_authenticated and result is not None:
+                    logger.info("Late authentication confirmation received")
+                    self.is_authenticated = True
+        else:
+            logger.debug(f"Generic WebSocket response: {message}")
     
     async def _heartbeat(self) -> None:
         """Send periodic heartbeat to keep connection alive"""
