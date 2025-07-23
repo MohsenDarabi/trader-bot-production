@@ -552,6 +552,51 @@ class CoinExClient:
         """
         return self._request('GET', '/v2/assets/futures/balance')
     
+    def adjust_position_leverage(self, market: str, leverage: int, 
+                               margin_mode: str = 'cross') -> Dict:
+        """
+        Adjust position leverage for a specific market
+        
+        Args:
+            market: Market symbol (e.g., ETHUSDT)
+            leverage: Leverage ratio (e.g., 2 for 2x leverage)
+            margin_mode: Position type ('cross' or 'isolated')
+            
+        Returns:
+            Response containing leverage adjustment result
+        """
+        if not market:
+            raise ValueError("Market symbol is required")
+        
+        if not isinstance(leverage, int) or leverage < 1:
+            raise ValueError("Leverage must be a positive integer")
+        
+        if margin_mode not in ['cross', 'isolated']:
+            raise ValueError("margin_mode must be 'cross' or 'isolated'")
+        
+        data = {
+            'market': market,
+            'market_type': 'FUTURES',
+            'margin_mode': margin_mode,
+            'leverage': leverage
+        }
+        
+        logger.info(f"Setting leverage for {market}: {leverage}x ({margin_mode} margin)")
+        
+        try:
+            # _request() returns only the 'data' portion and raises exception on API error
+            data_response = self._request('POST', '/v2/futures/adjust-position-leverage', data=data)
+            
+            # If we reach here, the API call was successful (no exception thrown)
+            logger.info(f"Leverage set successfully for {market}: "
+                      f"{data_response.get('leverage')}x {data_response.get('margin_mode')} margin")
+            
+            return data_response
+            
+        except Exception as e:
+            logger.error(f"Error setting leverage for {market}: {e}")
+            raise
+    
     def close(self):
         """Close the session"""
         self.session.close()

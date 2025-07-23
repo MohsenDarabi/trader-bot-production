@@ -219,8 +219,7 @@ class OrderManager:
         # Generate client_id
         client_id = self.generate_client_id(market, OrderSide.SELL)
         
-        logger.info(f"Placing sell order: {market} {amount} @ ${price:.2f} [{client_id}] "
-                   f"Expected profit: {profit_check.profit_percent:.2f}%")
+        logger.info(f"Placing sell order: {market} {amount} @ ${price:.2f} [{client_id}]")
         
         try:
             # Place order on exchange

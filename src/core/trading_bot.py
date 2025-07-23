@@ -159,6 +159,24 @@ class DailyRangeBot:
             if not market_info:
                 raise ValueError(f"Market {market} not found or not available")
             
+            # Set leverage to strategy requirement (2x)
+            try:
+                from config.settings import LEVERAGE
+                logger.info(f"Setting leverage for {market} to {int(LEVERAGE)}x")
+                # adjust_position_leverage returns the data portion or raises exception on error
+                leverage_data = self.client.adjust_position_leverage(
+                    market=market,
+                    leverage=int(LEVERAGE),
+                    margin_mode='cross'
+                )
+                # If we reach here, leverage was set successfully
+                logger.info(f"✅ Leverage configured for {market}: "
+                          f"{leverage_data.get('leverage', int(LEVERAGE))}x "
+                          f"{leverage_data.get('margin_mode', 'cross')} margin")
+            except Exception as e:
+                logger.error(f"Critical error setting leverage for {market}: {e}")
+                raise ValueError(f"Cannot proceed without setting correct leverage: {e}")
+            
             # Configure pairing rules for this market
             # Multiple sell levels based on the daily range strategy
             sell_price_levels = [1.002, 1.005, 1.010, 1.015, 1.020]  # 0.2%, 0.5%, 1%, 1.5%, 2% above buy price
