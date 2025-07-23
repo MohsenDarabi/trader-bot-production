@@ -510,7 +510,6 @@ class DailyRangeBot:
         """Sync positions with exchange"""
         try:
             self.position_manager.sync_with_exchange()
-            self.order_manager.sync_with_exchange()
             
             # Sync existing orders with order tracker
             await self.order_tracker.sync_existing_orders()
