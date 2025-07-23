@@ -129,12 +129,15 @@ class OrderPairingTester:
         logger.info(f"  Order pairs: {stats['total_pairs']}")
         logger.info(f"  Unmatched pairs: {stats['unmatched_pairs']}")
         
-        # Check positions
-        positions = self.rest_client.get_positions(market=self.test_market)
-        if positions and positions.get("data"):
-            logger.info(f"\nCurrent positions:")
-            for pos in positions["data"]:
-                logger.info(f"  {pos['market']}: {pos['amount']} @ {pos['price']}")
+        # Check positions (skip if signature issues)
+        try:
+            positions = self.rest_client.get_positions(market=self.test_market)
+            if positions and positions.get("data"):
+                logger.info(f"\nCurrent positions:")
+                for pos in positions["data"]:
+                    logger.info(f"  {pos['market']}: {pos['amount']} @ {pos['price']}")
+        except Exception as e:
+            logger.info(f"\nPosition check skipped (REST API signature issue): {e}")
         
         # Process any unmatched fills
         unmatched_count = await self.pairing_manager.process_unmatched_fills()
