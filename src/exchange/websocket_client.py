@@ -169,9 +169,9 @@ class CoinExWebSocketClient:
             logger.warning("Attempting to subscribe to orders without authentication")
         
         try:
-            params = {}
-            if markets:
-                params["market"] = markets
+            # CoinEx expects market_list parameter, empty array for all markets
+            market_list = markets if markets is not None else []
+            params = {"market_list": market_list}
             
             message = {
                 "method": "order.subscribe",
@@ -181,7 +181,7 @@ class CoinExWebSocketClient:
             
             await self._send_message(message)
             self.subscriptions["order"] = params
-            logger.info(f"Subscribed to order updates for markets: {markets}")
+            logger.info(f"Subscribed to order updates for markets: {market_list if market_list else 'ALL'}")
             return True
             
         except Exception as e:
@@ -202,9 +202,9 @@ class CoinExWebSocketClient:
             logger.warning("Attempting to subscribe to user deals without authentication")
         
         try:
-            params = {}
-            if markets:
-                params["market"] = markets
+            # CoinEx expects market_list parameter, empty array for all markets
+            market_list = markets if markets is not None else []
+            params = {"market_list": market_list}
             
             message = {
                 "method": "user_deals.subscribe",
@@ -214,7 +214,7 @@ class CoinExWebSocketClient:
             
             await self._send_message(message)
             self.subscriptions["user_deals"] = params
-            logger.info(f"Subscribed to user deals for markets: {markets}")
+            logger.info(f"Subscribed to user deals for markets: {market_list if market_list else 'ALL'}")
             return True
             
         except Exception as e:
@@ -232,14 +232,17 @@ class CoinExWebSocketClient:
             True if subscription successful, False otherwise
         """
         try:
+            # CoinEx expects market_list parameter for deals subscription too
+            params = {"market_list": markets}
+            
             message = {
                 "method": "deals.subscribe",
-                "params": {"market": markets},
+                "params": params,
                 "id": self.get_next_message_id()
             }
             
             await self._send_message(message)
-            self.subscriptions["deals"] = {"market": markets}
+            self.subscriptions["deals"] = params
             logger.info(f"Subscribed to market deals for: {markets}")
             return True
             
@@ -440,11 +443,11 @@ class CoinExWebSocketClient:
                 # Re-subscribe to previous subscriptions
                 for sub_type, params in self.subscriptions.items():
                     if sub_type == "order":
-                        await self.subscribe_orders(params.get("market"))
+                        await self.subscribe_orders(params.get("market_list"))
                     elif sub_type == "user_deals":
-                        await self.subscribe_user_deals(params.get("market"))
+                        await self.subscribe_user_deals(params.get("market_list"))
                     elif sub_type == "deals":
-                        await self.subscribe_market_deals(params["market"])
+                        await self.subscribe_market_deals(params.get("market_list", []))
                 
                 logger.info("WebSocket reconnection successful")
                 return True
