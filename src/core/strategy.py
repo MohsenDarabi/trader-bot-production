@@ -105,8 +105,12 @@ class DailyRangeStrategy:
                     return signal
             
             # Check if it's a new trading day
-            if not force and not self.market_data.is_new_trading_day(market):
-                logger.debug(f"Not a new trading day for {market}")
+            logger.info(f"🕐 Checking if it's a new trading day for {market} (force={force})")
+            is_new_day = self.market_data.is_new_trading_day(market)
+            logger.info(f"🕐 New trading day check result: {is_new_day}")
+            
+            if not force and not is_new_day:
+                logger.info(f"Not a new trading day for {market}, skipping signal generation")
                 return None
             
             logger.info(f"Generating new signal for {market} - getting previous day OHLC...")
