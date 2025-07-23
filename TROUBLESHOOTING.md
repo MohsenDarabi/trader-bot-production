@@ -117,13 +117,79 @@ params = {"market_list": ["BTCUSDT"]}
 
 ### Problem: WebSocket Disconnections After ~30 Seconds
 **Symptoms:**
-- Connection drops after idle period
+- Connection drops after idle period  
 - No automatic reconnection
 
 **Root Cause:**
 Missing or insufficient heartbeat/ping mechanism.
 
-**Current Status:** Needs improvement in heartbeat implementation.
+**Solution:**
+```python
+# Reduced heartbeat interval in config/settings.py
+WS_HEARTBEAT_INTERVAL = 20  # seconds (was 30)
+
+# Improved WebSocket connection parameters
+self.websocket = await websockets.connect(
+    COINEX_WS_URL,
+    ping_interval=None,  # Use custom heartbeat instead
+    ping_timeout=30,
+    close_timeout=10
+)
+
+# Enhanced heartbeat with proper logging
+async def _heartbeat(self):
+    while self.is_connected:
+        await asyncio.sleep(WS_HEARTBEAT_INTERVAL)
+        ping_message = {"method": "server.ping", "params": {}, "id": self.get_next_message_id()}
+        await self._send_message(ping_message)
+        logger.info(f"Sent WebSocket heartbeat #{count} - keeping connection alive")
+```
+
+**Verification:** WebSocket maintains connection for 60+ seconds, heartbeat messages logged every 20 seconds.
+
+### Problem: WebSocket Not Detecting Real-Time Orders  
+**Symptoms:**
+- WebSocket connects and authenticates successfully
+- Existing orders detected via REST API sync
+- New orders placed during connection are NOT detected
+- Order updates not received in real-time
+
+**Root Cause:**
+Critical message parsing bug - CoinEx sends data in `"data"` field but code expected `"params"` field.
+
+**Solution:**
+```python
+# BEFORE (incorrect)
+def _handle_subscription_update(self, message: Dict):
+    params = message.get("params", {})  # ❌ Wrong field
+    self.message_handlers[method](params)
+
+# AFTER (correct)  
+def _handle_subscription_update(self, message: Dict):
+    data = message.get("data", {})  # ✅ Correct field
+    self.message_handlers[method](data)
+
+# Also fix message structure expectations
+def _handle_order_update(self, data: Dict):
+    order_data = data.get("order", {})  # Single object, not array
+    # Process single order...
+```
+
+**CoinEx Message Structure:**
+```json
+{
+    "method": "order.update", 
+    "data": {
+        "event": "put", 
+        "order": {"order_id": 123, "market": "ETHUSDT", ...}
+    }
+}
+```
+
+**Verification:** 
+- See `📨 Received important message: order.update` in logs
+- Order details correctly extracted and processed
+- Real-time detection of order placement, fills, and cancellations
 
 ## Order Placement Problems
 
