@@ -1,0 +1,1 @@
+# Test suite for CoinEx trading bot
