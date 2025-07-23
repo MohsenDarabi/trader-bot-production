@@ -17,6 +17,7 @@ from config.settings import (
 )
 from src.exchange.auth import CoinExAuth
 from src.utils.logger import get_logger
+from src.utils.error_handling import handle_api_error, handle_network_error, handle_validation_error
 
 
 logger = get_logger(__name__)
@@ -157,13 +158,52 @@ class CoinExClient:
             logger.info(f"Raw response text: '{response.text}'")
             logger.info(f"Response headers: {dict(response.headers)}")
             
+            # Handle HTTP errors
+            if response.status_code >= 400:
+                context = {
+                    'method': method,
+                    'url': url,
+                    'status_code': response.status_code,
+                    'response_text': response.text[:500]
+                }
+                if response.status_code == 429:
+                    handle_api_error(
+                        Exception(f"Rate limit exceeded: {response.status_code}"),
+                        context
+                    )
+                elif response.status_code >= 500:
+                    handle_api_error(
+                        Exception(f"Server error: {response.status_code}"),
+                        context
+                    )
+                else:
+                    handle_api_error(
+                        Exception(f"HTTP error: {response.status_code}"),
+                        context
+                    )
+            
             if not response.text.strip():
-                logger.error("Server returned empty response")
+                context = {
+                    'method': method,
+                    'url': url,
+                    'status_code': response.status_code
+                }
+                handle_api_error(
+                    Exception("Server returned empty response"),
+                    context
+                )
                 raise ValueError(f"Server returned empty response. Status: {response.status_code}")
             
             try:
                 response_data = response.json()
             except Exception as json_error:
+                context = {
+                    'method': method,
+                    'url': url,
+                    'response_text': response.text[:500],
+                    'json_error': str(json_error)
+                }
+                handle_api_error(json_error, context)
                 logger.error(f"Failed to parse JSON response: {json_error}")
                 logger.error(f"Raw response text: '{response.text}'")
                 raise ValueError(f"Invalid JSON response from server: {response.text[:200]}")
@@ -171,15 +211,41 @@ class CoinExClient:
             # Check for API errors
             if response_data.get('code') != 0:
                 error_msg = response_data.get('message', 'Unknown error')
+                context = {
+                    'method': method,
+                    'url': url,
+                    'api_code': response_data.get('code'),
+                    'api_message': error_msg,
+                    'params': params,
+                    'data': data
+                }
+                handle_api_error(
+                    Exception(f"CoinEx API error: {error_msg}"),
+                    context
+                )
                 logger.error(f"API error: {error_msg}")
                 raise ValueError(f"CoinEx API error: {error_msg}")
             
             return response_data.get('data', {})
             
         except requests.RequestException as e:
+            context = {
+                'method': method,
+                'url': url,
+                'params': params,
+                'data': data,
+                'error_type': type(e).__name__
+            }
+            handle_network_error(e, context)
             logger.error(f"Request failed: {e}")
             raise
         except json.JSONDecodeError as e:
+            context = {
+                'method': method,
+                'url': url,
+                'response_text': response.text[:500] if 'response' in locals() else 'No response'
+            }
+            handle_api_error(e, context)
             logger.error(f"Failed to parse response: {e}")
             raise ValueError(f"Invalid response format: {e}")
     
@@ -255,6 +321,42 @@ class CoinExClient:
         Returns:
             Order details dictionary
         """
+        # Validate parameters
+        if not market:
+            handle_validation_error("Market symbol is required")
+            raise ValueError("Market symbol is required")
+        
+        if side not in ['buy', 'sell']:
+            handle_validation_error(f"Invalid side: {side}. Must be 'buy' or 'sell'")
+            raise ValueError(f"Invalid side: {side}. Must be 'buy' or 'sell'")
+        
+        if order_type not in ['limit', 'market']:
+            handle_validation_error(f"Invalid order type: {order_type}. Must be 'limit' or 'market'")
+            raise ValueError(f"Invalid order type: {order_type}. Must be 'limit' or 'market'")
+        
+        if order_type == 'limit' and not price:
+            handle_validation_error("Price is required for limit orders")
+            raise ValueError("Price is required for limit orders")
+        
+        try:
+            amount_float = float(amount)
+            if amount_float <= 0:
+                handle_validation_error(f"Invalid amount: {amount}. Must be positive")
+                raise ValueError(f"Invalid amount: {amount}. Must be positive")
+        except ValueError:
+            handle_validation_error(f"Invalid amount format: {amount}")
+            raise ValueError(f"Invalid amount format: {amount}")
+        
+        if price:
+            try:
+                price_float = float(price)
+                if price_float <= 0:
+                    handle_validation_error(f"Invalid price: {price}. Must be positive")
+                    raise ValueError(f"Invalid price: {price}. Must be positive")
+            except ValueError:
+                handle_validation_error(f"Invalid price format: {price}")
+                raise ValueError(f"Invalid price format: {price}")
+        
         data = {
             'market': market,
             'market_type': 'FUTURES',
@@ -271,6 +373,9 @@ class CoinExClient:
         
         if is_hide:
             data['is_hide'] = is_hide
+        
+        # Log order placement attempt
+        logger.info(f"Placing {side} order: {amount} {market} @ {price if price else 'market'}")
         
         return self._request('POST', '/v2/futures/order', data=data)
     
