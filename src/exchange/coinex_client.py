@@ -220,7 +220,7 @@ class CoinExClient:
     
     def place_order(self, market: str, side: str, amount: str, 
                    order_type: str = 'limit', price: Optional[str] = None,
-                   client_id: Optional[str] = None) -> Dict:
+                   client_id: Optional[str] = None, is_hide: bool = False) -> Dict:
         """
         Place a futures order
         
@@ -231,6 +231,7 @@ class CoinExClient:
             order_type: Order type ('limit' or 'market')
             price: Order price (required for limit orders)
             client_id: Custom order ID for tracking
+            is_hide: Whether to hide order from public order book
             
         Returns:
             Order details dictionary
@@ -248,6 +249,9 @@ class CoinExClient:
         
         if client_id:
             data['client_id'] = client_id
+        
+        if is_hide:
+            data['is_hide'] = is_hide
         
         return self._request('POST', '/futures/order', data=data)
     

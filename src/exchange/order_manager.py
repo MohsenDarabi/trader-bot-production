@@ -117,7 +117,7 @@ class OrderManager:
         return client_id
     
     def place_buy_order(self, market: str, amount: float, price: float,
-                       position_size: float) -> Optional[Order]:
+                       position_size: float, is_hide: bool = True) -> Optional[Order]:
         """
         Place a buy order with profitability validation
         
@@ -126,6 +126,7 @@ class OrderManager:
             amount: Order amount in base currency
             price: Limit price
             position_size: Position size for validation
+            is_hide: Whether to hide order from public order book
             
         Returns:
             Order object if successful, None otherwise
@@ -143,7 +144,8 @@ class OrderManager:
                 amount=str(amount),
                 order_type='limit',
                 price=str(price),
-                client_id=client_id
+                client_id=client_id,
+                is_hide=is_hide
             )
             
             # Create order object
@@ -172,7 +174,7 @@ class OrderManager:
     
     def place_sell_order(self, market: str, amount: float, price: float,
                         position_entry_price: float, 
-                        position_entry_cost: float) -> Optional[Order]:
+                        position_entry_cost: float, is_hide: bool = True) -> Optional[Order]:
         """
         Place a sell order with profitability validation
         
@@ -182,6 +184,7 @@ class OrderManager:
             price: Limit price
             position_entry_price: Average entry price of position
             position_entry_cost: Total entry cost including fees
+            is_hide: Whether to hide order from public order book
             
         Returns:
             Order object if successful, None otherwise
@@ -212,7 +215,8 @@ class OrderManager:
                 amount=str(amount),
                 order_type='limit',
                 price=str(price),
-                client_id=client_id
+                client_id=client_id,
+                is_hide=is_hide
             )
             
             # Create order object
