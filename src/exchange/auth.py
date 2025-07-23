@@ -125,5 +125,5 @@ class CoinExAuth:
         return {
             'access_id': self.access_id,
             'signed_str': signature,
-            'timestamp': timestamp
+            'timestamp': int(timestamp)  # WebSocket expects integer timestamp
         }

@@ -316,16 +316,20 @@ class CoinExWebSocketClient:
     
     def _handle_auth_response(self, message: Dict) -> None:
         """Handle authentication response"""
+        code = message.get("code")
+        msg = message.get("message", "")
         error = message.get("error")
-        result = message.get("result")
         
-        if error:
-            logger.error(f"Authentication failed: {error}")
-            self.is_authenticated = False
-        elif result is not None:
-            # CoinEx returns result for successful operations
+        # CoinEx uses code 0 for success
+        if code == 0:
             logger.info("WebSocket authentication successful")
             self.is_authenticated = True
+        elif error:
+            logger.error(f"Authentication failed: {error}")
+            self.is_authenticated = False
+        elif code is not None and code != 0:
+            logger.error(f"Authentication failed with code {code}: {msg}")
+            self.is_authenticated = False
         else:
             logger.warning(f"Unexpected auth response: {message}")
             self.is_authenticated = False
@@ -353,21 +357,27 @@ class CoinExWebSocketClient:
         """Handle generic responses"""
         # Check if this is a response to our request
         msg_id = message.get("id")
+        code = message.get("code")
+        msg_text = message.get("message", "")
         error = message.get("error")
-        result = message.get("result")
         
         if msg_id is not None:
             # This is a response to a specific request
-            if error:
+            if code is not None:
+                if code == 0:
+                    logger.debug(f"Request {msg_id} successful")
+                    
+                    # Check if this was an auth request by looking at recent message IDs
+                    # (auth requests typically have low IDs)
+                    if msg_id <= 5 and not self.is_authenticated:
+                        logger.info("Authentication confirmation received")
+                        self.is_authenticated = True
+                else:
+                    logger.error(f"Request {msg_id} failed with code {code}: {msg_text}")
+            elif error:
                 logger.error(f"Request {msg_id} failed: {error}")
             else:
-                logger.debug(f"Request {msg_id} successful: {result}")
-                
-                # Check if this was an auth request by looking at recent message IDs
-                # (auth requests typically have low IDs)
-                if msg_id <= 5 and not self.is_authenticated and result is not None:
-                    logger.info("Late authentication confirmation received")
-                    self.is_authenticated = True
+                logger.debug(f"Request {msg_id} response: {message}")
         else:
             logger.debug(f"Generic WebSocket response: {message}")
     
