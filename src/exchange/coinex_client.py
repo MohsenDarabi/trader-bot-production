@@ -307,7 +307,7 @@ class CoinExClient:
         Get list of pending orders
         
         Args:
-            market: Optional market filter
+            market: Optional market filter (applied client-side due to API signature issues)
             page: Page number
             limit: Results per page
             
@@ -323,24 +323,20 @@ class CoinExClient:
         if limit is not None:
             params['limit'] = limit
         
-        if market:
-            params['market'] = market
+        # NOTE: The 'market' parameter causes signature issues with CoinEx API
+        # We'll fetch all orders and filter client-side if market is specified
         
-        # For pending orders, we need the full response including pagination
-        # So we'll handle this specially instead of using _request
+        # Wait for rate limiter
+        self.rate_limiter.wait_if_needed()
+        
+        # Construct full URL
         url = urljoin(self.base_url, '/v2/futures/pending-order')
-        
-        kwargs = {
-            'timeout': REQUEST_TIMEOUT,
-            'params': params
-        }
         
         # Add authentication headers
         headers = self.auth.get_auth_headers('GET', '/v2/futures/pending-order', params=params)
-        kwargs['headers'] = headers
         
         try:
-            response = self.session.request('GET', url, **kwargs)
+            response = self.session.request('GET', url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
             response_data = response.json()
             
             # Check for API errors
@@ -348,6 +344,14 @@ class CoinExClient:
                 error_msg = response_data.get('message', 'Unknown error')
                 logger.error(f"API error: {error_msg}")
                 raise ValueError(f"CoinEx API error: {error_msg}")
+            
+            # Apply client-side market filter if specified
+            if market and response_data.get('data'):
+                filtered_orders = [order for order in response_data['data'] if order.get('market') == market]
+                response_data['data'] = filtered_orders
+                # Update pagination count
+                if 'pagination' in response_data:
+                    response_data['pagination']['total'] = len(filtered_orders)
             
             # Return full response for pending orders (includes pagination)
             return response_data
