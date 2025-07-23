@@ -299,7 +299,7 @@ class CoinExClient:
         else:
             raise ValueError("Either order_id or client_id must be provided")
         
-        return self._request('DELETE', '/v2/futures/order', data=data)
+        return self._request('POST', '/v2/futures/cancel-order', data=data)
     
     def get_pending_orders(self, market: Optional[str] = None, 
                           page: int = 1, limit: Optional[int] = None) -> Dict:
