@@ -87,9 +87,11 @@ class CoinExWebSocketClient:
             logger.info(f"Connecting to CoinEx WebSocket: {COINEX_WS_URL}")
             self.websocket = await websockets.connect(
                 COINEX_WS_URL,
-                ping_interval=20,
-                ping_timeout=10,
-                close_timeout=10
+                ping_interval=None,  # Use our custom application-level heartbeat instead
+                ping_timeout=30,
+                close_timeout=10,
+                max_size=10**7,  # 10MB max message size
+                compression=None  # Disable compression, we handle gzip manually
             )
             self.is_connected = True
             logger.info("WebSocket connection established")
@@ -293,6 +295,9 @@ class CoinExWebSocketClient:
                     elif method == "server.sign":
                         # Authentication response
                         self._handle_auth_response(message)
+                    elif method == "server.pong":
+                        # Heartbeat pong response
+                        self._handle_pong_response(message)
                     elif method in ["order.update", "user_deals.update", "deals.update", "depth.update"]:
                         # Subscription updates
                         self._handle_subscription_update(message)
@@ -351,6 +356,10 @@ class CoinExWebSocketClient:
         else:
             logger.debug(f"No handler registered for method: {method}")
     
+    def _handle_pong_response(self, message: Dict) -> None:
+        """Handle pong response to heartbeat"""
+        logger.debug("Received heartbeat pong response - connection alive")
+    
     def _handle_error_response(self, message: Dict) -> None:
         """Handle error responses"""
         error = message.get("error", {})
@@ -386,10 +395,12 @@ class CoinExWebSocketClient:
     
     async def _heartbeat(self) -> None:
         """Send periodic heartbeat to keep connection alive"""
+        heartbeat_count = 0
         while self.is_connected:
             try:
                 await asyncio.sleep(WS_HEARTBEAT_INTERVAL)
                 if self.is_connected and self.websocket:
+                    heartbeat_count += 1
                     # Send ping message
                     ping_message = {
                         "method": "server.ping",
@@ -397,10 +408,15 @@ class CoinExWebSocketClient:
                         "id": self.get_next_message_id()
                     }
                     await self._send_message(ping_message)
-                    logger.debug("Sent WebSocket heartbeat")
+                    logger.info(f"Sent WebSocket heartbeat #{heartbeat_count} - keeping connection alive")
+                else:
+                    logger.debug("Heartbeat skipped - WebSocket not connected")
+                    break
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
                 break
+        
+        logger.info("Heartbeat task ended")
     
     async def disconnect(self) -> None:
         """Disconnect from WebSocket server"""

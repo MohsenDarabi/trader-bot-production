@@ -47,7 +47,7 @@ SHOW_DEBUG_INFO = os.getenv('SHOW_DEBUG_INFO', 'False').lower() == 'true'
 
 # WebSocket Settings
 WS_RECONNECT_DELAY = 5  # seconds
-WS_HEARTBEAT_INTERVAL = 30  # seconds
+WS_HEARTBEAT_INTERVAL = 20  # seconds
 
 # Telegram Configuration (Low Priority - Only after core features)
 TELEGRAM_ENABLED = os.getenv('TELEGRAM_ENABLED', 'False').lower() == 'true'
