@@ -251,14 +251,14 @@ class DailyRangeBot:
     
     async def _check_exit_opportunities(self, market: str, signal: TradingSignal):
         """Check for profitable exit opportunities"""
-        positions = self.position_manager.get_positions_for_market(market)
+        position = self.position_manager.get_position(market)
         
-        for position in positions:
+        if position:
             try:
                 # Check if position is profitable for exit
                 current_price = self.market_data.get_current_price(market)
                 if not current_price:
-                    continue
+                    return
                 
                 # Determine exit price based on position side
                 exit_price = signal.sell_price if position.side.value == 'buy' else signal.buy_price
@@ -306,7 +306,7 @@ class DailyRangeBot:
             return False
         
         # Check if we already have pending buy orders near this price
-        active_orders = self.order_manager.get_active_orders_for_market(market)
+        active_orders = self.order_manager.get_pending_orders(market)
         for order in active_orders:
             if (order.side.value == 'buy' and 
                 abs(order.price - signal.buy_price) / signal.buy_price < 0.01):  # Within 1%

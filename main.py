@@ -106,7 +106,7 @@ class TradingBotManager:
                 
                 signals_table.add_row("Buy Signal", f"${signals.buy_price:,.2f}", "Active")
                 signals_table.add_row("Sell Signal", f"${signals.sell_price:,.2f}", "Active")
-                signals_table.add_row("Range Value", f"${signals.range_value:,.2f}", f"Div by {signals.range_divisor}")
+                signals_table.add_row("Range Value", f"${signals.range_value:,.2f}", "Div by 4")
                 
                 layout["signals"].update(Panel(signals_table))
             else:
