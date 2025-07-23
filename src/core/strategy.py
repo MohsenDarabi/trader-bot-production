@@ -94,6 +94,7 @@ class DailyRangeStrategy:
             Trading signal or None if not a new day
         """
         try:
+            logger.info(f"🎯 Starting signal generation for {market}")
             # Check if we already have a signal for today
             today = datetime.now(timezone.utc).date().isoformat()
             
