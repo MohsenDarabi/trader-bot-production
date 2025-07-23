@@ -501,7 +501,7 @@ class DailyRangeBot:
             
             # Update position and order counts
             self.status.total_positions = len(self.position_manager.get_all_positions())
-            self.status.total_orders = len(self.order_manager.get_all_active_orders())
+            self.status.total_orders = len(self.order_manager.get_pending_orders())
             
         except Exception as e:
             logger.error(f"Error updating account status: {e}")
@@ -580,7 +580,7 @@ class DailyRangeBot:
     
     def get_active_orders(self) -> List:
         """Get all active orders"""
-        return self.order_manager.get_all_active_orders()
+        return self.order_manager.get_pending_orders()
     
     def get_status(self) -> BotStatus:
         """Get current bot status"""
