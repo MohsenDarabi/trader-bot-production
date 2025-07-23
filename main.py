@@ -25,6 +25,7 @@ from src.core.trading_bot import DailyRangeBot
 from src.utils.logger import get_logger
 from config.settings import validate_config, is_test_mode, get_position_size_mode
 from src.utils.asset_selector import AssetSelector
+from process_lock import ProcessLock
 
 
 logger = get_logger(__name__)
@@ -285,9 +286,11 @@ Mode: {get_position_size_mode()} ({'Test Mode - Minimum Orders' if is_test_mode(
 
 
 if __name__ == "__main__":
-    try:
-        exit_code = asyncio.run(main())
-        sys.exit(exit_code)
-    except KeyboardInterrupt:
-        console.print("\n👋 Goodbye!", style="blue")
-        sys.exit(0)
+    # Ensure only one instance runs at a time
+    with ProcessLock("main_trading_bot.lock"):
+        try:
+            exit_code = asyncio.run(main())
+            sys.exit(exit_code)
+        except KeyboardInterrupt:
+            console.print("\n👋 Goodbye!", style="blue")
+            sys.exit(0)

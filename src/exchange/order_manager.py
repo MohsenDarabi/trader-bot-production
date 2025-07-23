@@ -200,8 +200,7 @@ class OrderManager:
             return None
     
     def place_sell_order(self, market: str, amount: float, price: float,
-                        position_entry_price: float, 
-                        position_entry_cost: float, is_hide: bool = True) -> Optional[Order]:
+                        position_size: float, is_hide: bool = True) -> Optional[Order]:
         """
         Place a sell order with profitability validation
         
@@ -209,24 +208,13 @@ class OrderManager:
             market: Market symbol
             amount: Order amount in base currency
             price: Limit price
-            position_entry_price: Average entry price of position
-            position_entry_cost: Total entry cost including fees
+            position_size: Position size for validation
             is_hide: Whether to hide order from public order book
             
         Returns:
             Order object if successful, None otherwise
         """
-        # Validate profitability before placing
-        profit_check = self.validator.is_position_profitable(
-            entry_price=position_entry_price,
-            quantity=amount,
-            sell_price=price,
-            entry_cost=position_entry_cost
-        )
-        
-        if not profit_check.is_profitable:
-            logger.warning(f"Sell order rejected: {profit_check.reason}")
-            return None
+        # Profitability validation is handled by the trading bot before calling this method
         
         # Generate client_id
         client_id = self.generate_client_id(market, OrderSide.SELL)
