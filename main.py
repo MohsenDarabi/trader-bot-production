@@ -199,8 +199,9 @@ class TradingBotManager:
             
             self.console.print(f"💰 Account Balance: ${account_balance:.2f} USDT", style="green")
             
-            # For now, use BTCUSDT as default, but allow user to change
-            self.selected_market = "BTCUSDT"
+            # Get market from command line argument or use default
+            import sys
+            self.selected_market = sys.argv[1] if len(sys.argv) > 1 else "BTCUSDT"
             self.console.print(f"📈 Selected Market: {self.selected_market}", style="cyan")
             
             # Initialize market for trading

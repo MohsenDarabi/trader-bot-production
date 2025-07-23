@@ -62,8 +62,12 @@ echo "🤖 Starting bot..."
 echo "   Press Ctrl+C to stop gracefully"
 echo
 
-# Start the bot
-python3 main.py
+# Start the bot with optional market argument
+# Usage: ./start_bot.sh [MARKET]
+# Examples: ./start_bot.sh ETHUSDT
+#          ./start_bot.sh BTCUSDT
+#          ./start_bot.sh (defaults to BTCUSDT)
+python3 main.py ${1:-BTCUSDT}
 
 echo
 echo "👋 Bot stopped. Goodbye!"
