@@ -9,6 +9,9 @@ from dataclasses import dataclass
 
 from src.exchange.coinex_client import CoinExClient
 from src.exchange.order_manager import OrderManager
+from src.exchange.websocket_client import CoinExWebSocketClient
+from src.exchange.order_tracker import OrderTracker, OrderSide
+from src.core.order_pairing_manager import OrderPairingManager
 from src.core.position_manager import PositionManager
 from src.core.profitability import ProfitabilityValidator
 from src.data.market_data import MarketDataManager
@@ -64,6 +67,11 @@ class DailyRangeBot:
         self.position_sizer: Optional[PositionSizer] = None
         self.recovery: Optional[StartupRecovery] = None
         
+        # New WebSocket and order tracking components
+        self.websocket_client: Optional[CoinExWebSocketClient] = None
+        self.order_tracker: Optional[OrderTracker] = None
+        self.pairing_manager: Optional[OrderPairingManager] = None
+        
         self.status = BotStatus()
         self.trading_markets: List[str] = []
         self.last_signal_generation: Dict[str, datetime] = {}
@@ -90,6 +98,28 @@ class DailyRangeBot:
             self.order_manager = OrderManager(self.client, validator)
             self.position_sizer = PositionSizer(self.market_data, self.position_manager)
             self.recovery = StartupRecovery(self.client, self.database)
+            
+            # Initialize WebSocket and order tracking components
+            self.websocket_client = CoinExWebSocketClient()
+            self.order_tracker = OrderTracker(self.websocket_client, self.client)
+            self.pairing_manager = OrderPairingManager(
+                self.order_tracker, self.order_manager, self.client
+            )
+            
+            # Start WebSocket connection in background
+            logger.info("Starting WebSocket connection for real-time order tracking...")
+            self.websocket_client.start_background_thread()
+            
+            # Wait a moment for WebSocket to connect
+            await asyncio.sleep(2)
+            
+            # Subscribe to order and user deals updates
+            if self.websocket_client.is_connected:
+                await self.websocket_client.subscribe_orders()
+                await self.websocket_client.subscribe_user_deals()
+                logger.info("Subscribed to WebSocket order tracking")
+            else:
+                logger.warning("WebSocket not connected, order tracking may be limited")
             
             # Perform startup recovery
             logger.info("Performing startup recovery...")
@@ -124,6 +154,18 @@ class DailyRangeBot:
             if not market_info:
                 raise ValueError(f"Market {market} not found or not available")
             
+            # Configure pairing rules for this market
+            # Multiple sell levels based on the daily range strategy
+            sell_price_levels = [1.002, 1.005, 1.010, 1.015, 1.020]  # 0.2%, 0.5%, 1%, 1.5%, 2% above buy price
+            self.pairing_manager.configure_pairing_rule(
+                market=market,
+                sell_price_levels=sell_price_levels,
+                max_age_minutes=120,  # 2 hours max age for unmatched fills
+                min_fill_amount=0.001  # Minimum fill to trigger sell orders
+            )
+            
+            logger.info(f"Configured pairing rules for {market} with {len(sell_price_levels)} sell levels")
+            
             # Generate initial signal if needed
             await self._check_and_generate_signals(market)
     
@@ -144,6 +186,9 @@ class DailyRangeBot:
                 (now - self._last_positions_sync).seconds > 30):
                 await self._sync_positions()
                 self._last_positions_sync = now
+            
+            # Process unmatched buy fills periodically
+            await self._process_pairing_tasks()
             
             # Process each trading market
             for market in self.trading_markets:
@@ -301,7 +346,20 @@ class DailyRangeBot:
                     position_size=position_size.size_usdt,
                     is_hide=True  # Hidden orders for production
                 )
+                
+                # Track the buy order for automatic sell pairing
+                if order:
+                    self.order_tracker.track_order(
+                        order_id=str(order.order_id),
+                        client_id=order.client_id,
+                        market=market,
+                        side=OrderSide.BUY,
+                        amount=position_size.quantity,
+                        price=price
+                    )
+                    logger.info(f"Started tracking buy order {order.order_id} for automatic sell pairing")
             else:
+                # For sell orders, use the traditional approach since this is for closing positions
                 order = self.order_manager.place_sell_order(
                     market=market,
                     amount=position_size.quantity,
@@ -309,6 +367,17 @@ class DailyRangeBot:
                     position_size=position_size.size_usdt,
                     is_hide=True
                 )
+                
+                # Track the sell order
+                if order:
+                    self.order_tracker.track_order(
+                        order_id=str(order.order_id),
+                        client_id=order.client_id,
+                        market=market,
+                        side=OrderSide.SELL,
+                        amount=position_size.quantity,
+                        price=price
+                    )
             
             if order:
                 logger.info(f"Placed {side} order for {market}: "
@@ -322,11 +391,31 @@ class DailyRangeBot:
             logger.error(f"Error placing {side} order for {market}: {e}", exc_info=True)
     
     async def _place_exit_order(self, position, exit_price: float):
-        """Place an exit order for a position"""
+        """
+        Place an exit order for a position
+        NOTE: With the new pairing system, most sell orders are automatically created
+        when buy orders fill. This method is kept for manual position closure if needed.
+        """
         try:
             side = 'sell' if position.side.value == 'buy' else 'buy'
             
+            # Check if we have automatic sell orders already in place for this position
             if side == 'sell':
+                # Look for existing sell orders for this market
+                existing_sells = [
+                    order for order in self.order_tracker.tracked_orders.values()
+                    if order.market == position.market and order.side == OrderSide.SELL
+                    and order.status.value in ['pending', 'partial']
+                ]
+                
+                if existing_sells:
+                    total_sell_amount = sum(order.remaining_amount for order in existing_sells)
+                    if total_sell_amount >= position.quantity * 0.95:  # Allow 5% tolerance
+                        logger.info(f"Position {position.market} already has sufficient sell orders: "
+                                  f"{total_sell_amount:.6f} >= {position.quantity:.6f}")
+                        return
+                
+                # Place manual exit order if needed
                 order = self.order_manager.place_sell_order(
                     market=position.market,
                     amount=position.quantity,
@@ -334,7 +423,19 @@ class DailyRangeBot:
                     position_size=position.quantity * exit_price,
                     is_hide=True
                 )
+                
+                # Track the manual exit order
+                if order:
+                    self.order_tracker.track_order(
+                        order_id=str(order.order_id),
+                        client_id=order.client_id,
+                        market=position.market,
+                        side=OrderSide.SELL,
+                        amount=position.quantity,
+                        price=exit_price
+                    )
             else:
+                # For buy orders (closing short positions - rare in this strategy)
                 order = self.order_manager.place_buy_order(
                     market=position.market,
                     amount=position.quantity,
@@ -342,15 +443,46 @@ class DailyRangeBot:
                     position_size=position.quantity * exit_price,
                     is_hide=True
                 )
+                
+                if order:
+                    self.order_tracker.track_order(
+                        order_id=str(order.order_id),
+                        client_id=order.client_id,
+                        market=position.market,
+                        side=OrderSide.BUY,
+                        amount=position.quantity,
+                        price=exit_price
+                    )
             
             if order:
-                logger.info(f"Placed exit order for {position.market}: "
+                logger.info(f"Placed manual exit order for {position.market}: "
                           f"Side={side}, Price=${exit_price:.2f}, Amount={position.quantity:.6f}")
             else:
                 logger.error(f"Failed to place exit order for {position.market}")
                 
         except Exception as e:
             logger.error(f"Error placing exit order: {e}", exc_info=True)
+    
+    async def _process_pairing_tasks(self):
+        """Process pairing-related tasks periodically"""
+        try:
+            # Process unmatched buy fills
+            unmatched_count = await self.pairing_manager.process_unmatched_fills()
+            if unmatched_count > 0:
+                logger.info(f"Processed {unmatched_count} unmatched buy fills")
+            
+            # Periodic emergency balance check (every 10 minutes)
+            now = datetime.now(timezone.utc)
+            if not hasattr(self, '_last_balance_check'):
+                self._last_balance_check = now
+            elif (now - self._last_balance_check).seconds > 600:  # 10 minutes
+                imbalanced_markets = await self.pairing_manager.emergency_balance_check()
+                if imbalanced_markets:
+                    logger.error(f"CRITICAL: Position imbalances detected in markets: {imbalanced_markets}")
+                self._last_balance_check = now
+                
+        except Exception as e:
+            logger.error(f"Error in pairing tasks: {e}")
     
     async def _update_account_status(self):
         """Update account balance and status"""
@@ -374,8 +506,42 @@ class DailyRangeBot:
         try:
             self.position_manager.sync_with_exchange()
             self.order_manager.sync_with_exchange()
+            
+            # Sync existing orders with order tracker
+            await self.order_tracker.sync_existing_orders()
+            
         except Exception as e:
             logger.error(f"Error syncing with exchange: {e}")
+    
+    def get_pairing_status(self) -> Dict[str, Any]:
+        """Get current pairing system status"""
+        try:
+            if not self.pairing_manager or not self.order_tracker:
+                return {"error": "Pairing system not initialized"}
+            
+            pairing_stats = self.pairing_manager.get_pairing_statistics()
+            tracker_stats = self.order_tracker.get_statistics()
+            
+            return {
+                "pairing_enabled": pairing_stats["auto_pairing_enabled"],
+                "websocket_connected": self.websocket_client.is_connected if self.websocket_client else False,
+                "websocket_authenticated": self.websocket_client.is_authenticated if self.websocket_client else False,
+                "total_tracked_orders": tracker_stats["total_orders"],
+                "buy_orders": tracker_stats["buy_orders"],
+                "sell_orders": tracker_stats["sell_orders"],
+                "filled_orders": tracker_stats["filled_orders"],
+                "order_pairs": tracker_stats["total_pairs"],
+                "complete_pairs": tracker_stats["complete_pairs"],
+                "unmatched_pairs": tracker_stats["unmatched_pairs"],
+                "pairs_created": pairing_stats["total_pairs_created"],
+                "sell_orders_placed": pairing_stats["total_sell_orders_placed"],
+                "failed_pairings": pairing_stats["failed_pairings"],
+                "success_rate": pairing_stats["success_rate"],
+                "configured_markets": pairing_stats["configured_markets"]
+            }
+        except Exception as e:
+            logger.error(f"Error getting pairing status: {e}")
+            return {"error": str(e)}
     
     def _save_current_state(self):
         """Save current bot state to database"""
