@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from src.exchange.order_tracker import OrderTracker, OrderFill, TrackedOrder, OrderPair, OrderSide
 from src.exchange.order_manager import OrderManager
 from src.exchange.coinex_client import CoinExClient
-from src.models.position import Position
+from src.core.position_manager import Position
 from src.utils.logger import get_logger
 
 
