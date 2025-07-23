@@ -12,7 +12,7 @@ load_dotenv()
 # CoinEx API Configuration
 COINEX_ACCESS_ID = os.getenv('COINEX_API_KEY')
 COINEX_SECRET_KEY = os.getenv('COINEX_API_SECRET')
-COINEX_BASE_URL = 'https://api.coinex.com/v2'
+COINEX_BASE_URL = 'https://api.coinex.com'
 COINEX_WS_URL = 'wss://socket.coinex.com/v2/futures'
 
 # Trading Strategy Parameters

@@ -268,13 +268,18 @@ class SafeTestRunner:
     def _test_asset_selection(self) -> bool:
         """Test asset selection"""
         try:
-            # For testing, we'll use BTCUSDT as default or let user select
-            if Confirm.ask("Use BTCUSDT for testing? (recommended)", default=True):
-                self.selected_market = "BTCUSDT"
+            # Check if market was provided via command line
+            if hasattr(self, 'cli_market') and self.cli_market:
+                self.selected_market = self.cli_market
+                self.console.print(f"Using market from command line: {self.selected_market}", style="green")
             else:
-                self.selected_market = self.asset_selector.select_trading_asset(self.account_balance)
-                if not self.selected_market:
-                    return False
+                # For testing, we'll use BTCUSDT as default or let user select
+                if Confirm.ask("Use BTCUSDT for testing? (recommended)", default=True):
+                    self.selected_market = "BTCUSDT"
+                else:
+                    self.selected_market = self.asset_selector.select_trading_asset(self.account_balance)
+                    if not self.selected_market:
+                        return False
             
             self.console.print(f"Selected market: {self.selected_market}", style="green")
             return True
@@ -423,14 +428,20 @@ class SafeTestRunner:
             if not Confirm.ask("Proceed with safe test order placement?"):
                 return False
             
-            # Place the safe test order
-            order = self.order_manager.place_buy_order(
-                market=self.selected_market,
-                amount=test_quantity,
-                price=safe_price,
-                position_size=min_order_value,
-                is_hide=True  # Hidden order as requested
-            )
+            # Place the safe test order with timeout protection
+            self.console.print("🔄 Calling order placement API...", style="yellow")
+            
+            try:
+                order = self.order_manager.place_buy_order(
+                    market=self.selected_market,
+                    amount=test_quantity,
+                    price=safe_price,
+                    position_size=min_order_value,
+                    is_hide=True  # Hidden order as requested
+                )
+            except Exception as api_error:
+                self.console.print(f"❌ Order placement failed: {api_error}", style="red")
+                return False
             
             if order:
                 self.test_order_id = order.client_id
@@ -670,7 +681,12 @@ This script tests all bot functionality with real API calls but uses safe,
 non-executable orders that won't risk any capital.
 
 Usage:
-    python test_runner.py
+    python test_runner.py [MARKET_SYMBOL]
+    
+Examples:
+    python test_runner.py BTCUSDT
+    python test_runner.py ETHUSDT
+    python test_runner.py  # Interactive selection
 
 Requirements:
     - Valid .env file with CoinEx API credentials
@@ -690,8 +706,16 @@ price to ensure they won't execute.
         """)
         return
     
+    # Parse command line arguments
+    market_symbol = None
+    if len(sys.argv) > 1:
+        market_symbol = sys.argv[1].upper()
+        print(f"🎯 Using market from command line: {market_symbol}")
+    
     # Run the tests
     runner = SafeTestRunner()
+    if market_symbol:
+        runner.cli_market = market_symbol
     runner.run_all_tests()
 
 

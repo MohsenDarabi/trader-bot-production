@@ -106,7 +106,9 @@ class CoinExClient:
             ValueError: On API error response
         """
         # Wait if rate limit would be exceeded
+        logger.info("Checking rate limiter...")
         self.rate_limiter.wait_if_needed()
+        logger.info("Rate limiter check complete")
         
         # Construct full URL
         url = urljoin(self.base_url, endpoint)
@@ -128,6 +130,7 @@ class CoinExClient:
         
         # Add authentication headers if required
         if auth_required:
+            logger.info("Generating authentication headers...")
             headers = self.auth.get_auth_headers(
                 method=method,
                 path=endpoint,
@@ -135,19 +138,35 @@ class CoinExClient:
                 body=body_str
             )
             kwargs['headers'] = headers
+            logger.info("Authentication headers generated successfully")
         
         # Log request
-        logger.debug(f"{method} {url} params={params} auth={auth_required}")
+        logger.info(f"Making {method} request to {url} with params={params} auth={auth_required}")
+        logger.info(f"Request kwargs: {kwargs}")
         
         try:
             # Make request
+            logger.info("About to call session.request() - this is where hangs typically occur")
             response = self.session.request(method, url, **kwargs)
+            logger.info(f"Received response with status {response.status_code}")
             
             # Log response
             logger.debug(f"Response {response.status_code}: {response.text[:200]}")
             
             # Parse response
-            response_data = response.json()
+            logger.info(f"Raw response text: '{response.text}'")
+            logger.info(f"Response headers: {dict(response.headers)}")
+            
+            if not response.text.strip():
+                logger.error("Server returned empty response")
+                raise ValueError(f"Server returned empty response. Status: {response.status_code}")
+            
+            try:
+                response_data = response.json()
+            except Exception as json_error:
+                logger.error(f"Failed to parse JSON response: {json_error}")
+                logger.error(f"Raw response text: '{response.text}'")
+                raise ValueError(f"Invalid JSON response from server: {response.text[:200]}")
             
             # Check for API errors
             if response_data.get('code') != 0:

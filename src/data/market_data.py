@@ -169,7 +169,13 @@ class MarketDataManager:
             Current price
         """
         try:
-            ticker = self.client.get_ticker(market)
+            ticker_response = self.client.get_ticker(market)
+            # CoinEx ticker returns a list with one item
+            if isinstance(ticker_response, list) and ticker_response:
+                ticker = ticker_response[0]
+            else:
+                ticker = ticker_response
+            
             price = float(ticker.get('last', 0))
             
             if price <= 0:

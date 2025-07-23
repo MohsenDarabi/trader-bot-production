@@ -2,6 +2,7 @@
 Order Management System with client_id duplicate prevention
 """
 import time
+import signal
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass
@@ -13,6 +14,16 @@ from src.utils.logger import get_logger
 
 
 logger = get_logger(__name__)
+
+
+class TimeoutError(Exception):
+    """Custom timeout error"""
+    pass
+
+
+def timeout_handler(signum, frame):
+    """Signal handler for timeout"""
+    raise TimeoutError("Operation timed out")
 
 
 class OrderStatus(Enum):
@@ -137,16 +148,32 @@ class OrderManager:
         logger.info(f"Placing buy order: {market} {amount} @ ${price:.2f} [{client_id}]")
         
         try:
-            # Place order on exchange
-            response = self.client.place_order(
-                market=market,
-                side='buy',
-                amount=str(amount),
-                order_type='limit',
-                price=str(price),
-                client_id=client_id,
-                is_hide=is_hide
-            )
+            # Place order on exchange with detailed logging and timeout protection
+            logger.info(f"About to call client.place_order() with params: market={market}, side=buy, amount={amount}, price={price}, client_id={client_id}, is_hide={is_hide}")
+            
+            # Set up timeout protection (45 seconds)
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(45)
+            
+            try:
+                response = self.client.place_order(
+                    market=market,
+                    side='buy',
+                    amount=str(amount),
+                    order_type='limit',
+                    price=str(price),
+                    client_id=client_id,
+                    is_hide=is_hide
+                )
+                
+                # Clear the alarm
+                signal.alarm(0)
+                logger.info(f"Received response from place_order: {response}")
+                
+            except TimeoutError:
+                logger.error("Order placement timed out after 45 seconds")
+                signal.alarm(0)  # Clear the alarm
+                raise Exception("Order placement timed out - possible API or network issue")
             
             # Create order object
             order = Order(
