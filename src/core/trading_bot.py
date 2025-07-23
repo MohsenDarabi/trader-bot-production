@@ -106,20 +106,25 @@ class DailyRangeBot:
                 self.order_tracker, self.order_manager, self.client
             )
             
-            # Start WebSocket connection in background
+            # Initialize WebSocket connection using proven pattern from tests
             logger.info("Starting WebSocket connection for real-time order tracking...")
-            self.websocket_client.start_background_thread()
             
-            # Wait a moment for WebSocket to connect
-            await asyncio.sleep(2)
+            # Connect and authenticate WebSocket (same pattern as working tests)
+            connected = await self.websocket_client.connect()
+            if not connected:
+                raise Exception("Failed to connect WebSocket")
+            logger.info("✓ WebSocket connected")
+            
+            # Authenticate
+            authenticated = await self.websocket_client.authenticate()
+            if not authenticated:
+                raise Exception("Failed to authenticate WebSocket")
+            logger.info("✓ WebSocket authenticated")
             
             # Subscribe to order and user deals updates
-            if self.websocket_client.is_connected:
-                await self.websocket_client.subscribe_orders()
-                await self.websocket_client.subscribe_user_deals()
-                logger.info("Subscribed to WebSocket order tracking")
-            else:
-                logger.warning("WebSocket not connected, order tracking may be limited")
+            await self.websocket_client.subscribe_orders()
+            await self.websocket_client.subscribe_user_deals()
+            logger.info("✓ Subscribed to WebSocket order tracking")
             
             # Perform startup recovery
             logger.info("Performing startup recovery...")
