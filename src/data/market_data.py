@@ -225,8 +225,13 @@ class MarketDataManager:
         latest_candle_date = df.iloc[0]['date'].date()
         current_date = datetime.now(timezone.utc).date()
         
-        # If latest candle is from today, we haven't crossed to new day yet
-        return latest_candle_date < current_date
+        # For Daily Range Strategy, we want to generate signals when we have today's candle
+        # This allows us to use yesterday's OHLC data for today's trading signals
+        is_new_day = latest_candle_date >= current_date
+        
+        logger.info(f"Trading day check for {market}: latest_candle={latest_candle_date}, current={current_date}, is_new_day={is_new_day}")
+        
+        return is_new_day
     
     def get_available_markets(self) -> List[str]:
         """
