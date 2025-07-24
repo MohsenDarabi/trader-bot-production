@@ -196,10 +196,17 @@ class OrderManager:
             return order
             
         except Exception as e:
-            logger.error(f"Failed to place buy order {client_id}: {e}")
-            # Remove from used IDs since order failed
-            self.used_client_ids.discard(client_id)
-            return None
+            # Handle funding fee settlement period gracefully
+            if "3007" in str(e) or "funding fee settlement" in str(e).lower():
+                logger.warning(f"Order placement delayed due to funding fee settlement: {client_id}")
+                logger.info("This is a temporary exchange restriction - will retry in next cycle")
+                # Keep client_id reserved for retry
+                return None
+            else:
+                logger.error(f"Failed to place buy order {client_id}: {e}")
+                # Remove from used IDs since order failed
+                self.used_client_ids.discard(client_id)
+                return None
     
     def place_sell_order(self, market: str, amount: float, price: float,
                         position_size: float, is_hide: bool = True) -> Optional[Order]:
@@ -254,10 +261,17 @@ class OrderManager:
             return order
             
         except Exception as e:
-            logger.error(f"Failed to place sell order {client_id}: {e}")
-            # Remove from used IDs since order failed
-            self.used_client_ids.discard(client_id)
-            return None
+            # Handle funding fee settlement period gracefully
+            if "3007" in str(e) or "funding fee settlement" in str(e).lower():
+                logger.warning(f"Sell order placement delayed due to funding fee settlement: {client_id}")
+                logger.info("This is a temporary exchange restriction - will retry in next cycle")
+                # Keep client_id reserved for retry
+                return None
+            else:
+                logger.error(f"Failed to place sell order {client_id}: {e}")
+                # Remove from used IDs since order failed
+                self.used_client_ids.discard(client_id)
+                return None
     
     def cancel_order(self, client_id: str) -> bool:
         """

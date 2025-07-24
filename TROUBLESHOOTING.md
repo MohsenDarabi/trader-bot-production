@@ -271,6 +271,42 @@ ORDER_STATUS_CHECK_INTERVAL=-1   # Disable REST API checks completely (recommend
 
 When set to `-1`, the bot relies entirely on WebSocket updates for order status changes, eliminating signature errors from periodic status checks. Since WebSocket provides real-time updates, this is the recommended approach.
 
+### Problem: API Error 3007 - Funding Fee Settlement Period
+**Symptoms:**
+```
+{"code": 3007, "message": "Service is not available during funding fee settlement"}
+```
+
+**Root Cause:**
+CoinEx temporarily restricts order placement during funding fee calculation periods (every 8 hours). This is a normal exchange operation, not a code bug.
+
+**Solution:**
+Added graceful handling with automatic retry logic:
+```python
+# In order_manager.py
+except Exception as e:
+    # Handle funding fee settlement period gracefully
+    if "3007" in str(e) or "funding fee settlement" in str(e).lower():
+        logger.warning(f"Order placement delayed due to funding fee settlement: {client_id}")
+        logger.info("This is a temporary exchange restriction - will retry in next cycle")
+        # Keep client_id reserved for retry
+        return None
+    else:
+        logger.error(f"Failed to place order {client_id}: {e}")
+        self.used_client_ids.discard(client_id)
+        return None
+```
+
+**Timing:**
+- Funding fee settlement occurs every 8 hours (00:00, 08:00, 16:00 UTC)
+- Restriction period lasts 1-2 minutes
+- Bot automatically retries in next trading cycle
+
+**Verification:**
+- Bot logs show "Order placement delayed due to funding fee settlement"
+- Orders are successfully placed after settlement period ends
+- No order duplication or bot crashes
+
 ### Problem: Order Placement Hangs
 **Symptoms:**
 - `place_order()` calls hang indefinitely
