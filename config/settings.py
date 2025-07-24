@@ -49,6 +49,12 @@ SHOW_DEBUG_INFO = os.getenv('SHOW_DEBUG_INFO', 'False').lower() == 'true'
 WS_RECONNECT_DELAY = 5  # seconds
 WS_HEARTBEAT_INTERVAL = 20  # seconds
 
+# Order Status Check Settings
+# How often to perform REST API status checks (in seconds)
+# Set to -1 to disable periodic REST API checks (rely on WebSocket only)
+ORDER_STATUS_CHECK_INTERVAL = int(os.getenv('ORDER_STATUS_CHECK_INTERVAL', '300'))  # 5 minutes default
+ENABLE_REST_API_STATUS_CHECKS = ORDER_STATUS_CHECK_INTERVAL > 0
+
 # Telegram Configuration (Low Priority - Only after core features)
 TELEGRAM_ENABLED = os.getenv('TELEGRAM_ENABLED', 'False').lower() == 'true'
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')

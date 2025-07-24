@@ -11,6 +11,7 @@ from enum import Enum
 from src.exchange.coinex_client import CoinExClient
 from src.core.profitability import ProfitabilityValidator
 from src.utils.logger import get_logger
+from config.settings import ENABLE_REST_API_STATUS_CHECKS, ORDER_STATUS_CHECK_INTERVAL
 
 
 logger = get_logger(__name__)
@@ -95,6 +96,7 @@ class OrderManager:
         self.validator = profitability_validator
         self.active_orders: Dict[str, Order] = {}
         self.used_client_ids: Set[str] = set()
+        self._last_status_check: Dict[str, datetime] = {}  # Track last status check per order
     
     def generate_client_id(self, market: str, side: OrderSide, 
                           timestamp: Optional[int] = None) -> str:
@@ -347,6 +349,8 @@ class OrderManager:
                 # Remove from active if completed
                 if order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED]:
                     del self.active_orders[client_id]
+                    # Clean up status check timestamp
+                    self._last_status_check.pop(client_id, None)
             
             return order
             
@@ -384,6 +388,8 @@ class OrderManager:
                             
                             if order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED]:
                                 del self.active_orders[client_id]
+                                # Clean up status check timestamp
+                                self._last_status_check.pop(client_id, None)
                             
                             return order
                     except Exception as e2:
@@ -410,14 +416,27 @@ class OrderManager:
             List of pending orders
         """
         orders = []
+        now = datetime.now(timezone.utc)
         
         for order in self.active_orders.values():
             if market and order.market != market:
                 continue
             
             if order.status == OrderStatus.PENDING:
-                # Update status from exchange
-                self.update_order_status(order.client_id)
+                # Only perform REST API status check if enabled and enough time has passed
+                should_check_status = False
+                if ENABLE_REST_API_STATUS_CHECKS:
+                    last_check = self._last_status_check.get(order.client_id)
+                    if (not last_check or 
+                        (now - last_check).total_seconds() > ORDER_STATUS_CHECK_INTERVAL):
+                        should_check_status = True
+                        self._last_status_check[order.client_id] = now
+                
+                if should_check_status:
+                    logger.debug(f"Performing periodic status check for order {order.client_id}")
+                    self.update_order_status(order.client_id)
+                else:
+                    logger.debug(f"Skipping status check for {order.client_id} - relying on WebSocket updates")
                 
                 # Re-check if still pending
                 if order.client_id in self.active_orders:
