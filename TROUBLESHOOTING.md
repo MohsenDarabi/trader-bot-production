@@ -261,6 +261,16 @@ if (not self._last_positions_sync or
 
 **Note:** WebSocket updates handle real-time order status changes, so periodic REST API checks are less critical.
 
+**Latest Solution (commit c5c904a):**
+Added configurable status check intervals and option to disable REST API checks completely:
+```bash
+# In .env file or environment:
+ORDER_STATUS_CHECK_INTERVAL=300  # Check every 5 minutes (default)
+ORDER_STATUS_CHECK_INTERVAL=-1   # Disable REST API checks completely (recommended)
+```
+
+When set to `-1`, the bot relies entirely on WebSocket updates for order status changes, eliminating signature errors from periodic status checks. Since WebSocket provides real-time updates, this is the recommended approach.
+
 ### Problem: Order Placement Hangs
 **Symptoms:**
 - `place_order()` calls hang indefinitely

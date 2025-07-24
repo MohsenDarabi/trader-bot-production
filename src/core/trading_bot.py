@@ -15,10 +15,8 @@ from src.core.order_pairing_manager import OrderPairingManager
 from src.core.position_manager import PositionManager
 from src.core.profitability import ProfitabilityValidator
 from src.data.market_data import MarketDataManager
-from src.data.database import DatabaseManager
 from src.core.strategy import DailyRangeStrategy, TradingSignal
 from src.core.position_sizing import PositionSizer
-from src.core.recovery import StartupRecovery
 from src.utils.logger import get_logger
 from config.settings import (
     SIGNAL_GENERATION_TIME, TIMEZONE, is_test_mode, 
@@ -59,13 +57,11 @@ class DailyRangeBot:
     
     def __init__(self):
         self.client: Optional[CoinExClient] = None
-        self.database: Optional[DatabaseManager] = None
         self.market_data: Optional[MarketDataManager] = None
         self.strategy: Optional[DailyRangeStrategy] = None
         self.position_manager: Optional[PositionManager] = None
         self.order_manager: Optional[OrderManager] = None
         self.position_sizer: Optional[PositionSizer] = None
-        self.recovery: Optional[StartupRecovery] = None
         
         # New WebSocket and order tracking components
         self.websocket_client: Optional[CoinExWebSocketClient] = None
@@ -88,7 +84,6 @@ class DailyRangeBot:
         try:
             # Initialize core components
             self.client = CoinExClient()
-            self.database = DatabaseManager()
             self.market_data = MarketDataManager(self.client)
             self.strategy = DailyRangeStrategy(self.market_data)
             self.position_manager = PositionManager(self.client)
@@ -97,7 +92,6 @@ class DailyRangeBot:
             validator = ProfitabilityValidator()
             self.order_manager = OrderManager(self.client, validator)
             self.position_sizer = PositionSizer(self.market_data, self.position_manager)
-            self.recovery = StartupRecovery(self.client, self.database)
             
             # Initialize WebSocket and order tracking components
             self.websocket_client = CoinExWebSocketClient()
@@ -126,16 +120,10 @@ class DailyRangeBot:
             await self.websocket_client.subscribe_user_deals()
             logger.info("✓ Subscribed to WebSocket order tracking")
             
-            # Perform startup recovery
-            logger.info("Performing startup recovery...")
-            recovery_report = self.recovery.perform_full_recovery(
-                self.order_manager, self.position_manager, self.strategy
-            )
-            
-            if not recovery_report.recovery_successful:
-                raise Exception(f"Startup recovery failed: {recovery_report.issues}")
-            
-            logger.info(f"Recovery completed: {recovery_report}")
+            # Load current state from exchange (no database)
+            logger.info("Loading current state from exchange...")
+            await self._initialize_from_exchange()
+            logger.info("✓ Exchange state loaded successfully")
             
             # Update initial status
             await self._update_account_status()
@@ -145,6 +133,30 @@ class DailyRangeBot:
             
         except Exception as e:
             logger.error(f"Bot initialization failed: {e}", exc_info=True)
+            raise
+    
+    async def _initialize_from_exchange(self):
+        """Initialize bot state from exchange API (stateless approach)"""
+        try:
+            logger.info("Getting current orders from exchange...")
+            # Load existing orders from exchange 
+            loaded_orders = self.order_manager.load_existing_orders()
+            logger.info(f"Loaded {loaded_orders} existing orders from exchange")
+            
+            logger.info("Getting current positions from exchange...")  
+            # Sync positions with exchange
+            self.position_manager.sync_with_exchange()
+            positions = self.position_manager.get_all_positions()
+            logger.info(f"Loaded {len(positions)} positions from exchange")
+            
+            # Sync order tracker with current exchange state
+            logger.info("Syncing order tracker...")
+            await self.order_tracker.sync_existing_orders()
+            
+            logger.info("Exchange state initialization completed")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize from exchange: {e}")
             raise
     
     async def set_trading_market(self, market: str):
@@ -217,8 +229,7 @@ class DailyRangeBot:
             for market in self.trading_markets:
                 await self._process_market(market)
             
-            # Save current state
-            self._save_current_state()
+            # State is maintained in memory only (no database persistence)
             
         except Exception as e:
             logger.error(f"Error in trading cycle: {e}", exc_info=True)
@@ -565,14 +576,7 @@ class DailyRangeBot:
             logger.error(f"Error getting pairing status: {e}")
             return {"error": str(e)}
     
-    def _save_current_state(self):
-        """Save current bot state to database"""
-        try:
-            self.recovery.save_current_state(
-                self.order_manager, self.position_manager, self.strategy
-            )
-        except Exception as e:
-            logger.error(f"Error saving state: {e}")
+    # Note: State persistence removed - using stateless approach
     
     # Public API methods for display
     
@@ -609,8 +613,7 @@ class DailyRangeBot:
         self._shutdown_requested = True
         self.status.is_running = False
         
-        # Save final state
-        self._save_current_state()
+        # Final state is not persisted (stateless approach)
         
         # Close connections
         if self.client:
