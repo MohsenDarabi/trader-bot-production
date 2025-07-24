@@ -310,11 +310,18 @@ class OrderManager:
         order = self.active_orders[client_id]
         
         try:
-            # Query order status
-            status_response = self.client.get_order_status(
-                market=order.market,
-                client_id=client_id
-            )
+            # Query order status - prefer order_id over client_id to avoid signature issues
+            if order.exchange_order_id:
+                status_response = self.client.get_order_status(
+                    market=order.market,
+                    order_id=order.exchange_order_id
+                )
+            else:
+                # Fallback to client_id if exchange_order_id not available
+                status_response = self.client.get_order_status(
+                    market=order.market,
+                    client_id=client_id
+                )
             
             # Update order details
             if status_response:
@@ -347,6 +354,41 @@ class OrderManager:
             # Handle common API signature errors gracefully
             if "Signature Incorrect" in str(e):
                 logger.warning(f"Order status check failed due to signature error for {client_id}: {e}")
+                
+                # Try alternative approach if we used order_id initially
+                if order.exchange_order_id and "order_id" not in str(e):
+                    try:
+                        logger.info(f"Retrying with client_id instead of order_id for {client_id}")
+                        status_response = self.client.get_order_status(
+                            market=order.market,
+                            client_id=client_id
+                        )
+                        # If successful, process the response
+                        if status_response:
+                            logger.info(f"Alternative approach succeeded for {client_id}")
+                            # Process status_response same as above...
+                            old_status = order.status
+                            exchange_status = status_response.get('status', '')
+                            if exchange_status == 'done':
+                                order.status = OrderStatus.FILLED
+                            elif exchange_status == 'part_deal':
+                                order.status = OrderStatus.PARTIALLY_FILLED
+                            elif exchange_status == 'cancel':
+                                order.status = OrderStatus.CANCELLED
+                            
+                            order.filled_amount = float(status_response.get('filled_amount', 0))
+                            order.updated_at = datetime.now(timezone.utc)
+                            
+                            if old_status != order.status:
+                                logger.info(f"Order {client_id} status: {old_status.value} -> {order.status.value}")
+                            
+                            if order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED]:
+                                del self.active_orders[client_id]
+                            
+                            return order
+                    except Exception as e2:
+                        logger.debug(f"Alternative approach also failed for {client_id}: {e2}")
+                
                 logger.debug("This is a known CoinEx API issue - continuing without status update")
                 # Return order without modification - WebSocket updates will handle status changes
                 return order

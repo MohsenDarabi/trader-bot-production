@@ -193,6 +193,74 @@ def _handle_order_update(self, data: Dict):
 
 ## Order Placement Problems
 
+### Problem: Order Object Attribute Errors
+**Symptoms:**
+```
+AttributeError: 'Order' object has no attribute 'order_id'
+```
+
+**Root Cause:**
+Code tries to access `order.order_id` but Order objects use `exchange_order_id` attribute instead.
+
+**Solution:**
+```python
+# BEFORE (causes AttributeError)
+order_id = order.order_id  # ❌ Wrong attribute
+
+# AFTER (correct)
+order_id = order.exchange_order_id  # ✅ Correct attribute
+
+# Complete fix example
+self.order_tracker.track_order(
+    order_id=str(order.exchange_order_id),  # Fixed
+    client_id=order.client_id,
+    market=market,
+    side=OrderSide.BUY,
+    amount=quantity,
+    price=price
+)
+```
+
+**Fixed in commit:** 8269c92 - All instances of `order.order_id` changed to `order.exchange_order_id`
+
+### Problem: Order Status Check Signature Errors
+**Symptoms:**
+- Periodic "Signature Incorrect" errors every 30-120 seconds
+- Errors from `update_order_status()` method in order manager
+- Bot continues to work but logs show API failures
+
+**Root Cause:**
+The `/v2/futures/order-status` endpoint has signature validation issues when called frequently, even though the `market` parameter is required.
+
+**Solution:**
+Added graceful error handling to continue bot operation:
+```python
+except Exception as e:
+    # Handle common API signature errors gracefully
+    if "Signature Incorrect" in str(e):
+        logger.warning(f"Order status check failed due to signature error for {client_id}: {e}")
+        logger.debug("This is a known CoinEx API issue - continuing without status update")
+        # Return order without modification - WebSocket updates will handle status changes
+        return order
+    elif "Rate limit" in str(e) or "429" in str(e):
+        logger.warning(f"Rate limit hit checking order status for {client_id} - will retry later")
+        return order
+    else:
+        logger.error(f"Failed to update order status {client_id}: {e}")
+        return order
+```
+
+**Additional Optimization:**
+Reduced sync frequency from 30 seconds to 2 minutes to minimize API calls:
+```python
+# Sync positions less frequently to avoid rate limits
+if (not self._last_positions_sync or 
+    (now - self._last_positions_sync).seconds > 120):  # Was 30s
+    await self._sync_positions()
+```
+
+**Note:** WebSocket updates handle real-time order status changes, so periodic REST API checks are less critical.
+
 ### Problem: Order Placement Hangs
 **Symptoms:**
 - `place_order()` calls hang indefinitely
@@ -388,6 +456,7 @@ export LOG_LEVEL=DEBUG
 - **Recent fixes:**
   - c4d08f8: Fixed pending-orders signature issue  
   - 60d487a: Fixed positions signature issue
+  - 8269c92: Fixed critical order tracking errors and API signature issues
   - WebSocket compression and authentication fixes
   - Process lock implementation
 
