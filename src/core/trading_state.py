@@ -7,9 +7,9 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
 
-from src.models.order import Order, OrderStatus
-from src.models.position import Position
-from src.models.signal import DailyRangeSignal
+from src.exchange.order_manager import Order, OrderSide, OrderStatus
+from src.core.position_manager import Position, PositionSide
+from src.core.strategy import TradingSignal
 from src.utils.logger import get_logger
 
 
@@ -50,7 +50,7 @@ class TradingState:
     calculation_generation: int = 0  # Increments with each recalculation
     
     # Current signals
-    current_signals: Optional[DailyRangeSignal] = None
+    current_signals: Optional[TradingSignal] = None
     
     # Position tracking
     current_position: Optional[Position] = None
@@ -83,7 +83,7 @@ class TradingState:
     
     def update_sell_orders(self, orders: List[Order]) -> None:
         """Update active sell orders"""
-        self.active_sell_orders = [o for o in orders if o.status in [OrderStatus.PENDING, OrderStatus.PARTIAL]]
+        self.active_sell_orders = [o for o in orders if o.status in [OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED]]
         self._recalculate_uncovered_amount()
         
         logger.info(f"Sell orders updated: {len(self.active_sell_orders)} active orders")

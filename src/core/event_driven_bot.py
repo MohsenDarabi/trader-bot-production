@@ -9,9 +9,9 @@ from dataclasses import dataclass
 
 from src.core.trading_state import TradingState, CalculationMode, MarketOHLC
 from src.core.trading_bot import DailyRangeBot
-from src.models.order import Order, OrderStatus, OrderSide, OrderType
-from src.models.position import Position, PositionSide
-from src.models.signal import DailyRangeSignal
+from src.exchange.order_manager import Order, OrderStatus, OrderSide
+from src.core.position_manager import Position, PositionSide
+from src.core.strategy import TradingSignal
 from src.utils.logger import get_logger
 from config.settings import TIMEZONE
 

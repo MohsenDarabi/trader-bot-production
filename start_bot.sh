@@ -1,7 +1,5 @@
 #!/bin/bash
-"""
-CoinEx Daily Range Bot Startup Script - Native & Docker Support
-"""
+# CoinEx Daily Range Bot Startup Script - Native & Docker Support
 
 set -e
 
