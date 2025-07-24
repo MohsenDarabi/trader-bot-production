@@ -131,7 +131,7 @@ class TradingBotManager:
                     pos_table.add_row(
                         pos.market,
                         pos.side.value,
-                        f"{pos.quantity:.6f}",
+                        f"{pos.size:.6f}",
                         f"${pos.avg_entry_price:.2f}",
                         f"${current_price:.2f}" if current_price else "N/A",
                         f"[{pnl_color}]${pos.unrealized_pnl:.2f}[/{pnl_color}]"
