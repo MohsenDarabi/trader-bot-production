@@ -195,6 +195,9 @@ class TradingBotManager:
             
             # Select trading market
             asset_selector = AssetSelector(self.bot.market_data, self.bot.position_sizer)
+            
+            # Update account status to get current balance
+            await self.bot._update_account_status()
             account_balance = self.bot.get_account_balance()
             
             self.console.print(f"💰 Account Balance: ${account_balance:.2f} USDT", style="green")

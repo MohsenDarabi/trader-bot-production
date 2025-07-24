@@ -82,9 +82,11 @@ class EventDrivenBot(DailyRangeBot):
             
         market = self.state.market
         
+        # Sync positions with exchange first
+        self.position_manager.sync_with_exchange(market)
+        
         # Load current position
-        positions = await self.position_manager.get_positions()
-        market_position = next((p for p in positions if p.market == market), None)
+        market_position = self.position_manager.get_position(market)
         self.state.update_position(market_position)
         
         # Load active orders
