@@ -190,16 +190,15 @@ class DailyRangeBot:
                 raise ValueError(f"Cannot proceed without setting correct leverage: {e}")
             
             # Configure pairing rules for this market
-            # Multiple sell levels based on the daily range strategy
-            sell_price_levels = [1.002, 1.005, 1.010, 1.015, 1.020]  # 0.2%, 0.5%, 1%, 1.5%, 2% above buy price
+            # Daily Range Strategy: One sell price per buy order (signal.sell_price)
             self.pairing_manager.configure_pairing_rule(
                 market=market,
-                sell_price_levels=sell_price_levels,
+                sell_price_levels=[],  # Will use signal.sell_price directly for each buy-sell pair
                 max_age_minutes=120,  # 2 hours max age for unmatched fills
                 min_fill_amount=0.001  # Minimum fill to trigger sell orders
             )
             
-            logger.info(f"Configured pairing rules for {market} with {len(sell_price_levels)} sell levels")
+            logger.info(f"Configured pairing rules for {market} with Daily Range Strategy (one sell price per buy)")
             
             # Generate initial signal if needed
             await self._check_and_generate_signals(market)
@@ -442,59 +441,33 @@ class DailyRangeBot:
             }
     
     def _calculate_optimal_sell_price(self, market: str, position, current_price: float) -> Dict[str, float]:
-        """Calculate optimal sell price to maximize profit while maintaining safety"""
+        """Calculate optimal sell price for bot restart scenario"""
         try:
-            # Configuration for intelligent pricing
-            MIN_PROFIT_MARGIN = 1.015     # 1.5% minimum profit
-            CURRENT_PRICE_BONUS = 1.005   # 0.5% above current price when profitable
-            MAX_ADJUSTMENT_MARGIN = 1.05  # Maximum 5% above entry price
+            # Calculate base sell price (1.5% profit minimum)
+            base_sell_price = position.avg_entry_price * 1.015
             
-            # Strategy-based minimum sell price (safety floor)
-            strategy_sell_price = position.avg_entry_price * MIN_PROFIT_MARGIN
-            
-            # Check if current price offers better profit opportunity
-            if current_price > position.avg_entry_price:
-                # Market is above entry - we can get better price
-                current_profit_percent = ((current_price - position.avg_entry_price) / position.avg_entry_price) * 100
-                
-                # Calculate current-price-based sell price
-                current_based_price = current_price * CURRENT_PRICE_BONUS
-                
-                # Cap at maximum adjustment to prevent unrealistic orders
-                max_allowed_price = position.avg_entry_price * MAX_ADJUSTMENT_MARGIN
-                current_based_price = min(current_based_price, max_allowed_price)
-                
-                # Use the higher of strategy minimum or current-based price
-                if current_based_price > strategy_sell_price:
-                    optimal_price = current_based_price
-                    improvement = optimal_price - strategy_sell_price
-                    reason = f"market_opportunity (+{current_profit_percent:.1f}%)"
-                else:
-                    optimal_price = strategy_sell_price
-                    improvement = 0
-                    reason = "strategy_minimum"
+            # If current market price is higher, use current price for more profit
+            if current_price > base_sell_price:
+                optimal_price = current_price
+                improvement = current_price - base_sell_price
+                reason = "market_higher_than_calculated"
             else:
-                # Market is below or at entry price - use strategy minimum
-                optimal_price = strategy_sell_price
+                optimal_price = base_sell_price
                 improvement = 0
-                reason = "strategy_minimum"
+                reason = "minimum_profit_1.5%"
             
             return {
                 'price': optimal_price,
-                'strategy_price': strategy_sell_price,
-                'current_based_price': current_price * CURRENT_PRICE_BONUS if current_price > position.avg_entry_price else strategy_sell_price,
+                'base_price': base_sell_price,
                 'improvement': improvement,
                 'reason': reason
             }
-            
         except Exception as e:
             logger.error(f"Error calculating optimal sell price for {market}: {e}")
-            # Fallback to strategy minimum
             fallback_price = position.avg_entry_price * 1.015
             return {
                 'price': fallback_price,
-                'strategy_price': fallback_price,
-                'current_based_price': fallback_price,
+                'base_price': fallback_price,
                 'improvement': 0,
                 'reason': 'fallback_error'
             }
@@ -517,8 +490,9 @@ class DailyRangeBot:
             # Calculate intelligent sell price
             optimal_sell_price = self._calculate_optimal_sell_price(market, position, current_price)
             
-            logger.info(f"💡 Intelligent sell pricing for {market}:")
+            logger.info(f"💡 Bot restart sell pricing for {market}:")
             logger.info(f"📊 Entry: ${position.avg_entry_price:.2f} | Current: ${current_price:.2f}")
+            logger.info(f"📊 Base sell (1.5%): ${optimal_sell_price['base_price']:.2f}")
             logger.info(f"✅ Optimal sell price: ${optimal_sell_price['price']:.2f} ({optimal_sell_price['reason']})")
             if optimal_sell_price['improvement'] > 0:
                 logger.info(f"💰 Profit improvement: +${optimal_sell_price['improvement']:.2f}")
@@ -636,12 +610,23 @@ class DailyRangeBot:
                 logger.warning(f"Order not profitable: {is_profitable.reason}")
                 return
             
+            # Apply price adjustments for better entries/exits
+            adjusted_price = price
+            if side == 'buy':
+                # Buy price adjustment: Use cheaper price for better entry
+                current_price = self.market_data.get_current_price(market)
+                if current_price and current_price < price:
+                    adjusted_price = current_price
+                    logger.info(f"💰 Buy price adjusted: ${price:.2f} → ${adjusted_price:.2f} (cheaper entry)")
+                else:
+                    logger.info(f"📊 Buy price unchanged: ${price:.2f} (signal price optimal)")
+            
             # Place the order
             if side == 'buy':
                 order = self.order_manager.place_buy_order(
                     market=market,
                     amount=position_size.quantity,
-                    price=price,
+                    price=adjusted_price,
                     position_size=position_size.size_usdt,
                     is_hide=True  # Hidden orders for production
                 )
@@ -654,15 +639,16 @@ class DailyRangeBot:
                         market=market,
                         side=OrderSide.BUY,
                         amount=position_size.quantity,
-                        price=price
+                        price=adjusted_price
                     )
                     logger.info(f"Started tracking buy order {order.exchange_order_id} for automatic sell pairing")
             else:
                 # For sell orders, use the traditional approach since this is for closing positions
+                # Note: Normal sell orders don't get price adjustment (as discussed)
                 order = self.order_manager.place_sell_order(
                     market=market,
                     amount=position_size.quantity,
-                    price=price,
+                    price=adjusted_price,
                     position_size=position_size.size_usdt,
                     is_hide=True
                 )
@@ -675,12 +661,12 @@ class DailyRangeBot:
                         market=market,
                         side=OrderSide.SELL,
                         amount=position_size.quantity,
-                        price=price
+                        price=adjusted_price
                     )
             
             if order:
                 logger.info(f"Placed {side} order for {market}: "
-                          f"Price=${price:.2f}, Amount={position_size.quantity:.6f}, "
+                          f"Price=${adjusted_price:.2f}, Amount={position_size.quantity:.6f}, "
                           f"Size=${position_size.size_usdt:.2f}")
                 self.status.last_trade_time = datetime.now(timezone.utc)
             else:
