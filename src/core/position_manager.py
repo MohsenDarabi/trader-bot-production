@@ -22,6 +22,7 @@ class PositionSide(Enum):
 @dataclass
 class Position:
     """Position data structure"""
+    position_id: Optional[int]  # CoinEx position ID
     market: str
     side: PositionSide
     size: float  # Total position size
@@ -291,6 +292,7 @@ class PositionManager:
                     if market_name in self.positions:
                         # Update existing position
                         position = self.positions[market_name]
+                        position.position_id = pos_data.get('position_id')
                         position.size = open_interest
                         position.avg_entry_price = avg_entry_price
                         position.unrealized_pnl = unrealized_pnl
@@ -298,7 +300,9 @@ class PositionManager:
                         position.updated_at = datetime.now(timezone.utc)
                     else:
                         # Create new position from exchange data
+                        position_id = pos_data.get('position_id')
                         position = Position(
+                            position_id=position_id,
                             market=market_name,
                             side=PositionSide.LONG,
                             size=open_interest,
