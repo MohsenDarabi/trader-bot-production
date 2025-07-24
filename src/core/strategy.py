@@ -63,8 +63,8 @@ class DailyRangeStrategy:
         - Sell Price = High - Range
         
         Args:
-            high: Previous day high
-            low: Previous day low
+            high: High price (could be yesterday's or hybrid)
+            low: Low price (could be yesterday's or today's)
             
         Returns:
             Tuple of (buy_price, sell_price, range_value)
@@ -77,7 +77,7 @@ class DailyRangeStrategy:
         sell_price = high - range_value
         
         logger.info(f"Calculated prices - Buy: ${buy_price:.2f}, Sell: ${sell_price:.2f}, "
-                   f"Range: ${range_value:.2f}")
+                   f"Range: ${range_value:.2f} (H={high:.2f}, L={low:.2f})")
         
         return buy_price, sell_price, range_value
     
@@ -148,6 +148,47 @@ class DailyRangeStrategy:
         except Exception as e:
             logger.error(f"Failed to generate signal for {market}: {e}", exc_info=True)
             return None
+    
+    def generate_signal_with_custom_prices(self, market: str, high: float, low: float,
+                                         description: str = "custom") -> TradingSignal:
+        """
+        Generate trading signal with custom high/low prices
+        Used for hybrid calculations after cycle completion
+        
+        Args:
+            market: Market symbol
+            high: High price to use (e.g., yesterday's high)
+            low: Low price to use (e.g., today's low)
+            description: Description of calculation type
+            
+        Returns:
+            Trading signal
+        """
+        logger.info(f"Generating {description} signal for {market} with H={high:.2f}, L={low:.2f}")
+        
+        # Calculate signal prices
+        buy_price, sell_price, range_value = self.calculate_signal_prices(high, low)
+        
+        # Create signal
+        today = datetime.now(timezone.utc).date().isoformat()
+        signal = TradingSignal(
+            market=market,
+            date=today,
+            buy_price=buy_price,
+            sell_price=sell_price,
+            range_value=range_value,
+            previous_high=high,
+            previous_low=low,
+            created_at=datetime.now(timezone.utc)
+        )
+        
+        # Update cached signal
+        self._current_signals[market] = signal
+        
+        logger.info(f"Generated {description} signal for {market}: "
+                   f"Buy=${buy_price:.2f}, Sell=${sell_price:.2f}")
+        
+        return signal
     
     def get_current_signal(self, market: str) -> Optional[TradingSignal]:
         """

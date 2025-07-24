@@ -21,7 +21,8 @@ from rich.layout import Layout
 from rich.text import Text
 
 # Import bot components
-from src.core.trading_bot import DailyRangeBot
+from src.core.event_driven_bot import EventDrivenBot
+from src.core.trading_state import CalculationMode
 from src.utils.logger import get_logger
 from config.settings import validate_config, is_test_mode, get_position_size_mode
 from src.utils.asset_selector import AssetSelector
@@ -36,7 +37,7 @@ class TradingBotManager:
     """Main manager for the trading bot with live terminal display"""
     
     def __init__(self):
-        self.bot: Optional[DailyRangeBot] = None
+        self.bot: Optional[EventDrivenBot] = None
         self.console = Console()
         self.running = False
         self.selected_market = None
@@ -96,23 +97,22 @@ class TradingBotManager:
         layout["status"].update(Panel(status_table))
         
         # Signals panel
-        if self.bot and self.selected_market:
-            signals = self.bot.get_current_signals(self.selected_market)
-            if signals:
-                signals_table = Table(title="Daily Range Signals", show_header=True)
-                signals_table.add_column("Signal", style="cyan")
-                signals_table.add_column("Price", style="green")
-                signals_table.add_column("Status", style="yellow")
-                
-                signals_table.add_row("Buy Signal", f"${signals.buy_price:,.2f}", "Active")
-                signals_table.add_row("Sell Signal", f"${signals.sell_price:,.2f}", "Active")
-                signals_table.add_row("Range Value", f"${signals.range_value:,.2f}", "Div by 4")
-                
-                layout["signals"].update(Panel(signals_table))
-            else:
-                layout["signals"].update(Panel("No signals generated yet", style="yellow"))
+        if self.bot and self.bot.state and self.bot.state.current_signals:
+            signals = self.bot.state.current_signals
+            signals_table = Table(title="Daily Range Signals", show_header=True)
+            signals_table.add_column("Signal", style="cyan")
+            signals_table.add_column("Price", style="green")
+            signals_table.add_column("Status", style="yellow")
+            
+            calc_mode = "Hybrid" if self.bot.state.calculation_mode == CalculationMode.HYBRID_TODAY_LOW else "Initial"
+            signals_table.add_row("Buy Signal", f"${signals.buy_price:,.2f}", calc_mode)
+            signals_table.add_row("Sell Signal", f"${signals.sell_price:,.2f}", calc_mode)
+            signals_table.add_row("Range Value", f"${signals.range_value:,.2f}", f"Gen {self.bot.state.calculation_generation}")
+            signals_table.add_row("Cycles Today", str(self.bot.state.completed_cycles_today), "Completed")
+            
+            layout["signals"].update(Panel(signals_table))
         else:
-            layout["signals"].update(Panel("Waiting for market selection...", style="dim"))
+            layout["signals"].update(Panel("No signals generated yet", style="yellow"))
         
         # Positions panel
         if self.bot:
@@ -190,7 +190,7 @@ class TradingBotManager:
                 return False
             
             # Create bot instance
-            self.bot = DailyRangeBot()
+            self.bot = EventDrivenBot()
             await self.bot.initialize()
             
             # Select trading market
@@ -224,22 +224,24 @@ class TradingBotManager:
         layout = self.create_display_layout()
         
         try:
-            with Live(layout, refresh_per_second=0.2, screen=True):
+            with Live(layout, refresh_per_second=1.0, screen=True):
+                # Bot is now event-driven, just update display
                 while self.running:
                     try:
-                        # Update display
+                        # Update display only
                         self.update_display(layout)
                         
-                        # Execute bot logic
-                        await self.bot.execute_trading_cycle()
+                        # Check bot health
+                        if self.bot.state:
+                            self.bot.state.log_state_summary()
                         
-                        # Wait before next cycle
+                        # Wait before display update
                         await asyncio.sleep(5)
                         
                     except KeyboardInterrupt:
                         break
                     except Exception as e:
-                        logger.error(f"Error in bot cycle: {e}", exc_info=True)
+                        logger.error(f"Error in display loop: {e}", exc_info=True)
                         await asyncio.sleep(10)  # Wait longer on error
                         
         except KeyboardInterrupt:

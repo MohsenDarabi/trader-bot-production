@@ -28,6 +28,7 @@ class SubscriptionType(Enum):
     USER_DEALS = "user_deals"
     DEALS = "deals"
     DEPTH = "depth"
+    POSITION = "position"
 
 
 @dataclass
@@ -252,6 +253,39 @@ class CoinExWebSocketClient:
             logger.error(f"Failed to subscribe to market deals: {e}")
             return False
     
+    async def subscribe_positions(self, markets: Optional[List[str]] = None) -> bool:
+        """
+        Subscribe to position updates
+        
+        Args:
+            markets: List of markets to monitor, None/empty for all markets
+            
+        Returns:
+            True if subscription successful, False otherwise
+        """
+        if not self.is_authenticated:
+            logger.warning("Attempting to subscribe to positions without authentication")
+        
+        try:
+            # CoinEx expects market_list parameter, empty array for all markets
+            market_list = markets if markets is not None else []
+            params = {"market_list": market_list}
+            
+            message = {
+                "method": "position.subscribe",
+                "params": params,
+                "id": self.get_next_message_id()
+            }
+            
+            await self._send_message(message)
+            self.subscriptions["position"] = params
+            logger.info(f"Subscribed to position updates for markets: {market_list if market_list else 'ALL'}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to subscribe to positions: {e}")
+            return False
+    
     async def _send_message(self, message: Dict) -> None:
         """
         Send message to WebSocket server
@@ -288,7 +322,7 @@ class CoinExWebSocketClient:
                     
                     # Log important messages at info level for debugging
                     method = message.get("method")
-                    if method in ["order.update", "user_deals.update"]:
+                    if method in ["order.update", "user_deals.update", "position.update"]:
                         logger.info(f"📨 Received important message: {method} - {message}")
                     
                     # Handle different message types
@@ -302,7 +336,7 @@ class CoinExWebSocketClient:
                     elif method == "server.pong":
                         # Heartbeat pong response
                         self._handle_pong_response(message)
-                    elif method in ["order.update", "user_deals.update", "deals.update", "depth.update"]:
+                    elif method in ["order.update", "user_deals.update", "deals.update", "depth.update", "position.update"]:
                         # Subscription updates
                         self._handle_subscription_update(message)
                     elif "error" in message and "id" in message:
@@ -471,6 +505,8 @@ class CoinExWebSocketClient:
                         await self.subscribe_user_deals(params.get("market_list"))
                     elif sub_type == "deals":
                         await self.subscribe_market_deals(params.get("market_list", []))
+                    elif sub_type == "position":
+                        await self.subscribe_positions(params.get("market_list"))
                 
                 logger.info("WebSocket reconnection successful")
                 return True

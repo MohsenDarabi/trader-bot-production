@@ -1,14 +1,27 @@
 #!/bin/bash
 """
-CoinEx Daily Range Bot Startup Script
+CoinEx Daily Range Bot Startup Script - Native & Docker Support
 """
 
 set -e
 
+MARKET=${1:-"BTCUSDT"}
+RUN_MODE=${2:-"native"}  # native or docker
+
 echo "🚀 Starting CoinEx Daily Range Accumulation Bot"
 echo "=============================================="
+echo "Market: $MARKET"
+echo "Mode: $RUN_MODE"
 echo
 
+# Docker mode
+if [ "$RUN_MODE" = "docker" ]; then
+    echo "🐳 Starting bot in Docker container..."
+    ./docker-start.sh $MARKET start
+    exit 0
+fi
+
+# Native mode continues below
 # Check if we're in virtual environment
 if [[ "$VIRTUAL_ENV" != *"trader-bot-liveTesting-coinex"* ]]; then
     echo "📦 Activating virtual environment..."
@@ -58,16 +71,12 @@ if [ "$TRADING_MODE" = "NORMAL" ] || [ "$TRADING_MODE" = "LIVE" ]; then
     fi
 fi
 
-echo "🤖 Starting bot..."
+echo "🤖 Starting bot natively..."
 echo "   Press Ctrl+C to stop gracefully"
 echo
 
-# Start the bot with optional market argument
-# Usage: ./start_bot.sh [MARKET]
-# Examples: ./start_bot.sh ETHUSDT
-#          ./start_bot.sh BTCUSDT
-#          ./start_bot.sh (defaults to BTCUSDT)
-python3 main.py ${1:-BTCUSDT}
+# Start the bot with market argument
+python3 main.py $MARKET
 
 echo
 echo "👋 Bot stopped. Goodbye!"

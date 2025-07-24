@@ -18,6 +18,7 @@ from config.settings import (
 from src.exchange.auth import CoinExAuth
 from src.utils.logger import get_logger
 from src.utils.error_handling import handle_api_error, handle_network_error, handle_validation_error
+from src.utils.cache import ticker_cache, ohlc_cache, balance_cache
 
 
 logger = get_logger(__name__)
@@ -280,13 +281,26 @@ class CoinExClient:
         Returns:
             List of K-line data
         """
+        # Cache daily klines longer than shorter timeframes
+        cache_ttl = 300 if period == '1day' else 60
+        cache_key = f"kline:{market}:{period}:{limit}"
+        
+        cached_data = ohlc_cache.get(cache_key)
+        if cached_data is not None:
+            return cached_data
+            
         params = {
             'market': market,
             'period': period,
             'limit': limit
         }
         
-        return self._request('GET', '/v2/futures/kline', params=params, auth_required=False)
+        result = self._request('GET', '/v2/futures/kline', params=params, auth_required=False)
+        
+        # Cache the result
+        ohlc_cache.set(cache_key, result, ttl=cache_ttl)
+        
+        return result
     
     def get_ticker(self, market: str) -> Dict:
         """
@@ -298,8 +312,20 @@ class CoinExClient:
         Returns:
             Ticker data dictionary
         """
+        # Try cache first
+        cache_key = f"ticker:{market}"
+        cached_data = ticker_cache.get(cache_key)
+        if cached_data is not None:
+            return cached_data
+            
+        # Fetch from API
         params = {'market': market}
-        return self._request('GET', '/v2/futures/ticker', params=params, auth_required=False)
+        result = self._request('GET', '/v2/futures/ticker', params=params, auth_required=False)
+        
+        # Cache the result
+        ticker_cache.set(cache_key, result, ttl=30)
+        
+        return result
     
     # Trading Endpoints (Auth Required)
     

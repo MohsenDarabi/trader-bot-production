@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  trading-bot-development:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: coinex-bot-development
+    environment:
+      - BOT_INSTANCE=development
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
+      - ./CLAUDE.md:/app/CLAUDE.md:ro
+    restart: unless-stopped
+    networks:
+      - bot-network
+    command: python main.py
+
+networks:
+  bot-network:
+    driver: bridge
