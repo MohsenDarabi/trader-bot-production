@@ -294,8 +294,9 @@ class DailyRangeBot:
                 
                 # Validate profitability
                 validator = ProfitabilityValidator()
+                entry_cost = position.total_cost  # Use position's total cost
                 is_profitable = validator.is_position_profitable(
-                    position.avg_entry_price, position.size, exit_price
+                    position.avg_entry_price, position.size, exit_price, entry_cost
                 )
                 
                 if is_profitable.is_profitable:
@@ -440,9 +441,66 @@ class DailyRangeBot:
                 'position_exists': False
             }
     
+    def _calculate_optimal_sell_price(self, market: str, position, current_price: float) -> Dict[str, float]:
+        """Calculate optimal sell price to maximize profit while maintaining safety"""
+        try:
+            # Configuration for intelligent pricing
+            MIN_PROFIT_MARGIN = 1.015     # 1.5% minimum profit
+            CURRENT_PRICE_BONUS = 1.005   # 0.5% above current price when profitable
+            MAX_ADJUSTMENT_MARGIN = 1.05  # Maximum 5% above entry price
+            
+            # Strategy-based minimum sell price (safety floor)
+            strategy_sell_price = position.avg_entry_price * MIN_PROFIT_MARGIN
+            
+            # Check if current price offers better profit opportunity
+            if current_price > position.avg_entry_price:
+                # Market is above entry - we can get better price
+                current_profit_percent = ((current_price - position.avg_entry_price) / position.avg_entry_price) * 100
+                
+                # Calculate current-price-based sell price
+                current_based_price = current_price * CURRENT_PRICE_BONUS
+                
+                # Cap at maximum adjustment to prevent unrealistic orders
+                max_allowed_price = position.avg_entry_price * MAX_ADJUSTMENT_MARGIN
+                current_based_price = min(current_based_price, max_allowed_price)
+                
+                # Use the higher of strategy minimum or current-based price
+                if current_based_price > strategy_sell_price:
+                    optimal_price = current_based_price
+                    improvement = optimal_price - strategy_sell_price
+                    reason = f"market_opportunity (+{current_profit_percent:.1f}%)"
+                else:
+                    optimal_price = strategy_sell_price
+                    improvement = 0
+                    reason = "strategy_minimum"
+            else:
+                # Market is below or at entry price - use strategy minimum
+                optimal_price = strategy_sell_price
+                improvement = 0
+                reason = "strategy_minimum"
+            
+            return {
+                'price': optimal_price,
+                'strategy_price': strategy_sell_price,
+                'current_based_price': current_price * CURRENT_PRICE_BONUS if current_price > position.avg_entry_price else strategy_sell_price,
+                'improvement': improvement,
+                'reason': reason
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating optimal sell price for {market}: {e}")
+            # Fallback to strategy minimum
+            fallback_price = position.avg_entry_price * 1.015
+            return {
+                'price': fallback_price,
+                'strategy_price': fallback_price,
+                'current_based_price': fallback_price,
+                'improvement': 0,
+                'reason': 'fallback_error'
+            }
     
     def _place_missing_sell_order(self, market: str, missing_amount: float) -> bool:
-        """Place sell order for missing position coverage"""
+        """Place sell order for missing position coverage with intelligent price adjustment"""
         try:
             # Get position for entry price reference
             position = self.position_manager.get_position(market)
@@ -450,18 +508,27 @@ class DailyRangeBot:
                 logger.error(f"Cannot place missing sell - no position found for {market}")
                 return False
             
-            # Calculate sell price with profit margin (1.5% default)
-            profit_margin = 1.015  # 1.5% profit
-            sell_price = position.avg_entry_price * profit_margin
+            # Get current market price for intelligent adjustment
+            current_price = self.market_data.get_current_price(market)
+            if not current_price:
+                logger.error(f"Cannot get current price for {market} - using fallback pricing")
+                current_price = position.avg_entry_price
             
-            logger.info(f"Placing missing sell order: {missing_amount:.6f} {market} @ ${sell_price:.2f}")
+            # Calculate intelligent sell price
+            optimal_sell_price = self._calculate_optimal_sell_price(market, position, current_price)
             
-            # Place the missing sell order using proven method
+            logger.info(f"💡 Intelligent sell pricing for {market}:")
+            logger.info(f"📊 Entry: ${position.avg_entry_price:.2f} | Current: ${current_price:.2f}")
+            logger.info(f"✅ Optimal sell price: ${optimal_sell_price['price']:.2f} ({optimal_sell_price['reason']})")
+            if optimal_sell_price['improvement'] > 0:
+                logger.info(f"💰 Profit improvement: +${optimal_sell_price['improvement']:.2f}")
+            
+            # Place the missing sell order using optimal price
             order = self.order_manager.place_sell_order(
                 market=market,
                 amount=missing_amount,
-                price=sell_price,
-                position_size=missing_amount * sell_price,
+                price=optimal_sell_price['price'],
+                position_size=missing_amount * optimal_sell_price['price'],
                 is_hide=True
             )
             
