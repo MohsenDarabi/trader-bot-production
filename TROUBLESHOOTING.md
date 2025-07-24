@@ -307,6 +307,53 @@ except Exception as e:
 - Orders are successfully placed after settlement period ends
 - No order duplication or bot crashes
 
+### Problem: Position Detection Failure - Critical Trading Logic Bug
+**Symptoms:**
+```
+ERROR | Failed to sync positions with exchange: 'list' object has no attribute 'get'
+```
+- Bot places multiple buy orders per day despite having existing positions
+- Position balance checks always show no position exists
+- Trading logic Phase 2 protection fails
+
+**Root Cause:**
+Position manager expects CoinEx API response to have `'items'` key, but CoinEx actually returns `'data'` key containing the positions list.
+
+**Affected Code:**
+```python
+# BEFORE (broken)
+exchange_positions = response if isinstance(response, list) else response.get('items', [])
+
+# AFTER (fixed)  
+exchange_positions = response if isinstance(response, list) else response.get('data', [])
+```
+
+**CoinEx API Response Structure:**
+```json
+{
+  "code": 0,
+  "message": "OK",
+  "data": [
+    {"market": "ETHUSDT", "open_interest": "0.001", ...}
+  ]
+}
+```
+
+**Impact:**
+- **CRITICAL**: Bot could place multiple buy orders per day (violating strategy)
+- Position-sell balance calculations always show no position
+- Missing sell order placement logic never triggers
+- Reliance on Phase 1 (buy order detection) as only protection
+
+**Fix Applied:**
+Changed position manager to use `'data'` key for CoinEx API response parsing.
+
+**Verification:**
+- Position sync logs show successful position loading
+- Phase 2 protection properly detects existing positions  
+- Bot places sell orders for existing positions instead of new buy orders
+- No more `'list' object has no attribute 'get'` errors
+
 ### Problem: Order Placement Hangs
 **Symptoms:**
 - `place_order()` calls hang indefinitely
