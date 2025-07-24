@@ -326,29 +326,275 @@ class DailyRangeBot:
         except Exception as e:
             logger.error(f"Error checking entry opportunities for {market}: {e}")
     
+    def _check_daily_buy_status(self, market: str) -> Dict[str, Any]:
+        """Check buy order status for current day with stale order cleanup"""
+        try:
+            # Get all pending buy orders using proven endpoint
+            pending_orders = self.order_manager.get_pending_orders(market)
+            buy_orders = [o for o in pending_orders if o.side.value == 'buy']
+            
+            today = datetime.now(timezone.utc).date()
+            today_buy_orders = []
+            stale_orders = []
+            
+            # Categorize orders by date
+            for order in buy_orders:
+                order_date = order.created_at.date()
+                if order_date == today:
+                    today_buy_orders.append(order)
+                elif order_date < today:
+                    stale_orders.append(order)  # Older than 1 day
+            
+            # Cancel stale buy orders using proven cancel method
+            cancelled_count = 0
+            for stale_order in stale_orders:
+                try:
+                    logger.warning(f"Cancelling stale buy order: {stale_order.client_id} from {stale_order.created_at.date()}")
+                    self.order_manager.cancel_order(stale_order.client_id)
+                    cancelled_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to cancel stale order {stale_order.client_id}: {e}")
+            
+            result = {
+                'has_today_buy': len(today_buy_orders) > 0,
+                'today_orders': today_buy_orders,
+                'cancelled_stale': cancelled_count,
+                'total_buy_orders': len(buy_orders)
+            }
+            
+            if result['has_today_buy']:
+                logger.info(f"Found {len(today_buy_orders)} buy order(s) from today for {market}")
+            
+            if cancelled_count > 0:
+                logger.info(f"Cancelled {cancelled_count} stale buy order(s) for {market}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error checking daily buy status for {market}: {e}")
+            return {
+                'has_today_buy': True,  # Conservative: assume we have buy to prevent multiple orders
+                'today_orders': [],
+                'cancelled_stale': 0,
+                'total_buy_orders': 0
+            }
+    
+    def _calculate_position_sell_balance(self, market: str) -> Dict[str, Any]:
+        """Calculate position vs sell order balance using proven endpoints"""
+        try:
+            # Get current position using proven method
+            position = self.position_manager.get_position(market)
+            position_size = position.quantity if position else 0.0
+            
+            # Get all pending sell orders using proven method
+            pending_orders = self.order_manager.get_pending_orders(market)
+            sell_orders = [o for o in pending_orders if o.side.value == 'sell']
+            total_sell_amount = sum(order.amount for order in sell_orders)
+            
+            # Calculate missing sell amount
+            missing_sell = max(0, position_size - total_sell_amount)
+            is_balanced = missing_sell < 0.000001  # Allow tiny rounding differences
+            
+            result = {
+                'position_size': position_size,
+                'total_sells': total_sell_amount,
+                'missing_sell': missing_sell,
+                'is_balanced': is_balanced,
+                'sell_orders': sell_orders,
+                'position_exists': position is not None
+            }
+            
+            if position_size > 0:
+                logger.debug(f"Position balance for {market}: {position_size:.6f} position, "
+                           f"{total_sell_amount:.6f} sells, {missing_sell:.6f} missing")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error calculating position-sell balance for {market}: {e}")
+            return {
+                'position_size': 0.0,
+                'total_sells': 0.0,
+                'missing_sell': 0.0,
+                'is_balanced': True,
+                'sell_orders': [],
+                'position_exists': False
+            }
+    
+    def _can_place_new_buy_with_existing_position(self, market: str) -> Dict[str, Any]:
+        """Enhanced position analysis for new buy placement decisions"""
+        try:
+            # Get position and sell balance using proven methods
+            balance = self._calculate_position_sell_balance(market)
+            
+            if not balance['position_exists']:
+                return {
+                    'can_buy': True,
+                    'reason': 'No position exists'
+                }
+            
+            if not balance['is_balanced']:
+                return {
+                    'can_buy': False,
+                    'reason': f"Position not balanced - missing {balance['missing_sell']:.6f} in sells"
+                }
+            
+            # Position exists and is balanced - check sell order ages
+            today = datetime.now(timezone.utc).date()
+            sell_orders = balance['sell_orders']
+            
+            if not sell_orders:
+                # Position exists but no sell orders - this shouldn't happen but handle it
+                return {
+                    'can_buy': False,
+                    'reason': 'Position exists but no sell orders found'
+                }
+            
+            # Analyze sell order timestamps using proven Order.created_at
+            old_sells = [o for o in sell_orders if o.created_at.date() < today]
+            today_sells = [o for o in sell_orders if o.created_at.date() == today]
+            
+            # If all sells are from previous days, position is likely stale
+            if len(old_sells) > 0 and len(today_sells) == 0:
+                return {
+                    'can_buy': True,
+                    'reason': f'Position with {len(old_sells)} old sell orders - allowing new cycle'
+                }
+            
+            # If we have recent sell activity, wait for completion
+            if len(today_sells) > 0:
+                return {
+                    'can_buy': False,
+                    'reason': f'Recent sell activity detected - {len(today_sells)} sells from today'
+                }
+            
+            # Fallback decision based on time heuristic
+            current_hour = datetime.now(timezone.utc).hour
+            if current_hour >= 12:  # After midday
+                return {
+                    'can_buy': True,
+                    'reason': 'Midday heuristic - balanced position allowing new cycle'
+                }
+            
+            # Default conservative approach
+            return {
+                'can_buy': False,
+                'reason': 'Active balanced position detected - waiting'
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing position for new buy decision in {market}: {e}")
+            return {
+                'can_buy': False,
+                'reason': f'Analysis error - conservative wait: {e}'
+            }
+    
+    def _place_missing_sell_order(self, market: str, missing_amount: float) -> bool:
+        """Place sell order for missing position coverage"""
+        try:
+            # Get position for entry price reference
+            position = self.position_manager.get_position(market)
+            if not position:
+                logger.error(f"Cannot place missing sell - no position found for {market}")
+                return False
+            
+            # Calculate sell price with profit margin (1.5% default)
+            profit_margin = 1.015  # 1.5% profit
+            sell_price = position.avg_entry_price * profit_margin
+            
+            logger.info(f"Placing missing sell order: {missing_amount:.6f} {market} @ ${sell_price:.2f}")
+            
+            # Place the missing sell order using proven method
+            order = self.order_manager.place_sell_order(
+                market=market,
+                amount=missing_amount,
+                price=sell_price,
+                position_size=missing_amount * sell_price,
+                is_hide=True
+            )
+            
+            if order:
+                logger.info(f"✅ Missing sell order placed: {order.client_id}")
+                # Track the order for automatic pairing
+                if self.order_tracker:
+                    self.order_tracker.track_order(
+                        order_id=str(order.exchange_order_id),
+                        client_id=order.client_id,
+                        market=market,
+                        side=OrderSide.SELL,
+                        amount=missing_amount,
+                        price=sell_price
+                    )
+                return True
+            else:
+                logger.error(f"❌ Failed to place missing sell order for {market}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error placing missing sell order for {market}: {e}")
+            return False
+    
     def _should_place_buy_order(self, market: str, signal: TradingSignal, current_price: float) -> bool:
-        """Determine if we should place a buy order"""
-        # Don't place if price is too far from signal
-        price_diff_percent = abs(current_price - signal.buy_price) / signal.buy_price * 100
-        if price_diff_percent > MAX_RANGE_DEVIATION:
-            logger.debug(f"Price too far from buy signal: {price_diff_percent:.2f}% deviation")
+        """Enhanced buy order decision with comprehensive strategy validation"""
+        
+        # Phase 1: Daily buy order check with stale cleanup
+        logger.info(f"🔍 Phase 1: Checking daily buy status for {market}")
+        buy_status = self._check_daily_buy_status(market)
+        if buy_status['has_today_buy']:
+            logger.info(f"❌ Cannot place buy - already have {len(buy_status['today_orders'])} buy order(s) today for {market}")
             return False
         
-        # Check if we already have pending buy orders near this price
-        active_orders = self.order_manager.get_pending_orders(market)
-        for order in active_orders:
-            if (order.side.value == 'buy' and 
-                abs(order.price - signal.buy_price) / signal.buy_price < 0.01):  # Within 1%
-                logger.debug(f"Buy order already exists near signal price")
-                return False
+        # Phase 2: Enhanced position and sell balance analysis
+        logger.info(f"🔍 Phase 2: Analyzing position-sell balance for {market}")
+        balance = self._calculate_position_sell_balance(market)
         
-        # Check position size limits and account balance
+        if balance['position_exists']:
+            if not balance['is_balanced']:
+                # Position exists but not balanced - place missing sell order first
+                logger.info(f"⚠️ Position unbalanced: {balance['position_size']:.6f} position vs {balance['total_sells']:.6f} sells")
+                logger.info(f"🔧 Attempting to place missing sell order: {balance['missing_sell']:.6f}")
+                
+                if self._place_missing_sell_order(market, balance['missing_sell']):
+                    logger.info(f"✅ Missing sell order placed - now balanced")
+                else:
+                    logger.error(f"❌ Failed to place missing sell order")
+                
+                # Don't place buy order this cycle - wait for balance to be established
+                logger.info(f"❌ Cannot place buy - waiting for position to be balanced")
+                return False
+            else:
+                # Position exists and is balanced - check if we can start new cycle
+                logger.info(f"🔍 Phase 3: Enhanced position analysis for {market}")
+                cycle_check = self._can_place_new_buy_with_existing_position(market)
+                if not cycle_check['can_buy']:
+                    logger.info(f"❌ Cannot place buy - {cycle_check['reason']}")
+                    return False
+                else:
+                    logger.info(f"✅ Position analysis passed - {cycle_check['reason']}")
+        
+        # Phase 4: Price validation
+        logger.info(f"🔍 Phase 4: Price validation for {market}")
+        price_diff_percent = abs(current_price - signal.buy_price) / signal.buy_price * 100
+        if price_diff_percent > MAX_RANGE_DEVIATION:
+            logger.info(f"❌ Cannot place buy - price too far from signal: {price_diff_percent:.2f}% deviation (max: {MAX_RANGE_DEVIATION}%)")
+            logger.info(f"💡 Current: ${current_price:.2f}, Signal: ${signal.buy_price:.2f}")
+            return False
+        
+        # Phase 5: Account balance and position sizing
+        logger.info(f"🔍 Phase 5: Account balance and position sizing for {market}")
         account_balance = self.get_account_balance()
         position_size = self.position_sizer.calculate_position_size(
             market, signal.buy_price, account_balance
         )
         
-        return position_size.is_valid
+        if not position_size.is_valid:
+            logger.info(f"❌ Cannot place buy - position sizing invalid: {position_size.reason}")
+            return False
+        
+        # All checks passed
+        logger.info(f"✅ All checks passed - ready to place buy order for {market}")
+        logger.info(f"💰 Order details: ${signal.buy_price:.2f} x {position_size.quantity:.6f} = ${position_size.size_usdt:.2f}")
+        return True
     
     async def _place_entry_order(self, market: str, side: str, price: float, signal: TradingSignal):
         """Place an entry order"""
