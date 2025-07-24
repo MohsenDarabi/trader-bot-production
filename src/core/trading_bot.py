@@ -310,18 +310,37 @@ class DailyRangeBot:
                 logger.error(f"Error checking exit for position {position.position_id}: {e}")
     
     async def _check_entry_opportunities(self, market: str, signal: TradingSignal):
-        """Check for new entry opportunities"""
+        """Check for new entry opportunities and manage existing positions"""
         try:
             current_price = self.market_data.get_current_price(market)
             if not current_price:
                 return
             
-            # Check buy signal
-            if self._should_place_buy_order(market, signal, current_price):
-                await self._place_entry_order(market, 'buy', signal.buy_price, signal)
+            # First priority: Check if we have existing position that needs sell orders
+            balance = self._calculate_position_sell_balance(market)
+            if balance['position_exists']:
+                logger.info(f"🎯 Found existing position in {market}: {balance['position_size']:.6f}")
+                
+                if not balance['is_balanced']:
+                    logger.info(f"⚠️ Position needs sell orders: missing {balance['missing_sell']:.6f}")
+                    # Place missing sell order for existing position
+                    if self._place_missing_sell_order(market, balance['missing_sell']):
+                        logger.info(f"✅ Placed missing sell order for existing position")
+                    else:
+                        logger.error(f"❌ Failed to place missing sell order")
+                else:
+                    logger.info(f"✅ Position properly balanced with {len(balance['sell_orders'])} sell orders")
+                
+                # With existing position, no new buy orders should be placed
+                # The _should_place_buy_order method will prevent this anyway
+                return
             
-            # Check sell signal (for short positions if supported)
-            # Note: For now, focusing on long positions only as per strategy
+            # Second priority: Check for new buy opportunities (only if no position exists)
+            if self._should_place_buy_order(market, signal, current_price):
+                logger.info(f"🚀 Placing new buy order for {market}")
+                await self._place_entry_order(market, 'buy', signal.buy_price, signal)
+            else:
+                logger.debug(f"⏸️ No buy opportunity for {market} at current conditions")
             
         except Exception as e:
             logger.error(f"Error checking entry opportunities for {market}: {e}")
@@ -421,73 +440,6 @@ class DailyRangeBot:
                 'position_exists': False
             }
     
-    def _can_place_new_buy_with_existing_position(self, market: str) -> Dict[str, Any]:
-        """Enhanced position analysis for new buy placement decisions"""
-        try:
-            # Get position and sell balance using proven methods
-            balance = self._calculate_position_sell_balance(market)
-            
-            if not balance['position_exists']:
-                return {
-                    'can_buy': True,
-                    'reason': 'No position exists'
-                }
-            
-            if not balance['is_balanced']:
-                return {
-                    'can_buy': False,
-                    'reason': f"Position not balanced - missing {balance['missing_sell']:.6f} in sells"
-                }
-            
-            # Position exists and is balanced - check sell order ages
-            today = datetime.now(timezone.utc).date()
-            sell_orders = balance['sell_orders']
-            
-            if not sell_orders:
-                # Position exists but no sell orders - this shouldn't happen but handle it
-                return {
-                    'can_buy': False,
-                    'reason': 'Position exists but no sell orders found'
-                }
-            
-            # Analyze sell order timestamps using proven Order.created_at
-            old_sells = [o for o in sell_orders if o.created_at.date() < today]
-            today_sells = [o for o in sell_orders if o.created_at.date() == today]
-            
-            # If all sells are from previous days, position is likely stale
-            if len(old_sells) > 0 and len(today_sells) == 0:
-                return {
-                    'can_buy': True,
-                    'reason': f'Position with {len(old_sells)} old sell orders - allowing new cycle'
-                }
-            
-            # If we have recent sell activity, wait for completion
-            if len(today_sells) > 0:
-                return {
-                    'can_buy': False,
-                    'reason': f'Recent sell activity detected - {len(today_sells)} sells from today'
-                }
-            
-            # Fallback decision based on time heuristic
-            current_hour = datetime.now(timezone.utc).hour
-            if current_hour >= 12:  # After midday
-                return {
-                    'can_buy': True,
-                    'reason': 'Midday heuristic - balanced position allowing new cycle'
-                }
-            
-            # Default conservative approach
-            return {
-                'can_buy': False,
-                'reason': 'Active balanced position detected - waiting'
-            }
-            
-        except Exception as e:
-            logger.error(f"Error analyzing position for new buy decision in {market}: {e}")
-            return {
-                'can_buy': False,
-                'reason': f'Analysis error - conservative wait: {e}'
-            }
     
     def _place_missing_sell_order(self, market: str, missing_amount: float) -> bool:
         """Place sell order for missing position coverage"""
@@ -544,44 +496,44 @@ class DailyRangeBot:
             logger.info(f"❌ Cannot place buy - already have {len(buy_status['today_orders'])} buy order(s) today for {market}")
             return False
         
-        # Phase 2: Enhanced position and sell balance analysis
-        logger.info(f"🔍 Phase 2: Analyzing position-sell balance for {market}")
+        # Phase 2: CRITICAL - Check if we have existing position from today's trading
+        logger.info(f"🔍 Phase 2: Checking for existing position that prevents new buy orders")
         balance = self._calculate_position_sell_balance(market)
         
         if balance['position_exists']:
+            logger.info(f"⚠️ FOUND EXISTING POSITION: {balance['position_size']:.6f} {market}")
+            
+            # STRATEGY RULE: Only ONE buy order per day per market
+            # If position exists, we should NEVER place another buy order the same day
+            # Instead, ensure the position has proper sell orders
+            
             if not balance['is_balanced']:
-                # Position exists but not balanced - place missing sell order first
-                logger.info(f"⚠️ Position unbalanced: {balance['position_size']:.6f} position vs {balance['total_sells']:.6f} sells")
-                logger.info(f"🔧 Attempting to place missing sell order: {balance['missing_sell']:.6f}")
+                # Position exists but not balanced - place missing sell order
+                logger.info(f"🔧 Position unbalanced: {balance['position_size']:.6f} position vs {balance['total_sells']:.6f} sells")
+                logger.info(f"🔧 Placing missing sell order: {balance['missing_sell']:.6f}")
                 
                 if self._place_missing_sell_order(market, balance['missing_sell']):
-                    logger.info(f"✅ Missing sell order placed - now balanced")
+                    logger.info(f"✅ Missing sell order placed for existing position")
                 else:
                     logger.error(f"❌ Failed to place missing sell order")
-                
-                # Don't place buy order this cycle - wait for balance to be established
-                logger.info(f"❌ Cannot place buy - waiting for position to be balanced")
-                return False
             else:
-                # Position exists and is balanced - check if we can start new cycle
-                logger.info(f"🔍 Phase 3: Enhanced position analysis for {market}")
-                cycle_check = self._can_place_new_buy_with_existing_position(market)
-                if not cycle_check['can_buy']:
-                    logger.info(f"❌ Cannot place buy - {cycle_check['reason']}")
-                    return False
-                else:
-                    logger.info(f"✅ Position analysis passed - {cycle_check['reason']}")
+                logger.info(f"✅ Position is properly balanced with sell orders")
+            
+            # NEVER place buy order when position exists - this is the core strategy rule
+            logger.info(f"❌ Cannot place buy - position already exists from today's trading")
+            logger.info(f"💡 Strategy: Maximum one buy order per day per market")
+            return False
         
-        # Phase 4: Price validation
-        logger.info(f"🔍 Phase 4: Price validation for {market}")
+        # Phase 3: Price validation
+        logger.info(f"🔍 Phase 3: Price validation for {market}")
         price_diff_percent = abs(current_price - signal.buy_price) / signal.buy_price * 100
         if price_diff_percent > MAX_RANGE_DEVIATION:
             logger.info(f"❌ Cannot place buy - price too far from signal: {price_diff_percent:.2f}% deviation (max: {MAX_RANGE_DEVIATION}%)")
             logger.info(f"💡 Current: ${current_price:.2f}, Signal: ${signal.buy_price:.2f}")
             return False
         
-        # Phase 5: Account balance and position sizing
-        logger.info(f"🔍 Phase 5: Account balance and position sizing for {market}")
+        # Phase 4: Account balance and position sizing
+        logger.info(f"🔍 Phase 4: Account balance and position sizing for {market}")
         account_balance = self.get_account_balance()
         position_size = self.position_sizer.calculate_position_size(
             market, signal.buy_price, account_balance
@@ -591,7 +543,7 @@ class DailyRangeBot:
             logger.info(f"❌ Cannot place buy - position sizing invalid: {position_size.reason}")
             return False
         
-        # All checks passed
+        # All checks passed - no existing position, no pending buy orders
         logger.info(f"✅ All checks passed - ready to place buy order for {market}")
         logger.info(f"💰 Order details: ${signal.buy_price:.2f} x {position_size.quantity:.6f} = ${position_size.size_usdt:.2f}")
         return True
