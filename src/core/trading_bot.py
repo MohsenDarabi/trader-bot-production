@@ -206,7 +206,7 @@ class DailyRangeBot:
                 self._last_account_update = now
             
             if (not self._last_positions_sync or 
-                (now - self._last_positions_sync).seconds > 30):
+                (now - self._last_positions_sync).seconds > 120):  # Reduced from 30s to 2 minutes
                 await self._sync_positions()
                 self._last_positions_sync = now
             
@@ -373,14 +373,14 @@ class DailyRangeBot:
                 # Track the buy order for automatic sell pairing
                 if order:
                     self.order_tracker.track_order(
-                        order_id=str(order.order_id),
+                        order_id=str(order.exchange_order_id),
                         client_id=order.client_id,
                         market=market,
                         side=OrderSide.BUY,
                         amount=position_size.quantity,
                         price=price
                     )
-                    logger.info(f"Started tracking buy order {order.order_id} for automatic sell pairing")
+                    logger.info(f"Started tracking buy order {order.exchange_order_id} for automatic sell pairing")
             else:
                 # For sell orders, use the traditional approach since this is for closing positions
                 order = self.order_manager.place_sell_order(
@@ -394,7 +394,7 @@ class DailyRangeBot:
                 # Track the sell order
                 if order:
                     self.order_tracker.track_order(
-                        order_id=str(order.order_id),
+                        order_id=str(order.exchange_order_id),
                         client_id=order.client_id,
                         market=market,
                         side=OrderSide.SELL,
@@ -450,7 +450,7 @@ class DailyRangeBot:
                 # Track the manual exit order
                 if order:
                     self.order_tracker.track_order(
-                        order_id=str(order.order_id),
+                        order_id=str(order.exchange_order_id),
                         client_id=order.client_id,
                         market=position.market,
                         side=OrderSide.SELL,
@@ -469,7 +469,7 @@ class DailyRangeBot:
                 
                 if order:
                     self.order_tracker.track_order(
-                        order_id=str(order.order_id),
+                        order_id=str(order.exchange_order_id),
                         client_id=order.client_id,
                         market=position.market,
                         side=OrderSide.BUY,

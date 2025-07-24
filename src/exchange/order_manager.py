@@ -344,8 +344,18 @@ class OrderManager:
             return order
             
         except Exception as e:
-            logger.error(f"Failed to update order status {client_id}: {e}")
-            return order
+            # Handle common API signature errors gracefully
+            if "Signature Incorrect" in str(e):
+                logger.warning(f"Order status check failed due to signature error for {client_id}: {e}")
+                logger.debug("This is a known CoinEx API issue - continuing without status update")
+                # Return order without modification - WebSocket updates will handle status changes
+                return order
+            elif "Rate limit" in str(e) or "429" in str(e):
+                logger.warning(f"Rate limit hit checking order status for {client_id} - will retry later")
+                return order
+            else:
+                logger.error(f"Failed to update order status {client_id}: {e}")
+                return order
     
     def get_pending_orders(self, market: Optional[str] = None) -> List[Order]:
         """
