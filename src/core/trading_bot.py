@@ -295,7 +295,7 @@ class DailyRangeBot:
                 # Validate profitability
                 validator = ProfitabilityValidator()
                 is_profitable = validator.is_position_profitable(
-                    position.avg_entry_price, position.quantity, exit_price
+                    position.avg_entry_price, position.size, exit_price
                 )
                 
                 if is_profitable.is_profitable:
@@ -403,7 +403,7 @@ class DailyRangeBot:
         try:
             # Get current position using proven method
             position = self.position_manager.get_position(market)
-            position_size = position.quantity if position else 0.0
+            position_size = position.size if position else 0.0
             
             # Get all pending sell orders using proven method
             pending_orders = self.order_manager.get_pending_orders(market)
@@ -642,17 +642,17 @@ class DailyRangeBot:
                 
                 if existing_sells:
                     total_sell_amount = sum(order.remaining_amount for order in existing_sells)
-                    if total_sell_amount >= position.quantity * 0.95:  # Allow 5% tolerance
+                    if total_sell_amount >= position.size * 0.95:  # Allow 5% tolerance
                         logger.info(f"Position {position.market} already has sufficient sell orders: "
-                                  f"{total_sell_amount:.6f} >= {position.quantity:.6f}")
+                                  f"{total_sell_amount:.6f} >= {position.size:.6f}")
                         return
                 
                 # Place manual exit order if needed
                 order = self.order_manager.place_sell_order(
                     market=position.market,
-                    amount=position.quantity,
+                    amount=position.size,
                     price=exit_price,
-                    position_size=position.quantity * exit_price,
+                    position_size=position.size * exit_price,
                     is_hide=True
                 )
                 
@@ -663,16 +663,16 @@ class DailyRangeBot:
                         client_id=order.client_id,
                         market=position.market,
                         side=OrderSide.SELL,
-                        amount=position.quantity,
+                        amount=position.size,
                         price=exit_price
                     )
             else:
                 # For buy orders (closing short positions - rare in this strategy)
                 order = self.order_manager.place_buy_order(
                     market=position.market,
-                    amount=position.quantity,
+                    amount=position.size,
                     price=exit_price,
-                    position_size=position.quantity * exit_price,
+                    position_size=position.size * exit_price,
                     is_hide=True
                 )
                 
@@ -682,13 +682,13 @@ class DailyRangeBot:
                         client_id=order.client_id,
                         market=position.market,
                         side=OrderSide.BUY,
-                        amount=position.quantity,
+                        amount=position.size,
                         price=exit_price
                     )
             
             if order:
                 logger.info(f"Placed manual exit order for {position.market}: "
-                          f"Side={side}, Price=${exit_price:.2f}, Amount={position.quantity:.6f}")
+                          f"Side={side}, Price=${exit_price:.2f}, Amount={position.size:.6f}")
             else:
                 logger.error(f"Failed to place exit order for {position.market}")
                 
