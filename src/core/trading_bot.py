@@ -131,6 +131,10 @@ class DailyRangeBot:
                 "balance.update",
                 self._handle_balance_update
             )
+            self.websocket_client.register_handler(
+                "position.update",
+                self._handle_position_update
+            )
             
             # Subscribe to order and user deals updates
             await self.websocket_client.subscribe_orders()
@@ -144,6 +148,10 @@ class DailyRangeBot:
             # Subscribe to balance updates for real-time account balance
             await self.websocket_client.subscribe_balance(["USDT"])
             logger.info("✓ Subscribed to WebSocket balance updates")
+            
+            # Subscribe to position updates for real-time position tracking
+            await self.websocket_client.subscribe_positions()
+            logger.info("✓ Subscribed to WebSocket position updates")
             
             # Load current state from exchange (no database)
             logger.info("Loading current state from exchange...")
@@ -242,8 +250,9 @@ class DailyRangeBot:
                 await self._update_account_status()
                 self._last_account_update = now
             
+            # Reduced position sync frequency from 120s to 600s (10 min) since we have WebSocket position updates
             if (not self._last_positions_sync or 
-                (now - self._last_positions_sync).seconds > 120):  # Reduced from 30s to 2 minutes
+                (now - self._last_positions_sync).seconds > 600):
                 await self._sync_positions()
                 self._last_positions_sync = now
             
@@ -864,6 +873,99 @@ class DailyRangeBot:
         except Exception as e:
             logger.error(f"Error handling balance update: {e}")
     
+    def _handle_position_update(self, data: Dict[str, Any]):
+        """
+        Handle position.update message from WebSocket
+        
+        Args:
+            data: WebSocket message data containing position info
+        """
+        try:
+            event = data.get("event")
+            position_data = data.get("position", {})
+            
+            if not position_data:
+                logger.warning("Received empty position data in position.update")
+                return
+            
+            market = position_data.get("market")
+            if not market:
+                logger.warning("Received position update without market name")
+                return
+            
+            try:
+                # Extract position information
+                position_id = int(position_data.get("position_id", 0))
+                side = position_data.get("side", "long")  # 'long' or 'short'
+                open_interest = float(position_data.get("open_interest", 0))
+                avg_entry_price = float(position_data.get("avg_entry_price", 0))
+                unrealized_pnl = float(position_data.get("unrealized_pnl", 0))
+                liq_price = float(position_data.get("liq_price", 0))
+                
+                # Update position in position manager
+                from src.core.position_manager import PositionSide, Position
+                
+                if open_interest > 0:
+                    # Position exists or was updated
+                    pos_side = PositionSide.LONG if side == "long" else PositionSide.SHORT
+                    
+                    # Create or update position
+                    position = Position(
+                        position_id=position_id,
+                        market=market,
+                        side=pos_side,
+                        size=open_interest,
+                        avg_entry_price=avg_entry_price,
+                        total_cost=open_interest * avg_entry_price,  # Approximation
+                        unrealized_pnl=unrealized_pnl,
+                        liquidation_price=liq_price,
+                        created_at=datetime.now(timezone.utc),
+                        updated_at=datetime.now(timezone.utc)
+                    )
+                    
+                    # Update position manager
+                    old_position = self.position_manager.positions.get(market)
+                    self.position_manager.positions[market] = position
+                    
+                    # Log position changes
+                    if old_position:
+                        size_change = open_interest - old_position.size
+                        pnl_change = unrealized_pnl - old_position.unrealized_pnl
+                        if abs(size_change) > 0.000001 or abs(pnl_change) > 0.01:
+                            logger.info(
+                                f"📊 Position updated {market}: Size {old_position.size:.6f} → {open_interest:.6f} "
+                                f"({size_change:+.6f}), PnL {old_position.unrealized_pnl:+.2f} → {unrealized_pnl:+.2f} "
+                                f"({pnl_change:+.2f}), Entry: ${avg_entry_price:.2f}"
+                            )
+                    else:
+                        logger.info(
+                            f"📊 New position {market}: {side.upper()} {open_interest:.6f} @ ${avg_entry_price:.2f}, "
+                            f"PnL: {unrealized_pnl:+.2f}, Liq: ${liq_price:.2f}"
+                        )
+                        
+                else:
+                    # Position was closed
+                    if market in self.position_manager.positions:
+                        old_position = self.position_manager.positions[market]
+                        del self.position_manager.positions[market]
+                        logger.info(
+                            f"📊 Position closed {market}: {old_position.side.value.upper()} "
+                            f"{old_position.size:.6f} @ ${old_position.avg_entry_price:.2f}, "
+                            f"Final PnL: {unrealized_pnl:+.2f}"
+                        )
+                
+                # Update bot status
+                self.status.total_positions = len(self.position_manager.get_all_positions())
+                
+                logger.debug(f"Processed position update for {market}: event={event}, size={open_interest:.6f}")
+                
+            except (ValueError, TypeError) as e:
+                logger.error(f"Error parsing position data for {market}: {e}")
+                return
+            
+        except Exception as e:
+            logger.error(f"Error handling position update: {e}")
+    
     async def _update_account_status(self):
         """Update account balance and status (fallback for WebSocket)"""
         try:
@@ -896,12 +998,17 @@ class DailyRangeBot:
             logger.error(f"Error updating account status: {e}")
     
     async def _sync_positions(self):
-        """Sync positions with exchange"""
+        """Sync positions with exchange (periodic fallback for WebSocket)"""
         try:
+            # Log that we're doing periodic sync - should be rare with WebSocket
+            logger.info("Performing periodic position sync via HTTP (WebSocket fallback)")
+            
             self.position_manager.sync_with_exchange()
             
             # Sync existing orders with order tracker
             await self.order_tracker.sync_existing_orders()
+            
+            logger.info(f"Position sync completed: {len(self.position_manager.get_all_positions())} positions")
             
         except Exception as e:
             logger.error(f"Error syncing with exchange: {e}")
