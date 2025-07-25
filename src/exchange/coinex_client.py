@@ -18,6 +18,7 @@ from config.settings import (
 from src.exchange.auth import CoinExAuth
 from src.utils.logger import get_logger
 from src.utils.error_handling import handle_api_error, handle_network_error, handle_validation_error
+from src.utils.retry_handler import retry_on_transient_error, COINEX_RETRY_CONFIG
 
 
 logger = get_logger(__name__)
@@ -552,10 +553,11 @@ class CoinExClient:
         """
         return self._request('GET', '/v2/assets/futures/balance')
     
+    @retry_on_transient_error(config=COINEX_RETRY_CONFIG)
     def adjust_position_leverage(self, market: str, leverage: int, 
                                margin_mode: str = 'cross') -> Dict:
         """
-        Adjust position leverage for a specific market
+        Adjust position leverage for a specific market with retry on transient errors
         
         Args:
             market: Market symbol (e.g., ETHUSDT)
@@ -564,6 +566,9 @@ class CoinExClient:
             
         Returns:
             Response containing leverage adjustment result
+            
+        Raises:
+            ValueError: On validation errors or API errors after retries
         """
         if not market:
             raise ValueError("Market symbol is required")
@@ -583,19 +588,15 @@ class CoinExClient:
         
         logger.info(f"Setting leverage for {market}: {leverage}x ({margin_mode} margin)")
         
-        try:
-            # _request() returns only the 'data' portion and raises exception on API error
-            data_response = self._request('POST', '/v2/futures/adjust-position-leverage', data=data)
-            
-            # If we reach here, the API call was successful (no exception thrown)
-            logger.info(f"Leverage set successfully for {market}: "
-                      f"{data_response.get('leverage')}x {data_response.get('margin_mode')} margin")
-            
-            return data_response
-            
-        except Exception as e:
-            logger.error(f"Error setting leverage for {market}: {e}")
-            raise
+        # _request() returns only the 'data' portion and raises exception on API error
+        # The retry decorator will handle transient errors like "service too busy"
+        data_response = self._request('POST', '/v2/futures/adjust-position-leverage', data=data)
+        
+        # If we reach here, the API call was successful (no exception thrown)
+        logger.info(f"Leverage set successfully for {market}: "
+                  f"{data_response.get('leverage')}x {data_response.get('margin_mode')} margin")
+        
+        return data_response
     
     def close(self):
         """Close the session"""

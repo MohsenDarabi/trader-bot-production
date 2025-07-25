@@ -34,6 +34,13 @@ USE_MINIMUM_ORDERS_ONLY = TRADING_MODE == 'TEST'
 MAX_REQUESTS_PER_10_SECONDS = 400
 REQUEST_TIMEOUT = 30  # seconds
 
+# API Retry Configuration
+API_MAX_RETRIES = int(os.getenv('API_MAX_RETRIES', '3'))
+API_INITIAL_RETRY_DELAY = float(os.getenv('API_INITIAL_RETRY_DELAY', '2.0'))  # seconds
+API_RETRY_BACKOFF_MULTIPLIER = float(os.getenv('API_RETRY_BACKOFF_MULTIPLIER', '2.0'))
+API_MAX_RETRY_DELAY = float(os.getenv('API_MAX_RETRY_DELAY', '30.0'))  # seconds
+API_RETRY_JITTER = os.getenv('API_RETRY_JITTER', 'True').lower() == 'true'
+
 # Database Configuration
 DATABASE_PATH = os.getenv('DATABASE_PATH', './storage/bot_state.db')
 
