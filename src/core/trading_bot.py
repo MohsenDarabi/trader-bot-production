@@ -19,6 +19,7 @@ from src.data.websocket_market_data import WebSocketMarketDataProvider
 from src.core.strategy import DailyRangeStrategy, TradingSignal
 from src.core.position_sizing import PositionSizer
 from src.utils.logger import get_logger
+from src.utils.smart_logging import log_trading_event, force_log_summaries
 from config.settings import (
     SIGNAL_GENERATION_TIME, TIMEZONE, is_test_mode, 
     MIN_PROFIT_PERCENT, MAX_RANGE_DEVIATION

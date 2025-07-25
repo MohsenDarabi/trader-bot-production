@@ -19,6 +19,7 @@ from src.exchange.auth import CoinExAuth
 from src.utils.logger import get_logger
 from src.utils.error_handling import handle_api_error, handle_network_error, handle_validation_error
 from src.utils.retry_handler import retry_on_transient_error, COINEX_RETRY_CONFIG
+from src.utils.smart_logging import smart_api_logger
 
 
 logger = get_logger(__name__)
@@ -108,9 +109,9 @@ class CoinExClient:
             ValueError: On API error response
         """
         # Wait if rate limit would be exceeded
-        logger.info("Checking rate limiter...")
+        logger.debug("Checking rate limiter...")
         self.rate_limiter.wait_if_needed()
-        logger.info("Rate limiter check complete")
+        logger.debug("Rate limiter check complete")
         
         # Construct full URL
         url = urljoin(self.base_url, endpoint)
@@ -140,24 +141,32 @@ class CoinExClient:
                 body=body_str
             )
             kwargs['headers'] = headers
-            logger.info("Authentication headers generated successfully")
+            logger.debug("Authentication headers generated successfully")
         
         # Log request
-        logger.info(f"Making {method} request to {url} with params={params} auth={auth_required}")
-        logger.info(f"Request kwargs: {kwargs}")
+        logger.debug(f"Making {method} request to {url} with params={params} auth={auth_required}")
+        logger.debug(f"Request kwargs: {kwargs}")
         
+        start_time = time.time()
         try:
             # Make request
-            logger.info("About to call session.request() - this is where hangs typically occur")
+            logger.debug("About to call session.request() - this is where hangs typically occur")
             response = self.session.request(method, url, **kwargs)
-            logger.info(f"Received response with status {response.status_code}")
+            
+            # Track response time and log with smart logger
+            duration = time.time() - start_time
+            success = response.status_code < 400
+            smart_api_logger.log_request(method, endpoint, success)
+            smart_api_logger.log_response_time(endpoint, duration)
+            
+            logger.debug(f"Received response with status {response.status_code}")
             
             # Log response
             logger.debug(f"Response {response.status_code}: {response.text[:200]}")
             
             # Parse response
-            logger.info(f"Raw response text: '{response.text}'")
-            logger.info(f"Response headers: {dict(response.headers)}")
+            logger.debug(f"Raw response text: '{response.text}'")
+            logger.debug(f"Response headers: {dict(response.headers)}")
             
             # Handle HTTP errors
             if response.status_code >= 400:

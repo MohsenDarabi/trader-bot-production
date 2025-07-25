@@ -48,6 +48,12 @@ DATABASE_PATH = os.getenv('DATABASE_PATH', './storage/bot_state.db')
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 LOG_FILE = './logs/trading_bot.log'
 
+# Enhanced Logging Settings for Noise Reduction
+CONSOLE_LOG_LEVEL = os.getenv('CONSOLE_LOG_LEVEL', 'INFO')    # Console verbosity
+FILE_LOG_LEVEL = os.getenv('FILE_LOG_LEVEL', 'DEBUG')         # File verbosity (can be more detailed)
+ENABLE_SMART_LOGGING = os.getenv('ENABLE_SMART_LOGGING', 'True').lower() == 'true'
+LOG_SUMMARY_INTERVAL = int(os.getenv('LOG_SUMMARY_INTERVAL', '120'))  # Smart logging summary interval
+
 # Display Settings
 TERMINAL_REFRESH_INTERVAL = 1  # seconds
 SHOW_DEBUG_INFO = os.getenv('SHOW_DEBUG_INFO', 'False').lower() == 'true'

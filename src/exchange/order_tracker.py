@@ -222,7 +222,8 @@ class OrderTracker:
     def _handle_order_update(self, data: Dict[str, Any]) -> None:
         """Handle order status updates from WebSocket"""
         try:
-            logger.info(f"Processing order update: {data}")
+            logger.debug(f"Processing order update: {data}")
+            logger.info("Processing order update")
             
             event_type = data.get("event")
             # CoinEx sends single "order" object, not "orders" array
@@ -246,7 +247,8 @@ class OrderTracker:
     def _handle_user_deals_update(self, data: Dict[str, Any]) -> None:
         """Handle user deal/fill updates from WebSocket"""
         try:
-            logger.info(f"Processing user deals update: {data}")
+            logger.debug(f"Processing user deals update: {data}")
+            logger.info("Processing user deals update")
             
             # Check both possible structures for deals data
             deals = data.get("deals", [])
@@ -256,7 +258,8 @@ class OrderTracker:
             
             for deal_data in deals:
                 if deal_data:
-                    logger.info(f"Processing deal: {deal_data}")
+                    logger.debug(f"Processing deal: {deal_data}")
+                    logger.info(f"Processing deal for order")
                     self._process_deal(deal_data)
                 
         except Exception as e:

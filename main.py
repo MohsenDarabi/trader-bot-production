@@ -23,6 +23,7 @@ from rich.text import Text
 # Import bot components
 from src.core.trading_bot import DailyRangeBot
 from src.utils.logger import get_logger
+from src.utils.smart_logging import force_log_summaries
 from config.settings import validate_config, is_test_mode, get_position_size_mode
 from src.utils.asset_selector import AssetSelector
 from process_lock import ProcessLock
@@ -225,6 +226,7 @@ class TradingBotManager:
         
         try:
             with Live(layout, refresh_per_second=0.2, screen=True):
+                cycle_count = 0
                 while self.running:
                     try:
                         # Update display
@@ -232,6 +234,11 @@ class TradingBotManager:
                         
                         # Execute bot logic
                         await self.bot.execute_trading_cycle()
+                        
+                        # Force log summaries every 12 cycles (1 minute)
+                        cycle_count += 1
+                        if cycle_count % 12 == 0:
+                            force_log_summaries()
                         
                         # Wait before next cycle
                         await asyncio.sleep(5)

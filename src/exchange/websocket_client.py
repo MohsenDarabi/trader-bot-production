@@ -17,6 +17,7 @@ from websockets.exceptions import ConnectionClosed, InvalidMessage
 from config.settings import COINEX_WS_URL, WS_RECONNECT_DELAY, WS_HEARTBEAT_INTERVAL
 from src.exchange.auth import CoinExAuth
 from src.utils.logger import get_logger
+from src.utils.smart_logging import smart_websocket_logger
 
 
 logger = get_logger(__name__)
@@ -87,7 +88,7 @@ class CoinExWebSocketClient:
             True if connection successful, False otherwise
         """
         try:
-            logger.info(f"Connecting to CoinEx WebSocket: {COINEX_WS_URL}")
+            smart_websocket_logger.log_connection_event(f"Connecting to {COINEX_WS_URL}")
             self.websocket = await websockets.connect(
                 COINEX_WS_URL,
                 ping_interval=None,  # Use our custom application-level heartbeat instead
@@ -97,7 +98,7 @@ class CoinExWebSocketClient:
                 compression=None  # Disable compression, we handle gzip manually
             )
             self.is_connected = True
-            logger.info("WebSocket connection established")
+            smart_websocket_logger.log_connection_event("Connection established")
             
             # Start message handling
             asyncio.create_task(self._handle_messages())
@@ -385,10 +386,11 @@ class CoinExWebSocketClient:
                     message = json.loads(message_str)
                     logger.debug(f"Received WebSocket message: {message}")
                     
-                    # Log important messages at info level for debugging
+                    # Use smart logging for WebSocket messages
                     method = message.get("method")
-                    if method in ["order.update", "user_deals.update"]:
-                        logger.info(f"📨 Received important message: {method} - {message}")
+                    if method:
+                        data_size = len(message_str) if isinstance(message_str, str) else 0
+                        smart_websocket_logger.log_message_received(method, data_size)
                     
                     # Handle different message types
                     
@@ -433,7 +435,7 @@ class CoinExWebSocketClient:
         
         # CoinEx uses code 0 for success
         if code == 0:
-            logger.info("WebSocket authentication successful")
+            smart_websocket_logger.log_connection_event("Authentication successful")
             self.is_authenticated = True
         elif error:
             logger.error(f"Authentication failed: {error}")
@@ -451,7 +453,9 @@ class CoinExWebSocketClient:
         # CoinEx sends data in "data" field, not "params"
         data = message.get("data", {})
         
-        logger.info(f"Received subscription update: {method} with data: {data}")
+        logger.debug(f"Received subscription update: {method} with data: {data}")
+        # Use smart logging instead of direct logging
+        smart_websocket_logger.log_message_received(method, len(str(data)))
         
         # Call registered handler if available
         if method in self.message_handlers:
@@ -514,7 +518,7 @@ class CoinExWebSocketClient:
                         "id": self.get_next_message_id()
                     }
                     await self._send_message(ping_message)
-                    logger.info(f"Sent WebSocket heartbeat #{heartbeat_count} - keeping connection alive")
+                    smart_websocket_logger.log_message_sent("server.ping")
                 else:
                     logger.debug("Heartbeat skipped - WebSocket not connected")
                     break

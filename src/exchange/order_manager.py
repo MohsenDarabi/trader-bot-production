@@ -151,7 +151,7 @@ class OrderManager:
         
         try:
             # Place order on exchange with detailed logging and timeout protection
-            logger.info(f"About to call client.place_order() with params: market={market}, side=buy, amount={amount}, price={price}, client_id={client_id}, is_hide={is_hide}")
+            logger.debug(f"About to call client.place_order() with params: market={market}, side=buy, amount={amount}, price={price}, client_id={client_id}, is_hide={is_hide}")
             
             # Set up timeout protection (45 seconds)
             signal.signal(signal.SIGALRM, timeout_handler)
@@ -170,7 +170,7 @@ class OrderManager:
                 
                 # Clear the alarm
                 signal.alarm(0)
-                logger.info(f"Received response from place_order: {response}")
+                logger.debug(f"Received response from place_order: {response}")
                 
             except TimeoutError:
                 logger.error("Order placement timed out after 45 seconds")
