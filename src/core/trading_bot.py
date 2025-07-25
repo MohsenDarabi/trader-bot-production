@@ -127,6 +127,10 @@ class DailyRangeBot:
                 "state.update", 
                 self.websocket_market_data.handle_state_update
             )
+            self.websocket_client.register_handler(
+                "balance.update",
+                self._handle_balance_update
+            )
             
             # Subscribe to order and user deals updates
             await self.websocket_client.subscribe_orders()
@@ -136,6 +140,10 @@ class DailyRangeBot:
             # Subscribe to market state updates for real-time price data
             await self.websocket_client.subscribe_market_state()
             logger.info("✓ Subscribed to WebSocket market state updates")
+            
+            # Subscribe to balance updates for real-time account balance
+            await self.websocket_client.subscribe_balance(["USDT"])
+            logger.info("✓ Subscribed to WebSocket balance updates")
             
             # Load current state from exchange (no database)
             logger.info("Loading current state from exchange...")
@@ -228,8 +236,9 @@ class DailyRangeBot:
         try:
             # Update account and positions periodically
             now = datetime.now(timezone.utc)
+            # Reduced account update frequency from 60s to 300s (5 min) since we have WebSocket balance updates
             if (not self._last_account_update or 
-                (now - self._last_account_update).seconds > 60):
+                (now - self._last_account_update).seconds > 300):
                 await self._update_account_status()
                 self._last_account_update = now
             
@@ -786,17 +795,100 @@ class DailyRangeBot:
         except Exception as e:
             logger.error(f"Error in pairing tasks: {e}")
     
-    async def _update_account_status(self):
-        """Update account balance and status"""
+    def _handle_balance_update(self, data: Dict[str, Any]):
+        """
+        Handle balance.update message from WebSocket
+        
+        Args:
+            data: WebSocket message data containing balance_list
+        """
         try:
-            account_info = self.client.get_account_info()
-            if isinstance(account_info, list):
-                for asset in account_info:
-                    if asset.get('ccy') == 'USDT':
-                        self.status.account_balance = float(asset.get('available', 0))
-                        break
+            balance_list = data.get("balance_list", [])
+            if not balance_list:
+                logger.warning("Received empty balance_list in balance.update")
+                return
             
-            # Update position and order counts
+            for balance_data in balance_list:
+                ccy = balance_data.get("ccy")
+                if ccy == "USDT":
+                    try:
+                        # Extract balance information
+                        available = float(balance_data.get("available", 0))
+                        frozen = float(balance_data.get("frozen", 0))
+                        margin = float(balance_data.get("margin", 0))
+                        unrealized_pnl = float(balance_data.get("unrealized_pnl", 0))
+                        equity = float(balance_data.get("equity", 0))
+                        
+                        # Update bot status with new balance
+                        old_balance = self.status.account_balance
+                        self.status.account_balance = available
+                        
+                        # Log significant balance changes
+                        if old_balance > 0:
+                            balance_change = available - old_balance
+                            if abs(balance_change) > 0.01:  # Log changes > $0.01
+                                logger.info(
+                                    f"💰 Balance updated: ${old_balance:.2f} → ${available:.2f} "
+                                    f"(change: {balance_change:+.2f}, PnL: {unrealized_pnl:+.2f})"
+                                )
+                        else:
+                            logger.info(f"💰 Initial balance received: ${available:.2f}")
+                        
+                        # Store additional balance info for monitoring
+                        if not hasattr(self.status, 'balance_details'):
+                            self.status.balance_details = {}
+                        
+                        self.status.balance_details = {
+                            "available": available,
+                            "frozen": frozen,
+                            "margin": margin,
+                            "unrealized_pnl": unrealized_pnl,
+                            "equity": equity,
+                            "last_update": datetime.now(timezone.utc)
+                        }
+                        
+                        logger.debug(
+                            f"Balance details updated: Available=${available:.2f}, "
+                            f"Frozen=${frozen:.2f}, Margin=${margin:.2f}, "
+                            f"PnL={unrealized_pnl:+.2f}, Equity=${equity:.2f}"
+                        )
+                        
+                        break  # We only care about USDT balance
+                        
+                    except (ValueError, TypeError) as e:
+                        logger.error(f"Error parsing balance data for {ccy}: {e}")
+                        continue
+            
+            logger.debug(f"Processed balance update with {len(balance_list)} currencies")
+            
+        except Exception as e:
+            logger.error(f"Error handling balance update: {e}")
+    
+    async def _update_account_status(self):
+        """Update account balance and status (fallback for WebSocket)"""
+        try:
+            # Only update balance via HTTP if WebSocket data is stale or missing
+            update_balance_via_http = True
+            
+            if hasattr(self.status, 'balance_details') and self.status.balance_details:
+                last_ws_update = self.status.balance_details.get('last_update')
+                if last_ws_update:
+                    age = (datetime.now(timezone.utc) - last_ws_update).total_seconds()
+                    if age < 120:  # WebSocket data is fresh (< 2 minutes)
+                        update_balance_via_http = False
+                        logger.debug("Using WebSocket balance data (HTTP fallback skipped)")
+            
+            if update_balance_via_http:
+                logger.info("Updating balance via HTTP (WebSocket data stale or missing)")
+                account_info = self.client.get_account_info()
+                if isinstance(account_info, list):
+                    for asset in account_info:
+                        if asset.get('ccy') == 'USDT':
+                            self.status.account_balance = float(asset.get('available', 0))
+                            logger.info(f"HTTP balance update: ${self.status.account_balance:.2f}")
+                            break
+            
+            # Always update position and order counts (these are still HTTP-based)
             self.status.total_positions = len(self.position_manager.get_all_positions())
             self.status.total_orders = len(self.order_manager.get_pending_orders())
             
