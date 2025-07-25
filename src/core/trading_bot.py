@@ -205,38 +205,76 @@ class DailyRangeBot:
             if not market_info:
                 raise ValueError(f"Market {market} not found or not available")
             
-            # Set leverage to strategy requirement (2x) with retry mechanism
+            # Set leverage to strategy requirement (2x) with intelligent conflict resolution
             try:
                 from config.settings import LEVERAGE
-                logger.info(f"Setting leverage for {market} to {int(LEVERAGE)}x (with retry on transient errors)")
+                target_leverage = int(LEVERAGE)
+                margin_mode = 'cross'
                 
-                # adjust_position_leverage now includes retry mechanism for transient errors
-                leverage_data = self.client.adjust_position_leverage(
-                    market=market,
-                    leverage=int(LEVERAGE),
-                    margin_mode='cross'
-                )
+                logger.info(f"🔧 Configuring leverage for {market} to {target_leverage}x {margin_mode}")
                 
-                # If we reach here, leverage was set successfully
-                logger.info(f"✅ Leverage configured for {market}: "
-                          f"{leverage_data.get('leverage', int(LEVERAGE))}x "
-                          f"{leverage_data.get('margin_mode', 'cross')} margin")
-                          
-            except Exception as e:
-                # Enhanced error handling with more specific messaging
-                if "service too busy" in str(e).lower():
-                    logger.error(f"⚠️ CoinEx API is consistently busy for {market}. "
-                               f"Leverage setting failed after retries: {e}")
-                    logger.error("The bot will attempt to continue, but leverage may not be optimal.")
-                    logger.error("Please monitor positions closely and manually set leverage if needed.")
+                # First, try direct leverage adjustment
+                try:
+                    leverage_data = self.client.adjust_position_leverage(
+                        market=market,
+                        leverage=target_leverage,
+                        margin_mode=margin_mode
+                    )
                     
-                    # For now, we'll still raise the error to maintain safety
-                    # In the future, we could add a configuration option to continue with default leverage
-                    raise ValueError(f"Failed to set leverage for {market} after retries. "
-                                   f"API consistently busy: {e}")
-                else:
-                    logger.error(f"Critical error setting leverage for {market}: {e}")
-                    raise ValueError(f"Cannot proceed without setting correct leverage: {e}")
+                    # If we reach here, leverage was set successfully
+                    logger.info(f"✅ Leverage configured for {market}: "
+                              f"{leverage_data.get('leverage', target_leverage)}x "
+                              f"{leverage_data.get('margin_mode', margin_mode)} margin")
+                    
+                except Exception as direct_error:
+                    # Check if it's an "order exist" error that we can handle intelligently
+                    if "order exist" in str(direct_error).lower():
+                        logger.warning(f"⚠️ Order conflict detected for {market}: {direct_error}")
+                        logger.info("🧠 Using intelligent leverage conflict resolution")
+                        
+                        # Use intelligent conflict resolution
+                        resolution_result = self.client.handle_leverage_conflict_intelligently(
+                            market=market,
+                            target_leverage=target_leverage,
+                            margin_mode=margin_mode
+                        )
+                        
+                        if resolution_result['success']:
+                            logger.info(f"✅ Leverage conflict resolved for {market}: {resolution_result['message']}")
+                            
+                            # Check for critical bug detection
+                            if resolution_result.get('bug_detected'):
+                                logger.error("🚨 CRITICAL BUG DETECTED AND FIXED!")
+                                logger.error("⚠️ Multiple buy orders found - this violates Daily Range Strategy!")
+                                logger.error("🔍 Please investigate order management logic immediately!")
+                            
+                        else:
+                            # Intelligent resolution failed, but we can continue
+                            logger.warning(f"⚠️ Leverage conflict resolution failed for {market}")
+                            logger.warning(f"Message: {resolution_result['message']}")
+                            logger.info("🤖 Bot will continue with existing leverage settings")
+                            
+                            # Don't crash the bot - just log the issue
+                            if resolution_result.get('bug_detected'):
+                                logger.error("🚨 CRITICAL BUG DETECTED but cleanup failed!")
+                                logger.error("⚠️ Manual intervention required to fix order state!")
+                    
+                    elif "service too busy" in str(direct_error).lower():
+                        # Handle service busy errors as before
+                        logger.error(f"⚠️ CoinEx API is consistently busy for {market}: {direct_error}")
+                        logger.error("The bot will attempt to continue, but leverage may not be optimal.")
+                        logger.error("Please monitor positions closely and manually set leverage if needed.")
+                        
+                        raise ValueError(f"Failed to set leverage for {market} after retries. "
+                                       f"API consistently busy: {direct_error}")
+                    else:
+                        # Other errors - re-raise
+                        raise direct_error
+                        
+            except Exception as e:
+                # Final fallback error handling
+                logger.error(f"Critical error configuring leverage for {market}: {e}")
+                raise ValueError(f"Cannot proceed without resolving leverage configuration: {e}")
             
             # Configure pairing rules for this market
             # Daily Range Strategy: One sell price per buy order (signal.sell_price)

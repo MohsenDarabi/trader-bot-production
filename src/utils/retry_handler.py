@@ -45,6 +45,21 @@ def is_retryable_coinex_error(error_message: str, error_code: Optional[int] = No
     if error_code == 3008:
         return True
     
+    error_lower = error_message.lower()
+    
+    # Special non-retryable errors that need specific handling
+    non_retryable_patterns = [
+        "order exist",           # Need to cancel orders first
+        "invalid parameters",    # Configuration issue
+        "insufficient balance",  # Not enough funds
+        "market not found",      # Invalid market
+        "unauthorized",          # Auth issue
+        "forbidden"              # Permission issue
+    ]
+    
+    if any(pattern in error_lower for pattern in non_retryable_patterns):
+        return False
+    
     # Common transient error patterns
     retryable_patterns = [
         "service too busy",
@@ -58,7 +73,6 @@ def is_retryable_coinex_error(error_message: str, error_code: Optional[int] = No
         "overloaded"
     ]
     
-    error_lower = error_message.lower()
     return any(pattern in error_lower for pattern in retryable_patterns)
 
 

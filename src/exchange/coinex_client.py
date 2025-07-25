@@ -607,6 +607,383 @@ class CoinExClient:
         
         return data_response
     
+    def get_current_leverage(self, market: str) -> Dict:
+        """
+        Get current leverage settings for a specific market
+        
+        Args:
+            market: Market symbol (e.g., BTCUSDT)
+            
+        Returns:
+            Dictionary containing current leverage and margin mode information
+            
+        Raises:
+            ValueError: If market not found or API error
+        """
+        if not market:
+            raise ValueError("Market symbol is required")
+        
+        try:
+            # Get positions to check current leverage setting
+            positions_response = self.get_positions(market=market)
+            
+            # Handle both list and dict responses
+            positions = positions_response if isinstance(positions_response, list) else positions_response.get('data', [])
+            
+            # Look for position with this market (even if no open interest)
+            for position in positions:
+                if position.get('market') == market:
+                    return {
+                        'market': market,
+                        'leverage': int(position.get('leverage', 1)),
+                        'margin_mode': position.get('margin_mode', 'cross'),
+                        'has_position': float(position.get('open_interest', 0)) > 0,
+                        'open_interest': float(position.get('open_interest', 0))
+                    }
+            
+            # If no position found, return default values (no leverage set yet)
+            logger.info(f"No leverage configuration found for {market}, assuming defaults")
+            return {
+                'market': market,
+                'leverage': 1,  # CoinEx default
+                'margin_mode': 'cross',
+                'has_position': False,
+                'open_interest': 0.0
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get current leverage for {market}: {e}")
+            raise ValueError(f"Could not retrieve leverage information: {e}")
+    
+    def analyze_complete_market_state(self, market: str) -> Dict:
+        """
+        Analyze complete market state including orders, positions, and leverage
+        
+        Args:
+            market: Market symbol (e.g., BTCUSDT)
+            
+        Returns:
+            Dictionary containing complete market analysis
+        """
+        try:
+            logger.info(f"Analyzing complete market state for {market}")
+            
+            # Get current leverage information
+            leverage_info = self.get_current_leverage(market)
+            
+            # Get pending orders
+            orders_response = self.get_pending_orders(market=market)
+            all_orders = orders_response.get('data', []) if isinstance(orders_response, dict) else orders_response
+            
+            # Filter orders for this specific market
+            market_orders = [order for order in all_orders if order.get('market') == market]
+            
+            # Categorize orders
+            buy_orders = [order for order in market_orders if order.get('side') == 'buy']
+            sell_orders = [order for order in market_orders if order.get('side') == 'sell']
+            
+            # Analyze order situation
+            analysis = {
+                'market': market,
+                'leverage_info': leverage_info,
+                'total_orders': len(market_orders),
+                'buy_orders': buy_orders,
+                'sell_orders': sell_orders,
+                'buy_count': len(buy_orders),
+                'sell_count': len(sell_orders),
+                'has_position': leverage_info['has_position'],
+                'open_interest': leverage_info['open_interest'],
+                'current_leverage': leverage_info['leverage'],
+                'margin_mode': leverage_info['margin_mode']
+            }
+            
+            # Determine situation category
+            if analysis['buy_count'] == 0 and analysis['sell_count'] == 0:
+                analysis['situation'] = 'no_orders'
+            elif analysis['buy_count'] == 1 and analysis['sell_count'] == 0:
+                analysis['situation'] = 'single_buy_order'
+            elif analysis['buy_count'] > 1:
+                analysis['situation'] = 'multiple_buy_orders_bug'
+            elif analysis['sell_count'] > 0:
+                analysis['situation'] = 'sell_orders_present'
+            else:
+                analysis['situation'] = 'mixed_orders'
+            
+            # Log summary
+            logger.info(f"Market state analysis for {market}:")
+            logger.info(f"  Situation: {analysis['situation']}")
+            logger.info(f"  Orders: {analysis['buy_count']} buy, {analysis['sell_count']} sell")
+            logger.info(f"  Position: {'Yes' if analysis['has_position'] else 'No'} "
+                       f"({analysis['open_interest']} open interest)")
+            logger.info(f"  Current leverage: {analysis['current_leverage']}x {analysis['margin_mode']}")
+            
+            return analysis
+            
+        except Exception as e:
+            logger.error(f"Failed to analyze market state for {market}: {e}")
+            raise ValueError(f"Could not analyze market state: {e}")
+    
+    def handle_leverage_conflict_intelligently(self, market: str, target_leverage: int, margin_mode: str = 'cross') -> Dict:
+        """
+        Handle leverage setting conflicts with intelligent order management
+        
+        Args:
+            market: Market symbol
+            target_leverage: Desired leverage
+            margin_mode: Margin mode (cross/isolated)
+            
+        Returns:
+            Dictionary with resolution results and actions taken
+        """
+        logger.info(f"🔧 Handling leverage conflict for {market} - target: {target_leverage}x {margin_mode}")
+        
+        try:
+            # Analyze current market state
+            analysis = self.analyze_complete_market_state(market)
+            
+            # Check if leverage adjustment is even needed
+            if analysis['current_leverage'] == target_leverage and analysis['margin_mode'] == margin_mode:
+                logger.info(f"✅ Leverage already correct for {market}: {target_leverage}x {margin_mode}")
+                return {
+                    'action': 'no_change_needed',
+                    'current_leverage': analysis['current_leverage'],
+                    'target_leverage': target_leverage,
+                    'success': True,
+                    'message': 'Leverage already at target value'
+                }
+            
+            # Handle different situations
+            situation = analysis['situation']
+            
+            if situation == 'no_orders':
+                # Simple case - no orders blocking leverage adjustment
+                logger.info("No orders present, attempting direct leverage adjustment")
+                return self._attempt_direct_leverage_adjustment(market, target_leverage, margin_mode)
+                
+            elif situation == 'single_buy_order':
+                # Safe case - temporarily cancel and recreate single buy order
+                logger.info("Single buy order detected, will temporarily cancel and recreate")
+                return self._handle_single_buy_order_conflict(market, target_leverage, margin_mode, analysis)
+                
+            elif situation == 'multiple_buy_orders_bug':
+                # Critical bug - clean up and restore correct state
+                logger.error("🚨 CRITICAL BUG: Multiple buy orders detected for Daily Range Strategy!")
+                return self._handle_multiple_buy_orders_bug(market, target_leverage, margin_mode, analysis)
+                
+            elif situation == 'sell_orders_present':
+                # Research needed - test if sell orders block leverage
+                logger.warning("Sell orders present, testing leverage adjustment behavior")
+                return self._handle_sell_orders_present(market, target_leverage, margin_mode, analysis)
+                
+            else:
+                # Mixed or unknown situation - conservative approach
+                logger.warning(f"Complex order situation detected: {situation}")
+                return self._handle_complex_situation(market, target_leverage, margin_mode, analysis)
+                
+        except Exception as e:
+            logger.error(f"Error in intelligent leverage conflict handling: {e}")
+            return {
+                'action': 'error',
+                'success': False,
+                'error': str(e),
+                'message': f'Failed to handle leverage conflict: {e}'
+            }
+    
+    def _attempt_direct_leverage_adjustment(self, market: str, target_leverage: int, margin_mode: str) -> Dict:
+        """Attempt direct leverage adjustment without order conflicts"""
+        try:
+            logger.info(f"Attempting direct leverage adjustment: {market} -> {target_leverage}x {margin_mode}")
+            result = self.adjust_position_leverage(market, target_leverage, margin_mode)
+            
+            logger.info(f"✅ Direct leverage adjustment successful for {market}")
+            return {
+                'action': 'direct_adjustment',
+                'success': True,
+                'result': result,
+                'message': f'Leverage set to {target_leverage}x {margin_mode}'
+            }
+        except Exception as e:
+            logger.error(f"Direct leverage adjustment failed: {e}")
+            return {
+                'action': 'direct_adjustment_failed',
+                'success': False,
+                'error': str(e),
+                'message': f'Direct adjustment failed: {e}'
+            }
+    
+    def _handle_single_buy_order_conflict(self, market: str, target_leverage: int, margin_mode: str, analysis: Dict) -> Dict:
+        """Handle single buy order blocking leverage adjustment"""
+        try:
+            buy_order = analysis['buy_orders'][0]
+            logger.info(f"Temporarily canceling single buy order: {buy_order.get('client_id', 'N/A')}")
+            
+            # Store order details for recreation
+            order_details = {
+                'market': buy_order.get('market'),
+                'side': buy_order.get('side'),
+                'amount': buy_order.get('amount'),
+                'price': buy_order.get('price'),
+                'client_id': buy_order.get('client_id'),
+                'order_type': buy_order.get('type', 'limit')
+            }
+            
+            # Cancel the order
+            if buy_order.get('order_id'):
+                self.cancel_order(order_id=buy_order['order_id'])
+            elif buy_order.get('client_id'):
+                self.cancel_order(client_id=buy_order['client_id'])
+            else:
+                raise ValueError("Cannot cancel order - no order_id or client_id found")
+            
+            logger.info("Buy order canceled, now setting leverage")
+            
+            # Set leverage
+            leverage_result = self.adjust_position_leverage(market, target_leverage, margin_mode)
+            
+            logger.info("Leverage set, recreating buy order")
+            
+            # Recreate the order
+            recreate_result = self.place_order(
+                market=order_details['market'],
+                side=order_details['side'],
+                amount=order_details['amount'],
+                price=order_details['price'],
+                order_type=order_details['order_type'],
+                client_id=f"recreated_{order_details['client_id']}"
+            )
+            
+            logger.info(f"✅ Successfully handled single buy order conflict for {market}")
+            return {
+                'action': 'single_buy_order_handled',
+                'success': True,
+                'canceled_order': order_details,
+                'leverage_result': leverage_result,
+                'recreated_order': recreate_result,
+                'message': f'Temporarily canceled and recreated buy order, leverage set to {target_leverage}x'
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to handle single buy order conflict: {e}")
+            return {
+                'action': 'single_buy_order_failed',
+                'success': False,
+                'error': str(e),
+                'message': f'Failed to handle single buy order: {e}'
+            }
+    
+    def _handle_multiple_buy_orders_bug(self, market: str, target_leverage: int, margin_mode: str, analysis: Dict) -> Dict:
+        """Handle critical bug where multiple buy orders exist"""
+        try:
+            buy_orders = analysis['buy_orders']
+            logger.error(f"🚨 CRITICAL BUG: {len(buy_orders)} buy orders found for {market}")
+            logger.error("Daily Range Strategy should only have 1 buy order at a time!")
+            
+            # Log all problematic orders
+            for i, order in enumerate(buy_orders):
+                logger.error(f"  Buy order {i+1}: {order.get('client_id', 'N/A')} - "
+                           f"{order.get('amount')} @ ${order.get('price')}")
+            
+            # Cancel ALL buy orders to clean up the bug
+            canceled_orders = []
+            for order in buy_orders:
+                try:
+                    if order.get('order_id'):
+                        self.cancel_order(order_id=order['order_id'])
+                    elif order.get('client_id'):
+                        self.cancel_order(client_id=order['client_id'])
+                    canceled_orders.append(order)
+                    logger.info(f"Canceled problematic buy order: {order.get('client_id', 'N/A')}")
+                except Exception as cancel_error:
+                    logger.error(f"Failed to cancel order {order.get('client_id', 'N/A')}: {cancel_error}")
+            
+            # Set leverage
+            logger.info("Setting leverage after cleaning up multiple buy orders bug")
+            leverage_result = self.adjust_position_leverage(market, target_leverage, margin_mode)
+            
+            logger.error(f"🔧 Bug cleanup completed for {market}. "
+                        f"Canceled {len(canceled_orders)} problematic buy orders.")
+            logger.error("⚠️ Strategy logic needs investigation to prevent multiple buy orders!")
+            
+            return {
+                'action': 'multiple_buy_orders_bug_cleaned',
+                'success': True,
+                'bug_detected': True,
+                'canceled_orders': canceled_orders,
+                'leverage_result': leverage_result,
+                'message': f'CRITICAL BUG FIXED: Canceled {len(canceled_orders)} buy orders, set leverage to {target_leverage}x. '
+                          f'Investigate strategy logic!'
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to handle multiple buy orders bug: {e}")
+            return {
+                'action': 'multiple_buy_orders_bug_failed',
+                'success': False,
+                'bug_detected': True,
+                'error': str(e),
+                'message': f'Failed to clean up multiple buy orders bug: {e}'
+            }
+    
+    def _handle_sell_orders_present(self, market: str, target_leverage: int, margin_mode: str, analysis: Dict) -> Dict:
+        """Test behavior when sell orders are present"""
+        try:
+            logger.info(f"Testing leverage adjustment with {analysis['sell_count']} sell orders present")
+            
+            # Attempt leverage adjustment to test if sell orders block it
+            try:
+                leverage_result = self.adjust_position_leverage(market, target_leverage, margin_mode)
+                logger.info("✅ Leverage adjustment succeeded with sell orders present!")
+                
+                return {
+                    'action': 'leverage_set_with_sell_orders',
+                    'success': True,
+                    'leverage_result': leverage_result,
+                    'sell_orders_count': analysis['sell_count'],
+                    'message': f'Leverage set to {target_leverage}x despite {analysis["sell_count"]} sell orders present'
+                }
+                
+            except Exception as leverage_error:
+                if "order exist" in str(leverage_error).lower():
+                    logger.warning("⚠️ Sell orders DO block leverage adjustment")
+                    logger.info("Continuing with existing leverage to preserve sell orders")
+                    
+                    return {
+                        'action': 'leverage_blocked_by_sell_orders',
+                        'success': False,
+                        'sell_orders_count': analysis['sell_count'],
+                        'current_leverage': analysis['current_leverage'],
+                        'message': f'Leverage adjustment blocked by {analysis["sell_count"]} sell orders. '
+                                  f'Continuing with {analysis["current_leverage"]}x leverage.'
+                    }
+                else:
+                    # Different error, re-raise
+                    raise leverage_error
+                    
+        except Exception as e:
+            logger.error(f"Error testing sell orders behavior: {e}")
+            return {
+                'action': 'sell_orders_test_failed',
+                'success': False,
+                'error': str(e),
+                'message': f'Failed to test sell orders behavior: {e}'
+            }
+    
+    def _handle_complex_situation(self, market: str, target_leverage: int, margin_mode: str, analysis: Dict) -> Dict:
+        """Handle complex or unknown order situations conservatively"""
+        logger.warning(f"Complex situation for {market}: {analysis['situation']}")
+        logger.warning(f"Buy orders: {analysis['buy_count']}, Sell orders: {analysis['sell_count']}")
+        logger.warning(f"Position: {'Yes' if analysis['has_position'] else 'No'}")
+        logger.warning("Taking conservative approach - continuing with existing leverage")
+        
+        return {
+            'action': 'conservative_fallback',
+            'success': False,
+            'situation': analysis['situation'],
+            'current_leverage': analysis['current_leverage'],
+            'target_leverage': target_leverage,
+            'message': f'Complex situation detected. Continuing with existing {analysis["current_leverage"]}x leverage.'
+        }
+    
     def close(self):
         """Close the session"""
         self.session.close()
