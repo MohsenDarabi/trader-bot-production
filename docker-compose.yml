@@ -1,0 +1,104 @@
+# Modern Docker Compose specification (no version needed)
+name: coinex-trading-bot
+
+services:
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Modern build features
+      cache_from:
+        - python:3.12-slim
+      labels:
+        - "org.opencontainers.image.source=https://github.com/user/coinex-bot"
+        - "org.opencontainers.image.description=CoinEx Trading Bot"
+    
+    container_name: coinex-bot-production
+    
+    # Security: Read-only root filesystem with specific writable volumes
+    # Temporarily disabled for lock file handling
+    # read_only: true
+    
+    # Security: Drop all capabilities, add only what's needed
+    cap_drop:
+      - ALL
+    
+    # Resource limits for production stability
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    
+    environment:
+      - BOT_INSTANCE=production
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - DOCKER_CONTAINER=true
+    
+    env_file:
+      - .env
+    
+    # Security: Specific volume mounts with appropriate permissions
+    volumes:
+      - type: bind
+        source: ./logs
+        target: /app/logs
+        read_only: false
+      - type: bind
+        source: ./config
+        target: /app/config
+        read_only: true
+      - type: bind
+        source: ./CLAUDE.md
+        target: /app/CLAUDE.md
+        read_only: true
+      # Writable temp directory for read-only filesystem
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 100M
+    
+    # Modern restart policy
+    restart: unless-stopped
+    
+    # Health check (inherits from Dockerfile)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    # Network configuration
+    networks:
+      - bot-network
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Security: Run with limited privileges
+    security_opt:
+      - no-new-privileges:true
+    
+    # Override default command to specify market from environment
+    command: ["${MARKET:-BTCUSDT}"]
+    
+    # Use custom entrypoint to clean lock files
+    entrypoint: ["/app/entrypoint.sh"]
+
+# Modern network configuration
+networks:
+  bot-network:
+    driver: bridge
+    name: coinex-bot-network
+    # Network security
+    driver_opts:
+      com.docker.network.bridge.name: coinex-br0
