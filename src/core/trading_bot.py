@@ -15,6 +15,7 @@ from src.core.order_pairing_manager import OrderPairingManager
 from src.core.position_manager import PositionManager
 from src.core.profitability import ProfitabilityValidator
 from src.data.market_data import MarketDataManager
+from src.data.websocket_market_data import WebSocketMarketDataProvider
 from src.core.strategy import DailyRangeStrategy, TradingSignal
 from src.core.position_sizing import PositionSizer
 from src.utils.logger import get_logger
@@ -63,8 +64,9 @@ class DailyRangeBot:
         self.order_manager: Optional[OrderManager] = None
         self.position_sizer: Optional[PositionSizer] = None
         
-        # New WebSocket and order tracking components
+        # WebSocket and real-time data components
         self.websocket_client: Optional[CoinExWebSocketClient] = None
+        self.websocket_market_data: Optional[WebSocketMarketDataProvider] = None
         self.order_tracker: Optional[OrderTracker] = None
         self.pairing_manager: Optional[OrderPairingManager] = None
         
@@ -84,7 +86,12 @@ class DailyRangeBot:
         try:
             # Initialize core components
             self.client = CoinExClient()
-            self.market_data = MarketDataManager(self.client)
+            
+            # Initialize WebSocket market data provider
+            self.websocket_market_data = WebSocketMarketDataProvider()
+            
+            # Initialize market data manager with WebSocket support
+            self.market_data = MarketDataManager(self.client, self.websocket_market_data)
             self.strategy = DailyRangeStrategy(self.market_data)
             self.position_manager = PositionManager(self.client)
             
@@ -115,10 +122,20 @@ class DailyRangeBot:
                 raise Exception("Failed to authenticate WebSocket")
             logger.info("✓ WebSocket authenticated")
             
+            # Register WebSocket message handlers
+            self.websocket_client.register_handler(
+                "state.update", 
+                self.websocket_market_data.handle_state_update
+            )
+            
             # Subscribe to order and user deals updates
             await self.websocket_client.subscribe_orders()
             await self.websocket_client.subscribe_user_deals()
             logger.info("✓ Subscribed to WebSocket order tracking")
+            
+            # Subscribe to market state updates for real-time price data
+            await self.websocket_client.subscribe_market_state()
+            logger.info("✓ Subscribed to WebSocket market state updates")
             
             # Load current state from exchange (no database)
             logger.info("Loading current state from exchange...")
@@ -857,6 +874,37 @@ class DailyRangeBot:
     def get_status(self) -> BotStatus:
         """Get current bot status"""
         return self.status
+    
+    def get_websocket_stats(self) -> Dict[str, Any]:
+        """Get WebSocket and data source statistics"""
+        stats = {}
+        
+        # Market data statistics
+        if self.market_data:
+            stats["market_data"] = self.market_data.get_data_source_stats()
+        
+        # WebSocket market data cache statistics  
+        if self.websocket_market_data:
+            stats["websocket_cache"] = self.websocket_market_data.get_cache_stats()
+        
+        # Pairing statistics
+        if self.pairing_manager and self.order_tracker:
+            pairing_stats = self.pairing_manager.get_pairing_statistics()
+            tracker_stats = self.order_tracker.get_statistics()
+            stats["order_tracking"] = {
+                **pairing_stats,
+                **tracker_stats
+            }
+        
+        # WebSocket connection status
+        if self.websocket_client:
+            stats["websocket_connection"] = {
+                "connected": self.websocket_client.is_connected,
+                "authenticated": self.websocket_client.is_authenticated,
+                "subscriptions": list(self.websocket_client.subscriptions.keys())
+            }
+        
+        return stats
     
     async def shutdown(self):
         """Gracefully shutdown the bot"""

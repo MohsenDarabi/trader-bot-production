@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from src.exchange.coinex_client import CoinExClient
+from src.data.websocket_market_data import WebSocketMarketDataProvider
 from src.utils.logger import get_logger
 
 
@@ -15,16 +16,22 @@ logger = get_logger(__name__)
 class MarketDataManager:
     """Manages market data fetching and processing"""
     
-    def __init__(self, client: Optional[CoinExClient] = None):
+    def __init__(self, client: Optional[CoinExClient] = None, websocket_provider: Optional[WebSocketMarketDataProvider] = None):
         """
         Initialize market data manager
         
         Args:
             client: CoinEx API client instance
+            websocket_provider: WebSocket market data provider for real-time data
         """
         self.client = client or CoinExClient()
+        self.websocket_provider = websocket_provider
         self._market_info_cache = {}
         self._ohlc_cache = {}
+        
+        # Statistics for monitoring WebSocket vs HTTP usage
+        self._websocket_hits = 0
+        self._http_fallback_hits = 0
     
     def get_market_info(self, market: str, force_refresh: bool = False) -> Dict:
         """
@@ -160,7 +167,7 @@ class MarketDataManager:
     
     def get_current_price(self, market: str) -> float:
         """
-        Get current market price from ticker
+        Get current market price, preferring WebSocket data with HTTP fallback
         
         Args:
             market: Market symbol
@@ -168,7 +175,17 @@ class MarketDataManager:
         Returns:
             Current price
         """
+        # Try WebSocket data first if provider is available
+        if self.websocket_provider:
+            ws_price = self.websocket_provider.get_current_price(market)
+            if ws_price is not None:
+                self._websocket_hits += 1
+                logger.debug(f"Retrieved WebSocket price for {market}: ${ws_price:.2f}")
+                return ws_price
+        
+        # Fall back to HTTP API
         try:
+            self._http_fallback_hits += 1
             ticker_response = self.client.get_ticker(market)
             # CoinEx ticker returns a list with one item
             if isinstance(ticker_response, list) and ticker_response:
@@ -181,6 +198,7 @@ class MarketDataManager:
             if price <= 0:
                 raise ValueError(f"Invalid price for {market}: {price}")
             
+            logger.debug(f"Retrieved HTTP price for {market}: ${price:.2f}")
             return price
             
         except Exception as e:
@@ -255,3 +273,30 @@ class MarketDataManager:
         except Exception as e:
             logger.error(f"Failed to fetch available markets: {e}")
             raise
+    
+    def set_websocket_provider(self, provider: WebSocketMarketDataProvider):
+        """
+        Set the WebSocket market data provider
+        
+        Args:
+            provider: WebSocket market data provider instance
+        """
+        self.websocket_provider = provider
+        logger.info("WebSocket market data provider connected to MarketDataManager")
+    
+    def get_data_source_stats(self) -> Dict[str, int]:
+        """
+        Get statistics on data source usage
+        
+        Returns:
+            Dictionary with WebSocket hits and HTTP fallback counts
+        """
+        return {
+            "websocket_hits": self._websocket_hits,
+            "http_fallback_hits": self._http_fallback_hits,
+            "total_requests": self._websocket_hits + self._http_fallback_hits,
+            "websocket_percentage": (
+                (self._websocket_hits / (self._websocket_hits + self._http_fallback_hits)) * 100
+                if (self._websocket_hits + self._http_fallback_hits) > 0 else 0
+            )
+        }

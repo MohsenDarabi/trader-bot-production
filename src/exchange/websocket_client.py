@@ -28,6 +28,9 @@ class SubscriptionType(Enum):
     USER_DEALS = "user_deals"
     DEALS = "deals"
     DEPTH = "depth"
+    STATE = "state"
+    BALANCE = "balance"
+    POSITION = "position"
 
 
 @dataclass
@@ -252,6 +255,102 @@ class CoinExWebSocketClient:
             logger.error(f"Failed to subscribe to market deals: {e}")
             return False
     
+    async def subscribe_market_state(self, markets: Optional[List[str]] = None) -> bool:
+        """
+        Subscribe to market state updates (24h market status including prices)
+        
+        Args:
+            markets: List of markets to monitor, None for all markets
+            
+        Returns:
+            True if subscription successful, False otherwise
+        """
+        try:
+            # CoinEx expects market_list parameter, empty array for all markets
+            market_list = markets if markets is not None else []
+            params = {"market_list": market_list}
+            
+            message = {
+                "method": "state.subscribe",
+                "params": params,
+                "id": self.get_next_message_id()
+            }
+            
+            await self._send_message(message)
+            self.subscriptions["state"] = params
+            logger.info(f"Subscribed to market state for markets: {market_list if market_list else 'ALL'}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to subscribe to market state: {e}")
+            return False
+    
+    async def subscribe_balance(self, currencies: Optional[List[str]] = None) -> bool:
+        """
+        Subscribe to account balance updates
+        
+        Args:
+            currencies: List of currencies to monitor, None for all currencies
+            
+        Returns:
+            True if subscription successful, False otherwise
+        """
+        if not self.is_authenticated:
+            logger.warning("Attempting to subscribe to balance without authentication")
+        
+        try:
+            # CoinEx expects ccy_list parameter, empty array for all currencies
+            ccy_list = currencies if currencies is not None else []
+            params = {"ccy_list": ccy_list}
+            
+            message = {
+                "method": "balance.subscribe",
+                "params": params,
+                "id": self.get_next_message_id()
+            }
+            
+            await self._send_message(message)
+            self.subscriptions["balance"] = params
+            logger.info(f"Subscribed to balance updates for currencies: {ccy_list if ccy_list else 'ALL'}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to subscribe to balance updates: {e}")
+            return False
+    
+    async def subscribe_positions(self, markets: Optional[List[str]] = None) -> bool:
+        """
+        Subscribe to position updates
+        
+        Args:
+            markets: List of markets to monitor, None for all markets
+            
+        Returns:
+            True if subscription successful, False otherwise
+        """
+        if not self.is_authenticated:
+            logger.warning("Attempting to subscribe to positions without authentication")
+        
+        try:
+            # CoinEx expects market_list parameter, empty array for all markets
+            market_list = markets if markets is not None else []
+            params = {"market_list": market_list}
+            
+            message = {
+                "method": "position.subscribe",
+                "params": params,
+                "id": self.get_next_message_id()
+            }
+            
+            await self._send_message(message)
+            self.subscriptions["position"] = params
+            logger.info(f"Subscribed to position updates for markets: {market_list if market_list else 'ALL'}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to subscribe to position updates: {e}")
+            return False
+    
     async def _send_message(self, message: Dict) -> None:
         """
         Send message to WebSocket server
@@ -302,7 +401,7 @@ class CoinExWebSocketClient:
                     elif method == "server.pong":
                         # Heartbeat pong response
                         self._handle_pong_response(message)
-                    elif method in ["order.update", "user_deals.update", "deals.update", "depth.update"]:
+                    elif method in ["order.update", "user_deals.update", "deals.update", "depth.update", "state.update", "balance.update", "position.update"]:
                         # Subscription updates
                         self._handle_subscription_update(message)
                     elif "error" in message and "id" in message:
@@ -471,6 +570,12 @@ class CoinExWebSocketClient:
                         await self.subscribe_user_deals(params.get("market_list"))
                     elif sub_type == "deals":
                         await self.subscribe_market_deals(params.get("market_list", []))
+                    elif sub_type == "state":
+                        await self.subscribe_market_state(params.get("market_list"))
+                    elif sub_type == "balance":
+                        await self.subscribe_balance(params.get("ccy_list"))
+                    elif sub_type == "position":
+                        await self.subscribe_positions(params.get("market_list"))
                 
                 logger.info("WebSocket reconnection successful")
                 return True
