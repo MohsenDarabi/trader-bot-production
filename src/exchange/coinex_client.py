@@ -389,30 +389,22 @@ class CoinExClient:
         
         return self._request('POST', '/v2/futures/order', data=data)
     
-    def cancel_order(self, market: str, order_id: Optional[int] = None,
-                    client_id: Optional[str] = None) -> Dict:
+    def cancel_order(self, market: str, order_id: int) -> Dict:
         """
         Cancel a futures order
         
         Args:
             market: Market symbol
-            order_id: Exchange order ID
-            client_id: Custom order ID
+            order_id: Exchange order ID (required)
             
         Returns:
             Cancellation result
         """
         data = {
             'market': market,
-            'market_type': 'FUTURES'
+            'market_type': 'FUTURES',
+            'order_id': order_id
         }
-        
-        if order_id:
-            data['order_id'] = order_id
-        elif client_id:
-            data['client_id'] = client_id
-        else:
-            raise ValueError("Either order_id or client_id must be provided")
         
         return self._request('POST', '/v2/futures/cancel-order', data=data)
     
@@ -641,14 +633,23 @@ class CoinExClient:
                         'open_interest': float(position.get('open_interest', 0))
                     }
             
-            # If no position found, return default values (no leverage set yet)
-            logger.info(f"No leverage configuration found for {market}, assuming defaults")
+            # If no position found in the response, it could mean:
+            # 1. Leverage was never set (true default)
+            # 2. Leverage was set but no position/orders exist
+            # 3. Leverage was set and there are orders but no filled position yet
+            
+            # For safety, if we're being called during order conflict resolution,
+            # we should assume leverage might already be set correctly
+            logger.info(f"No position data found for {market} - leverage state uncertain")
+            logger.info("⚠️ Cannot reliably determine current leverage without position data")
+            
             return {
                 'market': market,
-                'leverage': 1,  # CoinEx default
-                'margin_mode': 'cross',
+                'leverage': None,  # Unknown - don't assume
+                'margin_mode': 'cross',  # CoinEx default mode
                 'has_position': False,
-                'open_interest': 0.0
+                'open_interest': 0.0,
+                'leverage_unknown': True
             }
             
         except Exception as e:
@@ -715,7 +716,10 @@ class CoinExClient:
             logger.info(f"  Orders: {analysis['buy_count']} buy, {analysis['sell_count']} sell")
             logger.info(f"  Position: {'Yes' if analysis['has_position'] else 'No'} "
                        f"({analysis['open_interest']} open interest)")
-            logger.info(f"  Current leverage: {analysis['current_leverage']}x {analysis['margin_mode']}")
+            if leverage_info.get('leverage_unknown'):
+                logger.info(f"  Current leverage: Unknown (no position data)")
+            else:
+                logger.info(f"  Current leverage: {analysis['current_leverage']}x {analysis['margin_mode']}")
             
             return analysis
             
@@ -742,11 +746,45 @@ class CoinExClient:
             analysis = self.analyze_complete_market_state(market)
             
             # Check if leverage adjustment is even needed
-            if analysis['current_leverage'] == target_leverage and analysis['margin_mode'] == margin_mode:
+            current_leverage = analysis.get('current_leverage')
+            
+            # Check if we have bot-created orders - if so, trust them and skip adjustment
+            if current_leverage is None and analysis['buy_count'] > 0:
+                # Check if any orders are bot-created
+                bot_orders = [o for o in analysis.get('buy_orders', []) if o.get('client_id', '').startswith('DRA_')]
+                if bot_orders:
+                    logger.info(f"⚠️ Found {len(bot_orders)} bot-created order(s) - trusting leverage is correct")
+                    logger.info("🛡️ Skipping leverage adjustment for bot orders to prevent unnecessary manipulation")
+                    
+                    return {
+                        'action': 'bot_orders_trusted_early',
+                        'success': True,
+                        'bot_orders_count': len(bot_orders),
+                        'message': f'Found {len(bot_orders)} bot order(s) - trusting leverage is already correct',
+                        'trust_reason': 'Bot orders from previous runs are assumed to have correct leverage'
+                    }
+                
+                # Only attempt direct adjustment for non-bot orders
+                logger.info("⚠️ Current leverage unknown with non-bot orders - attempting direct adjustment")
+                direct_result = self._attempt_direct_leverage_adjustment(market, target_leverage, margin_mode)
+                
+                # If direct adjustment succeeds, we're done
+                if direct_result['success']:
+                    return direct_result
+                    
+                # If it fails with "order exist", proceed with conflict resolution
+                if "order exist" in str(direct_result.get('error', '')):
+                    logger.info("Direct adjustment failed with 'order exist' - proceeding with conflict resolution")
+                else:
+                    # Other error - return the failure
+                    return direct_result
+                    
+            # If we know the current leverage and it matches target, no change needed
+            elif current_leverage == target_leverage and analysis['margin_mode'] == margin_mode:
                 logger.info(f"✅ Leverage already correct for {market}: {target_leverage}x {margin_mode}")
                 return {
                     'action': 'no_change_needed',
-                    'current_leverage': analysis['current_leverage'],
+                    'current_leverage': current_leverage,
                     'target_leverage': target_leverage,
                     'success': True,
                     'message': 'Leverage already at target value'
@@ -761,8 +799,25 @@ class CoinExClient:
                 return self._attempt_direct_leverage_adjustment(market, target_leverage, margin_mode)
                 
             elif situation == 'single_buy_order':
-                # Safe case - temporarily cancel and recreate single buy order
-                logger.info("Single buy order detected, will temporarily cancel and recreate")
+                # Check if this is a bot-created order (client_id starts with 'DRA_')
+                buy_order = analysis['buy_orders'][0] if analysis['buy_orders'] else {}
+                client_id = buy_order.get('client_id', '')
+                
+                if client_id.startswith('DRA_'):
+                    logger.info(f"📌 Found existing bot order: {client_id}")
+                    logger.info("🛡️ CONSERVATIVE APPROACH: Bot-created orders are trusted to have correct leverage")
+                    logger.info("⚠️ Skipping leverage adjustment to avoid unnecessary order manipulation")
+                    
+                    return {
+                        'action': 'bot_order_trusted',
+                        'success': True,
+                        'bot_order_id': client_id,
+                        'message': f'Bot order {client_id} trusted to have correct leverage - no changes made',
+                        'trust_reason': 'Bot-created orders are assumed to have correct leverage from previous run'
+                    }
+                
+                # Only manipulate non-bot orders
+                logger.info("Non-bot order detected, will temporarily cancel and recreate")
                 return self._handle_single_buy_order_conflict(market, target_leverage, margin_mode, analysis)
                 
             elif situation == 'multiple_buy_orders_bug':
@@ -827,13 +882,59 @@ class CoinExClient:
                 'order_type': buy_order.get('type', 'limit')
             }
             
-            # Cancel the order
-            if buy_order.get('order_id'):
-                self.cancel_order(order_id=buy_order['order_id'])
-            elif buy_order.get('client_id'):
-                self.cancel_order(client_id=buy_order['client_id'])
-            else:
-                raise ValueError("Cannot cancel order - no order_id or client_id found")
+            # Verify order status before attempting cancellation
+            client_id = buy_order.get('client_id')
+            order_id = buy_order.get('order_id')
+            
+            logger.info(f"Verifying order status before cancellation...")
+            
+            try:
+                # Check current order status
+                if client_id:
+                    order_status = self.get_order_status(market, client_id=client_id)
+                elif order_id:
+                    order_status = self.get_order_status(market, order_id=order_id)
+                else:
+                    raise ValueError("Cannot cancel order - no order_id or client_id found")
+                
+                current_status = order_status.get('status', 'unknown')
+                logger.info(f"Order status check: {current_status}")
+                
+                # Only attempt cancellation if order is still pending
+                if current_status in ['pending', 'partially_filled']:
+                    logger.info(f"Order is {current_status}, proceeding with cancellation")
+                    
+                    # Cancel the order using order_id (required by CoinEx API)
+                    if order_id:
+                        cancel_result = self.cancel_order(market, order_id)
+                    else:
+                        logger.error(f"Cannot cancel order - missing order_id for {client_id}")
+                        raise ValueError("order_id is required for cancellation")
+                    
+                    logger.info(f"Cancel order result: {cancel_result}")
+                    
+                elif current_status in ['filled', 'cancelled']:
+                    logger.warning(f"Order is already {current_status}, skipping cancellation")
+                    # Continue with leverage adjustment anyway
+                else:
+                    logger.warning(f"Unknown order status: {current_status}, attempting cancellation anyway")
+                    
+                    if order_id:
+                        cancel_result = self.cancel_order(market, order_id)
+                    else:
+                        logger.error(f"Cannot cancel order - missing order_id for {client_id}")
+                        raise ValueError("order_id is required for cancellation")
+                        
+            except Exception as cancel_error:
+                logger.error(f"Order cancellation failed: {cancel_error}")
+                logger.error(f"Order details: market={market}, client_id={client_id}, order_id={order_id}")
+                
+                # Don't give up completely - check if the error indicates order is already gone
+                if "not found" in str(cancel_error).lower() or "invalid argument" in str(cancel_error).lower():
+                    logger.info("Order may have been filled or already cancelled, continuing with leverage adjustment")
+                else:
+                    # Re-raise other types of errors
+                    raise ValueError(f"Failed to cancel order: {cancel_error}")
             
             logger.info("Buy order canceled, now setting leverage")
             
@@ -842,15 +943,64 @@ class CoinExClient:
             
             logger.info("Leverage set, recreating buy order")
             
-            # Recreate the order
-            recreate_result = self.place_order(
-                market=order_details['market'],
-                side=order_details['side'],
-                amount=order_details['amount'],
-                price=order_details['price'],
-                order_type=order_details['order_type'],
-                client_id=f"recreated_{order_details['client_id']}"
-            )
+            # Recreate the order with proper parameter formatting and validation
+            logger.info(f"Placing buy order: {order_details['amount']} {market} @ {order_details['price']}")
+            
+            # Validate and format parameters
+            amount_str = str(float(order_details['amount']))  # Convert to float then string to normalize
+            price_str = str(float(order_details['price']))    # Convert to float then string to normalize
+            
+            # Get market info to ensure proper precision
+            try:
+                market_info = self.get_market_list()
+                market_data = next((m for m in market_info if m.get('market') == market), None)
+                if market_data:
+                    min_amount = float(market_data.get('min_amount', 0))
+                    tick_size = float(market_data.get('tick_size', 0.0001))
+                    
+                    # Ensure amount meets minimum requirement
+                    amount_float = float(amount_str)
+                    if amount_float < min_amount:
+                        logger.warning(f"Adjusting amount from {amount_float} to minimum {min_amount}")
+                        amount_str = str(min_amount)
+                    
+                    # Round price to proper tick size
+                    price_float = float(price_str)
+                    rounded_price = round(price_float / tick_size) * tick_size
+                    price_str = f"{rounded_price:.{len(str(tick_size).split('.')[-1])}f}"
+                    
+                    logger.info(f"Formatted order: {amount_str} @ {price_str} (tick_size={tick_size})")
+                    
+            except Exception as format_error:
+                logger.warning(f"Could not validate market parameters: {format_error}")
+            
+            try:
+                recreate_result = self.place_order(
+                    market=order_details['market'],
+                    side=order_details['side'], 
+                    amount=amount_str,
+                    price=price_str,
+                    order_type=order_details['order_type'],
+                    client_id=f"recreated_{order_details['client_id']}",
+                    is_hide=True  # Use hidden orders as in normal bot operation
+                )
+                logger.info(f"✅ Order recreation successful: {recreate_result.get('order_id', 'N/A')}")
+                
+            except Exception as order_error:
+                logger.error(f"Failed to recreate order: {order_error}")
+                logger.error(f"Order details used: market={order_details['market']}, "
+                           f"side={order_details['side']}, amount={order_details['amount']}, "
+                           f"price={order_details['price']}, type={order_details['order_type']}")
+                
+                # Return partial success - leverage was set, but order recreation failed
+                return {
+                    'action': 'single_buy_order_partial',
+                    'success': False,  # Mark as failed since order wasn't recreated
+                    'canceled_order': order_details,
+                    'leverage_result': leverage_result,
+                    'recreation_error': str(order_error),
+                    'message': f'Leverage set to {target_leverage}x but order recreation failed: {order_error}'
+                }
             
             logger.info(f"✅ Successfully handled single buy order conflict for {market}")
             return {
@@ -888,9 +1038,9 @@ class CoinExClient:
             for order in buy_orders:
                 try:
                     if order.get('order_id'):
-                        self.cancel_order(order_id=order['order_id'])
-                    elif order.get('client_id'):
-                        self.cancel_order(client_id=order['client_id'])
+                        self.cancel_order(market=market, order_id=order['order_id'])
+                    else:
+                        logger.error(f"Cannot cancel order - missing order_id for {order.get('client_id', 'N/A')}")
                     canceled_orders.append(order)
                     logger.info(f"Canceled problematic buy order: {order.get('client_id', 'N/A')}")
                 except Exception as cancel_error:

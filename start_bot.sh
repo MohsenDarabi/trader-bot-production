@@ -1,16 +1,48 @@
 #!/bin/bash
 """
-CoinEx Daily Range Bot Startup Script
+CoinEx Daily Range Bot Startup Script - Production & Docker Support
 """
 
 set -e
 
-echo "🚀 Starting CoinEx Daily Range Accumulation Bot"
-echo "=============================================="
+# Load .env file if it exists
+if [ -f .env ]; then
+    # Parse .env safely - only export valid KEY=VALUE pairs
+    while IFS= read -r line; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        # Extract KEY=VALUE (ignore inline comments)
+        if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+            # Remove inline comments and trim whitespace
+            value=$(echo "$value" | sed 's/[[:space:]]*#.*$//' | xargs)
+            export "$key=$value"
+        fi
+    done < .env
+fi
+
+# Use environment variable first, then command line argument, then fallback
+DEFAULT_MARKET=${DEFAULT_TRADING_MARKET:-"BTCUSDT"}
+MARKET=${1:-"$DEFAULT_MARKET"}
+RUN_MODE=${2:-"native"}  # native or docker
+
+echo "🚀 Starting CoinEx Daily Range Accumulation Bot (PRODUCTION)"
+echo "========================================================="
+echo "Market: $MARKET"
+echo "Mode: $RUN_MODE"
 echo
 
+# Docker mode
+if [ "$RUN_MODE" = "docker" ]; then
+    echo "🐳 Starting production bot in Docker container..."
+    ./docker-start.sh $MARKET start
+    exit 0
+fi
+
+# Native mode continues below
 # Check if we're in virtual environment
-if [[ "$VIRTUAL_ENV" != *"trader-bot-liveTesting-coinex"* ]]; then
+if [[ "$VIRTUAL_ENV" != *"trader-bot-production"* ]]; then
     echo "📦 Activating virtual environment..."
     source bin/activate
     echo "✅ Virtual environment activated"
@@ -58,16 +90,12 @@ if [ "$TRADING_MODE" = "NORMAL" ] || [ "$TRADING_MODE" = "LIVE" ]; then
     fi
 fi
 
-echo "🤖 Starting bot..."
+echo "🤖 Starting production bot natively..."
 echo "   Press Ctrl+C to stop gracefully"
 echo
 
-# Start the bot with optional market argument
-# Usage: ./start_bot.sh [MARKET]
-# Examples: ./start_bot.sh ETHUSDT
-#          ./start_bot.sh BTCUSDT
-#          ./start_bot.sh (defaults to BTCUSDT)
-python3 main.py ${1:-BTCUSDT}
+# Start the bot with market argument
+python3 main.py $MARKET
 
 echo
 echo "👋 Bot stopped. Goodbye!"

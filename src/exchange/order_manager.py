@@ -12,6 +12,7 @@ from src.exchange.coinex_client import CoinExClient
 from src.core.profitability import ProfitabilityValidator
 from src.utils.logger import get_logger
 from config.settings import ENABLE_REST_API_STATUS_CHECKS, ORDER_STATUS_CHECK_INTERVAL
+from src.utils.settlement_handler import settlement_retry
 
 
 logger = get_logger(__name__)
@@ -129,6 +130,7 @@ class OrderManager:
         self.used_client_ids.add(client_id)
         return client_id
     
+    @settlement_retry
     def place_buy_order(self, market: str, amount: float, price: float,
                        position_size: float, is_hide: bool = True) -> Optional[Order]:
         """
@@ -144,6 +146,16 @@ class OrderManager:
         Returns:
             Order object if successful, None otherwise
         """
+        # CRITICAL SAFETY CHECK: Ensure no existing buy orders before placing new one
+        pending_orders = self.get_pending_orders(market)
+        existing_buy_orders = [o for o in pending_orders if o.side.value == 'buy']
+        
+        if existing_buy_orders:
+            logger.error(f"🚨 SAFETY BLOCK: Cannot place buy order - {len(existing_buy_orders)} existing buy order(s) found for {market}")
+            for order in existing_buy_orders:
+                logger.error(f"   Existing order: {order.client_id} from {order.created_at}")
+            return None
+        
         # Generate client_id
         client_id = self.generate_client_id(market, OrderSide.BUY)
         
@@ -208,6 +220,7 @@ class OrderManager:
                 self.used_client_ids.discard(client_id)
                 return None
     
+    @settlement_retry
     def place_sell_order(self, market: str, amount: float, price: float,
                         position_size: float, is_hide: bool = True) -> Optional[Order]:
         """
@@ -273,6 +286,7 @@ class OrderManager:
                 self.used_client_ids.discard(client_id)
                 return None
     
+    @settlement_retry
     def cancel_order(self, client_id: str) -> bool:
         """
         Cancel an order by client_id
@@ -290,10 +304,14 @@ class OrderManager:
         order = self.active_orders[client_id]
         
         try:
-            # Cancel on exchange
+            # Cancel on exchange using exchange order_id (required by CoinEx API)
+            if not order.exchange_order_id:
+                logger.error(f"Cannot cancel order {client_id} - missing exchange_order_id")
+                return False
+                
             self.client.cancel_order(
                 market=order.market,
-                client_id=client_id
+                order_id=order.exchange_order_id
             )
             
             # Update status
@@ -369,6 +387,14 @@ class OrderManager:
             return order
             
         except Exception as e:
+            # Handle order not exists - remove from cache
+            if "order not exists" in str(e).lower() or "order_not_exists" in str(e).lower():
+                logger.warning(f"Order {client_id} no longer exists on exchange - removing from cache")
+                if client_id in self.active_orders:
+                    del self.active_orders[client_id]
+                    self._last_status_check.pop(client_id, None)
+                return None
+                
             # Handle common API signature errors gracefully
             if "Signature Incorrect" in str(e):
                 logger.warning(f"Order status check failed due to signature error for {client_id}: {e}")
@@ -431,15 +457,20 @@ class OrderManager:
         """
         orders = []
         now = datetime.now(timezone.utc)
+        stale_orders_to_remove = []
         
         for order in self.active_orders.values():
             if market and order.market != market:
                 continue
             
             if order.status == OrderStatus.PENDING:
-                # Only perform REST API status check if enabled and enough time has passed
-                should_check_status = False
-                if ENABLE_REST_API_STATUS_CHECKS:
+                # Check for orders older than 24 hours - likely stale
+                order_age = (now - order.created_at).total_seconds()
+                is_old_order = order_age > 86400  # 24 hours
+                
+                # Only perform REST API status check if enabled and enough time has passed, or if order is old
+                should_check_status = is_old_order
+                if not should_check_status and ENABLE_REST_API_STATUS_CHECKS:
                     last_check = self._last_status_check.get(order.client_id)
                     if (not last_check or 
                         (now - last_check).total_seconds() > ORDER_STATUS_CHECK_INTERVAL):
@@ -447,14 +478,23 @@ class OrderManager:
                         self._last_status_check[order.client_id] = now
                 
                 if should_check_status:
-                    logger.debug(f"Performing periodic status check for order {order.client_id}")
-                    self.update_order_status(order.client_id)
+                    if is_old_order:
+                        logger.warning(f"Checking potentially stale order {order.client_id} (age: {order_age:.0f}s)")
+                    else:
+                        logger.debug(f"Performing periodic status check for order {order.client_id}")
+                    
+                    updated_order = self.update_order_status(order.client_id)
+                    
+                    # If order was removed during update (filled/cancelled), skip it
+                    if not updated_order or order.client_id not in self.active_orders:
+                        logger.info(f"Order {order.client_id} removed during status check")
+                        continue
                 else:
                     logger.debug(f"Skipping status check for {order.client_id} - relying on WebSocket updates")
                 
-                # Re-check if still pending
-                if order.client_id in self.active_orders:
-                    orders.append(order)
+                # Re-check if still pending after potential status update
+                if order.client_id in self.active_orders and self.active_orders[order.client_id].status == OrderStatus.PENDING:
+                    orders.append(self.active_orders[order.client_id])
         
         return orders
     
@@ -517,7 +557,24 @@ class OrderManager:
                 
                 # Only load orders with our client_id format
                 if client_id and client_id.startswith('DRA_'):
-                    # Create order object
+                    # Extract creation timestamp from exchange data
+                    created_time = order_data.get('created_at', 0)
+                    if isinstance(created_time, str):
+                        # Try to parse ISO format string
+                        try:
+                            # Handle ISO format: "2025-01-26T00:00:03Z" or "2025-01-26T00:00:03+00:00"
+                            if created_time.endswith('Z'):
+                                created_time = created_time[:-1] + '+00:00'
+                            created_at = datetime.fromisoformat(created_time).replace(tzinfo=timezone.utc)
+                        except ValueError:
+                            # Fallback: use current time if parsing fails
+                            logger.warning(f"Could not parse order creation time: {created_time}, using current time")
+                            created_at = datetime.now(timezone.utc)
+                    else:
+                        # Timestamp in milliseconds
+                        created_at = datetime.fromtimestamp(created_time / 1000, timezone.utc)
+                    
+                    # Create order object with proper creation timestamp
                     order = Order(
                         client_id=client_id,
                         market=order_data['market'],
@@ -527,8 +584,12 @@ class OrderManager:
                         price=float(order_data['price']),
                         status=OrderStatus.PENDING,
                         exchange_order_id=order_data['order_id'],
-                        filled_amount=float(order_data.get('filled_amount', 0))
+                        filled_amount=float(order_data.get('filled_amount', 0)),
+                        created_at=created_at
                     )
+                    
+                    # Debug log to verify creation date is properly loaded
+                    logger.debug(f"Loaded order {client_id} with creation date: {created_at.date()} {created_at.time()}")
                     
                     # Add to tracking
                     self.active_orders[client_id] = order
@@ -547,3 +608,52 @@ class OrderManager:
             else:
                 logger.error(f"Failed to load existing orders: {e}")
             return 0
+    
+    def handle_order_completion(self, tracked_order) -> None:
+        """
+        Handle order completion events from OrderTracker
+        
+        This method is called when OrderTracker detects an order is fully filled
+        or cancelled via WebSocket events, ensuring OrderManager's cache stays synchronized.
+        
+        Args:
+            tracked_order: TrackedOrder object from OrderTracker
+        """
+        try:
+            # Find the corresponding order in our active_orders by client_id or order_id
+            client_id = tracked_order.client_id
+            order_id = tracked_order.order_id
+            
+            order_to_remove = None
+            
+            # Try to find by client_id first (most reliable)
+            if client_id and client_id in self.active_orders:
+                order_to_remove = client_id
+            else:
+                # Fallback: search by exchange order_id
+                for active_client_id, active_order in self.active_orders.items():
+                    if active_order.exchange_order_id == order_id:
+                        order_to_remove = active_client_id
+                        break
+            
+            if order_to_remove:
+                # Remove from active orders (order is completed)
+                removed_order = self.active_orders.pop(order_to_remove)
+                
+                # Clean up status check timestamp
+                self._last_status_check.pop(order_to_remove, None)
+                
+                logger.info(f"OrderManager: Removed completed order {order_to_remove} "
+                          f"({tracked_order.status.value}) via OrderTracker event")
+                
+                # Log order completion details for debugging
+                logger.debug(f"Completed order details: market={tracked_order.market}, "
+                           f"side={tracked_order.side.value}, filled={tracked_order.filled_amount}/"
+                           f"{tracked_order.original_amount}")
+            else:
+                # Order not found in active_orders - may have been removed already or not tracked
+                logger.debug(f"OrderManager: Order completion event for {client_id or order_id} "
+                           f"but order not found in active_orders (may have been cleaned up already)")
+                
+        except Exception as e:
+            logger.error(f"Error handling order completion from OrderTracker: {e}", exc_info=True)

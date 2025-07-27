@@ -80,6 +80,14 @@ class DailyRangeBot:
         self._last_account_update = None
         self._last_positions_sync = None
         
+        # Event-driven buy status management
+        self._buy_status_cache = {}  # market -> {status, last_check, orders, position}
+        self._last_trading_day = None
+        self._buy_status_triggers = set()  # Track what triggered cache updates
+        
+        # State tracking for logging optimization
+        self._logged_states = {}  # market -> {state_type -> last_logged_value}
+        
     async def initialize(self):
         """Initialize all bot components"""
         logger.info("Initializing Daily Range Accumulation Bot...")
@@ -107,6 +115,20 @@ class DailyRangeBot:
             self.pairing_manager = OrderPairingManager(
                 self.order_tracker, self.order_manager, self.client
             )
+            
+            # Connect OrderManager to OrderTracker events for synchronized order cleanup
+            self.order_tracker.add_order_complete_handler(self.order_manager.handle_order_completion)
+            logger.info("✓ Connected OrderManager to OrderTracker for automatic order cleanup")
+            
+            # Initialize WebSocket state tracking for reconnection detection
+            self._ws_connection_state = {
+                'last_connected': None,
+                'last_authenticated': None,
+                'reconnection_count': 0
+            }
+            
+            # Set WebSocket client reference for enhanced availability monitoring
+            self.market_data.set_websocket_client(self.websocket_client)
             
             # Initialize WebSocket connection using proven pattern from tests
             logger.info("Starting WebSocket connection for real-time order tracking...")
@@ -136,28 +158,47 @@ class DailyRangeBot:
                 "position.update",
                 self._handle_position_update
             )
+            self.websocket_client.register_handler(
+                "order.update",
+                self._handle_order_update
+            )
+            self.websocket_client.register_handler(
+                "user_deals.update",
+                self._handle_user_deals_update
+            )
             
-            # Subscribe to order and user deals updates
-            await self.websocket_client.subscribe_orders()
-            await self.websocket_client.subscribe_user_deals()
-            logger.info("✓ Subscribed to WebSocket order tracking")
-            
-            # Subscribe to market state updates for real-time price data
-            await self.websocket_client.subscribe_market_state()
-            logger.info("✓ Subscribed to WebSocket market state updates")
-            
-            # Subscribe to balance updates for real-time account balance
+            # Subscribe to balance updates for real-time account balance (no market filter needed)
             await self.websocket_client.subscribe_balance(["USDT"])
             logger.info("✓ Subscribed to WebSocket balance updates")
             
-            # Subscribe to position updates for real-time position tracking
-            await self.websocket_client.subscribe_positions()
-            logger.info("✓ Subscribed to WebSocket position updates")
+            # Note: Market-specific subscriptions (orders, user_deals, market_state, positions) 
+            # will be set up in set_trading_market() after market is selected
             
             # Load current state from exchange (no database)
             logger.info("Loading current state from exchange...")
             await self._initialize_from_exchange()
             logger.info("✓ Exchange state loaded successfully")
+            
+            # Initialize buy status cache for startup and clean stale orders
+            logger.info("Initializing buy status cache and cleaning stale orders...")
+            self._last_trading_day = datetime.now(timezone.utc).date()
+            
+            # Trigger initial cache population for any existing markets
+            # This will automatically clean up stale orders during cache population
+            if self.trading_markets:
+                total_cleaned = 0
+                for market in self.trading_markets:
+                    self._update_buy_status_cache(market, trigger="bot_startup")
+                    # Get the cleanup count from the cache
+                    if market in self._buy_status_cache:
+                        cleaned = self._buy_status_cache[market]['status'].get('cancelled_stale', 0)
+                        total_cleaned += cleaned
+                
+                if total_cleaned > 0:
+                    logger.info(f"✓ Startup cleanup: Cancelled {total_cleaned} stale orders across {len(self.trading_markets)} markets")
+                logger.info(f"✓ Buy status cache initialized for {len(self.trading_markets)} markets")
+            else:
+                logger.info("✓ Buy status cache initialized (no markets yet)")
             
             # Update initial status
             await self._update_account_status()
@@ -187,6 +228,20 @@ class DailyRangeBot:
             logger.info("Syncing order tracker...")
             await self.order_tracker.sync_existing_orders()
             
+            # Check if we're in funding fee settlement period
+            from src.utils.settlement_handler import is_settlement_period, wait_for_settlement_end, log_settlement_schedule
+            
+            if is_settlement_period():
+                logger.warning("⚠️  Bot starting during funding fee settlement period")
+                await wait_for_settlement_end()
+            
+            # Log upcoming settlement times for visibility
+            log_settlement_schedule()
+            
+            # Perform comprehensive stale order cleanup on startup
+            logger.info("Performing startup stale order cleanup...")
+            await self._perform_startup_order_cleanup()
+            
             logger.info("Exchange state initialization completed")
             
         except Exception as e:
@@ -211,65 +266,100 @@ class DailyRangeBot:
                 target_leverage = int(LEVERAGE)
                 margin_mode = 'cross'
                 
-                logger.info(f"🔧 Configuring leverage for {market} to {target_leverage}x {margin_mode}")
+                # Check if this market was already initialized (has orders from previous runs)
+                existing_orders = self.order_manager.get_pending_orders(market)
+                bot_orders = [
+                    order for order in existing_orders 
+                    if order.client_id and order.client_id.startswith('DRA_')
+                ]
                 
-                # First, try direct leverage adjustment
-                try:
-                    leverage_data = self.client.adjust_position_leverage(
-                        market=market,
-                        leverage=target_leverage,
-                        margin_mode=margin_mode
-                    )
+                if bot_orders:
+                    logger.info(f"📌 Found {len(bot_orders)} existing bot order(s) for {market}")
+                    logger.info(f"🛡️ Skipping leverage adjustment - trusting bot orders have correct settings")
+                    logger.info(f"✅ Bot orders trusted: {[order.client_id for order in bot_orders]}")
                     
-                    # If we reach here, leverage was set successfully
-                    logger.info(f"✅ Leverage configured for {market}: "
-                              f"{leverage_data.get('leverage', target_leverage)}x "
-                              f"{leverage_data.get('margin_mode', margin_mode)} margin")
+                    # Skip leverage adjustment entirely - bot orders are trusted
+                    # Continue with the rest of the market setup
                     
-                except Exception as direct_error:
-                    # Check if it's an "order exist" error that we can handle intelligently
-                    if "order exist" in str(direct_error).lower():
-                        logger.warning(f"⚠️ Order conflict detected for {market}: {direct_error}")
-                        logger.info("🧠 Using intelligent leverage conflict resolution")
-                        
-                        # Use intelligent conflict resolution
-                        resolution_result = self.client.handle_leverage_conflict_intelligently(
+                else:
+                    # No bot orders found, safe to attempt leverage adjustment
+                    logger.info(f"🔧 No existing bot orders found - configuring leverage for {market}")
+                    
+                    # First, try direct leverage adjustment
+                    try:
+                        leverage_data = self.client.adjust_position_leverage(
                             market=market,
-                            target_leverage=target_leverage,
+                            leverage=target_leverage,
                             margin_mode=margin_mode
                         )
                         
-                        if resolution_result['success']:
-                            logger.info(f"✅ Leverage conflict resolved for {market}: {resolution_result['message']}")
-                            
-                            # Check for critical bug detection
-                            if resolution_result.get('bug_detected'):
-                                logger.error("🚨 CRITICAL BUG DETECTED AND FIXED!")
-                                logger.error("⚠️ Multiple buy orders found - this violates Daily Range Strategy!")
-                                logger.error("🔍 Please investigate order management logic immediately!")
-                            
-                        else:
-                            # Intelligent resolution failed, but we can continue
-                            logger.warning(f"⚠️ Leverage conflict resolution failed for {market}")
-                            logger.warning(f"Message: {resolution_result['message']}")
-                            logger.info("🤖 Bot will continue with existing leverage settings")
-                            
-                            # Don't crash the bot - just log the issue
-                            if resolution_result.get('bug_detected'):
-                                logger.error("🚨 CRITICAL BUG DETECTED but cleanup failed!")
-                                logger.error("⚠️ Manual intervention required to fix order state!")
-                    
-                    elif "service too busy" in str(direct_error).lower():
-                        # Handle service busy errors as before
-                        logger.error(f"⚠️ CoinEx API is consistently busy for {market}: {direct_error}")
-                        logger.error("The bot will attempt to continue, but leverage may not be optimal.")
-                        logger.error("Please monitor positions closely and manually set leverage if needed.")
+                        # If we reach here, leverage was set successfully
+                        logger.info(f"✅ Leverage configured for {market}: "
+                                  f"{leverage_data.get('leverage', target_leverage)}x "
+                                  f"{leverage_data.get('margin_mode', margin_mode)} margin")
                         
-                        raise ValueError(f"Failed to set leverage for {market} after retries. "
-                                       f"API consistently busy: {direct_error}")
-                    else:
-                        # Other errors - re-raise
-                        raise direct_error
+                    except Exception as direct_error:
+                        # Check if it's an "order exist" error that we can handle intelligently
+                        if "order exist" in str(direct_error).lower():
+                            logger.warning(f"⚠️ Order conflict detected for {market}: {direct_error}")
+                            logger.info("🧠 Using intelligent leverage conflict resolution")
+                        
+                            # Use intelligent conflict resolution
+                            resolution_result = self.client.handle_leverage_conflict_intelligently(
+                                market=market,
+                                target_leverage=target_leverage,
+                                margin_mode=margin_mode
+                            )
+                        
+                            if resolution_result['success']:
+                                action = resolution_result.get('action', 'unknown')
+                                
+                                if action in ['bot_orders_trusted_early', 'bot_order_trusted']:
+                                    logger.info(f"✅ {resolution_result['message']}")
+                                    logger.info(f"💡 Trust reason: {resolution_result.get('trust_reason', 'N/A')}")
+                                else:
+                                    logger.info(f"✅ Leverage conflict resolved for {market}: {resolution_result['message']}")
+                            
+                                # Check for critical bug detection
+                                if resolution_result.get('bug_detected'):
+                                    logger.error("🚨 CRITICAL BUG DETECTED AND FIXED!")
+                                    logger.error("⚠️ Multiple buy orders found - this violates Daily Range Strategy!")
+                                    logger.error("🔍 Please investigate order management logic immediately!")
+                                
+                            else:
+                                # Check if it's a partial success (leverage set but order recreation failed)
+                                if resolution_result.get('action') == 'single_buy_order_partial':
+                                    logger.warning(f"⚠️ Leverage set for {market} but order recreation failed")
+                                    logger.warning(f"Recreation error: {resolution_result.get('recreation_error', 'Unknown error')}")
+                                    logger.info("🔄 Bot will create a new buy order through normal signal processing")
+                                    
+                                    # Clear buy status cache so new order can be placed
+                                    if market in self._buy_status_cache:
+                                        del self._buy_status_cache[market]
+                                        logger.info(f"🗑️ Cleared buy status cache for {market} to allow new order")
+                                    
+                                else:
+                                    # Intelligent resolution completely failed
+                                    logger.warning(f"⚠️ Leverage conflict resolution failed for {market}")
+                                    logger.warning(f"Message: {resolution_result['message']}")
+                                    logger.info("🤖 Bot will continue with existing leverage settings")
+                                
+                                    # Don't crash the bot - just log the issue
+                                    if resolution_result.get('bug_detected'):
+                                        logger.error("🚨 CRITICAL BUG DETECTED but cleanup failed!")
+                                        logger.error("⚠️ Manual intervention required to fix order state!")
+                        
+                        elif "service too busy" in str(direct_error).lower():
+                            # Handle service busy errors as before
+                            logger.error(f"⚠️ CoinEx API is consistently busy for {market}: {direct_error}")
+                            logger.error("The bot will attempt to continue, but leverage may not be optimal.")
+                            logger.error("Please monitor positions closely and manually set leverage if needed.")
+                            
+                            raise ValueError(f"Failed to set leverage for {market} after retries. "
+                                           f"API consistently busy: {direct_error}")
+                        else:
+                            # Other errors - re-raise
+                            raise direct_error
                         
             except Exception as e:
                 # Final fallback error handling
@@ -289,6 +379,33 @@ class DailyRangeBot:
             
             # Generate initial signal if needed
             await self._check_and_generate_signals(market)
+            
+            # Initialize buy status cache for this market
+            self._update_buy_status_cache(market, trigger="market_setup")
+            
+            # Subscribe to market-specific WebSocket streams for real-time data
+            if self.websocket_client and self.websocket_client.is_connected:
+                logger.info(f"Setting up WebSocket subscriptions for {market}...")
+                
+                # Subscribe to order updates for this market only
+                await self.websocket_client.subscribe_orders([market])
+                logger.info(f"✓ Subscribed to order updates for {market}")
+                
+                # Subscribe to user deals/trades for this market only
+                await self.websocket_client.subscribe_user_deals([market])
+                logger.info(f"✓ Subscribed to user deals for {market}")
+                
+                # Subscribe to market state updates for this market only (real-time price data)
+                await self.websocket_client.subscribe_market_state([market])
+                logger.info(f"✓ Subscribed to market state updates for {market}")
+                
+                # Subscribe to position updates for this market only
+                await self.websocket_client.subscribe_positions([market])
+                logger.info(f"✓ Subscribed to position updates for {market}")
+                
+                logger.info(f"🔗 All WebSocket subscriptions configured for {market}")
+            else:
+                logger.warning(f"⚠️ WebSocket not connected - market subscriptions for {market} will be set up on reconnect")
     
     async def execute_trading_cycle(self):
         """Execute one complete trading cycle"""
@@ -296,8 +413,17 @@ class DailyRangeBot:
             return
         
         try:
-            # Update account and positions periodically
+            # Check for new trading day and update cache if needed
             now = datetime.now(timezone.utc)
+            current_day = now.date()
+            if self._last_trading_day and current_day > self._last_trading_day:
+                logger.info(f"New trading day detected: {current_day}")
+                self._last_trading_day = current_day
+                # Clear cache for new day - will be rebuilt on demand
+                for market in list(self._buy_status_cache.keys()):
+                    self._update_buy_status_cache(market, trigger="new_day")
+            
+            # Update account and positions periodically
             # Reduced account update frequency from 60s to 300s (5 min) since we have WebSocket balance updates
             if (not self._last_account_update or 
                 (now - self._last_account_update).seconds > 300):
@@ -312,6 +438,14 @@ class DailyRangeBot:
             
             # Process unmatched buy fills periodically
             await self._process_pairing_tasks()
+            
+            # Daily disk space check (simple storage monitoring)
+            if not hasattr(self, '_last_disk_check'):
+                self._last_disk_check = now
+            if (now - self._last_disk_check).seconds > 86400:  # Once per day
+                from src.utils.logger import check_disk_space
+                check_disk_space()
+                self._last_disk_check = now
             
             # Process each trading market
             for market in self.trading_markets:
@@ -362,7 +496,7 @@ class DailyRangeBot:
             if signal:
                 self.last_signal_generation[market] = now
                 self.status.last_signal_time = now
-                logger.info(f"Generated signal for {market}: Buy=${signal.buy_price:.2f}, Sell=${signal.sell_price:.2f}")
+                log_trading_event('signal_generation', f"Generated signal for {market}: Buy=${signal.buy_price:.2f}, Sell=${signal.sell_price:.2f}")
             else:
                 logger.warning(f"Failed to generate signal for {market}")
     
@@ -388,7 +522,7 @@ class DailyRangeBot:
                 )
                 
                 if is_profitable.is_profitable:
-                    logger.info(f"Profitable exit opportunity for {market} position: "
+                    log_trading_event('profitable_exit', f"Profitable exit opportunity for {market} position: "
                               f"Entry=${position.avg_entry_price:.2f}, Exit=${exit_price:.2f}, "
                               f"Profit={is_profitable.profit_percent:.2f}%")
                     
@@ -408,28 +542,77 @@ class DailyRangeBot:
             # First priority: Check if we have existing position that needs sell orders
             balance = self._calculate_position_sell_balance(market)
             if balance['position_exists']:
-                logger.info(f"🎯 Found existing position in {market}: {balance['position_size']:.6f}")
+                # Only log position if state changed
+                if self._should_log_state_change(market, 'position_in_entry_check', balance['position_size']):
+                    log_trading_event('position_found', f"🎯 Found existing position in {market}: {balance['position_size']:.6f}")
                 
                 if not balance['is_balanced']:
-                    logger.info(f"⚠️ Position needs sell orders: missing {balance['missing_sell']:.6f}")
+                    # Only log imbalance if state changed
+                    imbalance_key = f"missing_sell_{balance['missing_sell']:.6f}"
+                    if self._should_log_state_change(market, imbalance_key, True):
+                        log_trading_event('position_imbalance', f"⚠️ Position needs sell orders: missing {balance['missing_sell']:.6f} for {market}")
+                    
                     # Place missing sell order for existing position
                     if self._place_missing_sell_order(market, balance['missing_sell']):
-                        logger.info(f"✅ Placed missing sell order for existing position")
+                        log_trading_event('sell_order', f"✅ Placed missing sell order for existing position in {market}")
                     else:
-                        logger.error(f"❌ Failed to place missing sell order")
+                        log_trading_event('sell_order_error', f"❌ Failed to place missing sell order for {market}")
                 else:
-                    logger.info(f"✅ Position properly balanced with {len(balance['sell_orders'])} sell orders")
+                    # Only log balanced state if it changed
+                    balance_key = f"balanced_with_{len(balance['sell_orders'])}_orders"
+                    if self._should_log_state_change(market, balance_key, True):
+                        log_trading_event('position_balance', f"✅ Position properly balanced with {len(balance['sell_orders'])} sell orders for {market}")
                 
                 # With existing position, no new buy orders should be placed
                 # The _should_place_buy_order method will prevent this anyway
                 return
             
             # Second priority: Check for new buy opportunities (only if no position exists)
+            # CRITICAL FIX: Clean up duplicate orders before checking if we should place buy
+            buy_status = self._get_cached_buy_status(market)
+            total_buy_orders = buy_status.get('total_buy_orders', 0)
+            all_buy_orders = buy_status.get('all_buy_orders', [])
+            
+            # Check if we need cleanup (only for multiple orders - NOT age-based)
+            needs_cleanup = False
+            cleanup_reason = ""
+            
+            if total_buy_orders > 1:
+                needs_cleanup = True
+                cleanup_reason = f"multiple orders ({total_buy_orders})"
+            # REMOVED: Age-based cleanup for single same-day orders
+            # Conservative approach: Keep valid orders from today regardless of age
+            
+            if needs_cleanup:
+                logger.warning(f"🧹 Cleanup needed for {market}: {cleanup_reason}")
+                await self._ensure_single_buy_order(market)
+                
+                # Force refresh of buy status cache after cleanup
+                if market in self._buy_status_cache:
+                    del self._buy_status_cache[market]
+                    
+                # Immediately refresh cache to verify cleanup worked
+                updated_status = self._get_cached_buy_status(market)
+                remaining_orders = updated_status.get('total_buy_orders', 0)
+                
+                if remaining_orders == 0:
+                    log_trading_event('order_cleanup', f"✅ All orders cleaned up for {market}")
+                elif remaining_orders == 1:
+                    log_trading_event('order_cleanup', f"✅ Cleanup successful - 1 order remaining for {market}")
+                else:
+                    logger.error(f"🚨 Cleanup failed - still {remaining_orders} buy orders for {market}")
+                    log_trading_event('cleanup_failure', f"❌ Cleanup failed - {remaining_orders} orders still exist for {market}")
+                    # Force another cleanup attempt
+                    await self._ensure_single_buy_order(market)
+            
             if self._should_place_buy_order(market, signal, current_price):
-                logger.info(f"🚀 Placing new buy order for {market}")
+                log_trading_event('buy_order', f"🚀 Placing new buy order for {market}")
                 await self._place_entry_order(market, 'buy', signal.buy_price, signal)
             else:
-                logger.debug(f"⏸️ No buy opportunity for {market} at current conditions")
+                # Only log "no buy opportunity" if it's a state change
+                # This prevents logging the same message every 5 seconds
+                if self._should_log_state_change(market, 'no_buy_opportunity', True):
+                    log_trading_event('buy_decision', f"⏸️ No buy opportunity for {market} at current conditions")
             
         except Exception as e:
             logger.error(f"Error checking entry opportunities for {market}: {e}")
@@ -437,9 +620,24 @@ class DailyRangeBot:
     def _check_daily_buy_status(self, market: str) -> Dict[str, Any]:
         """Check buy order status for current day with stale order cleanup"""
         try:
+            # Force sync with exchange to ensure fresh data and cleanup stale orders
+            log_trading_event('buy_status_sync', f"Forcing order sync with exchange for {market}")
+            sync_count = self.order_manager.load_existing_orders(market)
+            
             # Get all pending buy orders using proven endpoint
             pending_orders = self.order_manager.get_pending_orders(market)
             buy_orders = [o for o in pending_orders if o.side.value == 'buy']
+            
+            # Force status update for all buy orders to catch recently filled orders
+            updated_orders = []
+            for order in buy_orders:
+                updated_order = self.order_manager.update_order_status(order.client_id)
+                if updated_order and updated_order.status.value == 'pending':
+                    updated_orders.append(updated_order)
+                elif updated_order:
+                    log_trading_event('stale_cleanup', f"Order {order.client_id} status changed to {updated_order.status.value}")
+            
+            buy_orders = updated_orders
             
             today = datetime.now(timezone.utc).date()
             today_buy_orders = []
@@ -454,27 +652,74 @@ class DailyRangeBot:
                     stale_orders.append(order)  # Older than 1 day
             
             # Cancel stale buy orders using proven cancel method
+            # Note: cancel_order now has @settlement_retry decorator
             cancelled_count = 0
             for stale_order in stale_orders:
                 try:
                     logger.warning(f"Cancelling stale buy order: {stale_order.client_id} from {stale_order.created_at.date()}")
-                    self.order_manager.cancel_order(stale_order.client_id)
-                    cancelled_count += 1
+                    # This will automatically retry on settlement errors
+                    if self.order_manager.cancel_order(stale_order.client_id):
+                        cancelled_count += 1
                 except Exception as e:
-                    logger.error(f"Failed to cancel stale order {stale_order.client_id}: {e}")
+                    # Only log if not a settlement error (those are handled by decorator)
+                    from src.utils.settlement_handler import is_settlement_error
+                    if not is_settlement_error(e):
+                        logger.error(f"Failed to cancel stale order {stale_order.client_id}: {e}")
             
             result = {
                 'has_today_buy': len(today_buy_orders) > 0,
                 'today_orders': today_buy_orders,
                 'cancelled_stale': cancelled_count,
-                'total_buy_orders': len(buy_orders)
+                'total_buy_orders': len(buy_orders),
+                'all_buy_orders': buy_orders  # Return ALL orders for validation
             }
             
+            # Validation: Cross-check with exchange API to detect discrepancies
+            try:
+                direct_exchange_orders = self.exchange_client.get_pending_orders(market=market)
+                exchange_buy_orders = []
+                if isinstance(direct_exchange_orders, dict):
+                    exchange_data = direct_exchange_orders.get('data', [])
+                    exchange_buy_orders = [o for o in exchange_data if o.get('side') == 'buy']
+                elif isinstance(direct_exchange_orders, list):
+                    exchange_buy_orders = [o for o in direct_exchange_orders if o.get('side') == 'buy']
+                
+                # Filter today's orders from exchange
+                today_exchange_buys = []
+                for order in exchange_buy_orders:
+                    created_time = order.get('created_at', 0)
+                    if isinstance(created_time, str):
+                        from dateutil import parser
+                        order_date = parser.parse(created_time).date()
+                    else:
+                        order_date = datetime.fromtimestamp(created_time / 1000, timezone.utc).date()
+                    
+                    if order_date == today:
+                        today_exchange_buys.append(order)
+                
+                # Log discrepancy if found
+                cache_count = len(today_buy_orders)
+                exchange_count = len(today_exchange_buys)
+                if cache_count != exchange_count:
+                    log_trading_event('cache_discrepancy', 
+                        f"Buy order count mismatch for {market}: cache={cache_count}, exchange={exchange_count}")
+                    logger.warning(f"Cache vs exchange discrepancy detected for {market}:")
+                    logger.warning(f"  Cache orders: {[o.client_id for o in today_buy_orders]}")
+                    logger.warning(f"  Exchange orders: {[o.get('client_id', o.get('order_id')) for o in today_exchange_buys]}")
+                    
+                    # Clear buy status cache to force refresh on next check
+                    if market in self._buy_status_cache:
+                        del self._buy_status_cache[market]
+                        log_trading_event('cache_refresh', f"Cleared buy status cache for {market} due to discrepancy")
+                
+            except Exception as validation_error:
+                logger.debug(f"Validation check failed for {market}: {validation_error}")
+            
             if result['has_today_buy']:
-                logger.info(f"Found {len(today_buy_orders)} buy order(s) from today for {market}")
+                log_trading_event('buy_status', f"Found {len(today_buy_orders)} buy order(s) from today for {market}")
             
             if cancelled_count > 0:
-                logger.info(f"Cancelled {cancelled_count} stale buy order(s) for {market}")
+                log_trading_event('stale_cleanup', f"Cancelled {cancelled_count} stale buy order(s) for {market}")
             
             return result
             
@@ -617,21 +862,40 @@ class DailyRangeBot:
             return False
     
     def _should_place_buy_order(self, market: str, signal: TradingSignal, current_price: float) -> bool:
-        """Enhanced buy order decision with comprehensive strategy validation"""
+        """Event-driven buy order decision using cached status"""
         
-        # Phase 1: Daily buy order check with stale cleanup
-        logger.info(f"🔍 Phase 1: Checking daily buy status for {market}")
-        buy_status = self._check_daily_buy_status(market)
-        if buy_status['has_today_buy']:
-            logger.info(f"❌ Cannot place buy - already have {len(buy_status['today_orders'])} buy order(s) today for {market}")
+        # Use event-driven cache instead of continuous polling
+        buy_status = self._get_cached_buy_status(market)
+        
+        # CRITICAL: Check for ANY buy orders (not just today's)
+        total_buy_orders = buy_status.get('total_buy_orders', 0)
+        if total_buy_orders > 0:
+            # Log detailed information about ALL buy orders
+            all_orders = buy_status.get('all_buy_orders', [])
+            order_summary = []
+            for order in all_orders:
+                order_date = order.created_at.date()
+                order_time = order.created_at.time()
+                age_hours = (datetime.now(timezone.utc) - order.created_at).total_seconds() / 3600
+                order_summary.append(f"{order.client_id} ({order_date} {order_time.strftime('%H:%M:%S')}, {age_hours:.1f}h old)")
+            
+            # Only log when state changes to avoid spam
+            order_state_key = f"existing_buy_orders_{total_buy_orders}"
+            if self._should_log_state_change(market, order_state_key, ', '.join([o.client_id for o in all_orders])):
+                logger.info(f"📋 Tracking {total_buy_orders} existing buy order(s) for {market}: {', '.join(order_summary)}")
+                log_trading_event('buy_tracking', f"📋 Tracking {total_buy_orders} existing buy order(s) for {market}")
+            
+            # Conservative approach: Respect existing orders from today and let order tracking handle fills
+            
             return False
         
         # Phase 2: CRITICAL - Check if we have existing position from today's trading
-        logger.info(f"🔍 Phase 2: Checking for existing position that prevents new buy orders")
         balance = self._calculate_position_sell_balance(market)
         
         if balance['position_exists']:
-            logger.info(f"⚠️ FOUND EXISTING POSITION: {balance['position_size']:.6f} {market}")
+            # Only log position if it's a state change
+            if self._should_log_state_change(market, 'position_exists', balance['position_size']):
+                log_trading_event('position_check', f"⚠️ FOUND EXISTING POSITION: {balance['position_size']:.6f} {market}")
             
             # STRATEGY RULE: Only ONE buy order per day per market
             # If position exists, we should NEVER place another buy order the same day
@@ -639,48 +903,168 @@ class DailyRangeBot:
             
             if not balance['is_balanced']:
                 # Position exists but not balanced - place missing sell order
-                logger.info(f"🔧 Position unbalanced: {balance['position_size']:.6f} position vs {balance['total_sells']:.6f} sells")
-                logger.info(f"🔧 Placing missing sell order: {balance['missing_sell']:.6f}")
+                log_trading_event('position_balance', f"🔧 Position unbalanced: {balance['position_size']:.6f} position vs {balance['total_sells']:.6f} sells for {market}")
+                log_trading_event('missing_sell', f"🔧 Placing missing sell order: {balance['missing_sell']:.6f} for {market}")
                 
                 if self._place_missing_sell_order(market, balance['missing_sell']):
-                    logger.info(f"✅ Missing sell order placed for existing position")
+                    log_trading_event('sell_order', f"✅ Missing sell order placed for existing position in {market}")
                 else:
-                    logger.error(f"❌ Failed to place missing sell order")
+                    log_trading_event('sell_order_error', f"❌ Failed to place missing sell order for {market}")
             else:
-                logger.info(f"✅ Position is properly balanced with sell orders")
+                log_trading_event('position_balance', f"✅ Position is properly balanced with sell orders for {market}")
             
             # NEVER place buy order when position exists - this is the core strategy rule
-            logger.info(f"❌ Cannot place buy - position already exists from today's trading")
-            logger.info(f"💡 Strategy: Maximum one buy order per day per market")
+            if self._should_log_state_change(market, 'position_blocks_buy', True):
+                log_trading_event('buy_decision', f"❌ Cannot place buy - position already exists from today's trading for {market}")
             return False
         
         # Phase 3: Price validation
-        logger.info(f"🔍 Phase 3: Price validation for {market}")
         price_diff_percent = abs(current_price - signal.buy_price) / signal.buy_price * 100
         if price_diff_percent > MAX_RANGE_DEVIATION:
-            logger.info(f"❌ Cannot place buy - price too far from signal: {price_diff_percent:.2f}% deviation (max: {MAX_RANGE_DEVIATION}%)")
-            logger.info(f"💡 Current: ${current_price:.2f}, Signal: ${signal.buy_price:.2f}")
+            if self._should_log_state_change(market, 'price_out_of_range', True):
+                log_trading_event('price_validation', f"❌ Cannot place buy - price too far from signal: {price_diff_percent:.2f}% deviation (max: {MAX_RANGE_DEVIATION}%) for {market}")
             return False
         
         # Phase 4: Account balance and position sizing
-        logger.info(f"🔍 Phase 4: Account balance and position sizing for {market}")
         account_balance = self.get_account_balance()
         position_size = self.position_sizer.calculate_position_size(
             market, signal.buy_price, account_balance
         )
         
         if not position_size.is_valid:
-            logger.info(f"❌ Cannot place buy - position sizing invalid: {position_size.reason}")
+            if self._should_log_state_change(market, 'position_size_invalid', position_size.reason):
+                log_trading_event('position_sizing', f"❌ Cannot place buy - position sizing invalid: {position_size.reason} for {market}")
             return False
         
         # All checks passed - no existing position, no pending buy orders
-        logger.info(f"✅ All checks passed - ready to place buy order for {market}")
-        logger.info(f"💰 Order details: ${signal.buy_price:.2f} x {position_size.quantity:.6f} = ${position_size.size_usdt:.2f}")
+        # Reset states when we're ready to buy
+        if market in self._logged_states:
+            self._logged_states[market] = {}  # Clear logged states for fresh start
+        
+        log_trading_event('buy_decision', f"✅ All checks passed - ready to place buy order for {market}")
+        log_trading_event('order_details', f"💰 Order details: ${signal.buy_price:.2f} x {position_size.quantity:.6f} = ${position_size.size_usdt:.2f} for {market}")
         return True
+    
+    async def _ensure_single_buy_order(self, market: str) -> None:
+        """
+        Ensure only ONE buy order exists for the market.
+        Cancel ALL other buy orders (from any day).
+        
+        Strategy Rule: Only ONE buy order should exist at any time.
+        """
+        try:
+            logger.info(f"🔍 Enforcing single buy order rule for {market}")
+            
+            # Force a fresh sync with exchange before cleanup
+            logger.info(f"🔄 Forcing fresh order sync before cleanup for {market}")
+            sync_count = self.order_manager.load_existing_orders(market)
+            logger.info(f"📥 Synced {sync_count} orders from exchange for {market}")
+            
+            # Get ALL pending orders for this market
+            all_pending_orders = self.order_manager.get_pending_orders(market)
+            buy_orders = [o for o in all_pending_orders if o.side.value == 'buy']
+            
+            if not buy_orders:
+                logger.info(f"✅ No existing buy orders found for {market} after sync")
+                return
+                
+            logger.warning(f"⚠️  Found {len(buy_orders)} buy order(s) for {market} - cleaning up...")
+            
+            # Sort by creation time (keep the oldest/first one if from today)
+            buy_orders.sort(key=lambda x: x.created_at)
+            
+            today = datetime.now(timezone.utc).date()
+            today_orders = [o for o in buy_orders if o.created_at.date() == today]
+            old_orders = [o for o in buy_orders if o.created_at.date() < today]
+            
+            # Cancel ALL old orders
+            for order in old_orders:
+                try:
+                    logger.warning(f"🗑️  Cancelling old buy order: {order.client_id} from {order.created_at.date()}")
+                    if self.order_manager.cancel_order(order.client_id):
+                        log_trading_event('cleanup', f"Cancelled old buy order {order.client_id}")
+                except Exception as e:
+                    if "invalid argument" in str(e).lower():
+                        logger.info(f"⚠️ Order {order.client_id} may already be filled/cancelled: {e}")
+                        log_trading_event('order_gone', f"Order {order.client_id} not found - likely filled/cancelled")
+                    else:
+                        logger.error(f"Failed to cancel old order {order.client_id}: {e}")
+            
+            # Handle today's orders - be more aggressive about old ones
+            if len(today_orders) > 1:
+                logger.warning(f"⚠️  Multiple buy orders from today detected! Keeping newest, cancelling {len(today_orders)-1} older ones")
+                # Sort by creation time, keep the newest (last one)
+                today_orders.sort(key=lambda x: x.created_at)
+                for order in today_orders[:-1]:  # Cancel all except the newest
+                    try:
+                        age_hours = (datetime.now(timezone.utc) - order.created_at).total_seconds() / 3600
+                        logger.warning(f"🗑️  Cancelling older buy order: {order.client_id} from {order.created_at.time()} ({age_hours:.1f}h old)")
+                        
+                        # Add small delay to prevent race conditions with rapid order creation
+                        await asyncio.sleep(0.1)
+                        
+                        if self.order_manager.cancel_order(order.client_id):
+                            log_trading_event('cleanup', f"Cancelled older buy order {order.client_id}")
+                        else:
+                            logger.warning(f"⚠️ Cancel returned False for {order.client_id} - order may be processing")
+                            
+                    except Exception as e:
+                        if "invalid argument" in str(e).lower():
+                            logger.info(f"⚠️ Order {order.client_id} may already be filled/cancelled: {e}")
+                            log_trading_event('order_gone', f"Order {order.client_id} not found - likely filled/cancelled")
+                        else:
+                            logger.error(f"Failed to cancel older order {order.client_id}: {e}")
+            elif len(today_orders) == 1:
+                # Single order from today - KEEP IT (conservative approach)
+                order = today_orders[0]
+                age_hours = (datetime.now(timezone.utc) - order.created_at).total_seconds() / 3600
+                logger.info(f"✅ Keeping single buy order from today: {order.client_id} ({age_hours:.1f}h old)")
+                logger.info("📋 Conservative approach: Respecting existing same-day order, letting order tracking handle fills")
+                        
+            # Clear buy status cache to force refresh
+            if market in self._buy_status_cache:
+                del self._buy_status_cache[market]
+                
+            # Wait a moment for exchange to process cancellations
+            await asyncio.sleep(0.5)
+            
+            # Verify cleanup results with fresh sync
+            logger.info(f"🔍 Verifying cleanup results for {market}")
+            final_sync_count = self.order_manager.load_existing_orders(market)
+            final_pending_orders = self.order_manager.get_pending_orders(market)
+            final_buy_orders = [o for o in final_pending_orders if o.side.value == 'buy']
+            
+            if len(final_buy_orders) <= 1:
+                logger.info(f"✅ Cleanup verification successful - {len(final_buy_orders)} buy order(s) remaining for {market}")
+                if len(final_buy_orders) == 1:
+                    remaining_order = final_buy_orders[0]
+                    logger.info(f"   Keeping order: {remaining_order.client_id} from {remaining_order.created_at}")
+            else:
+                logger.error(f"🚨 Cleanup verification failed - {len(final_buy_orders)} buy orders still exist for {market}")
+                # Check if any of these might be recently filled
+                for order in final_buy_orders:
+                    logger.error(f"   Remaining order: {order.client_id} from {order.created_at}")
+                    # Force a status update to see if it's actually still pending
+                    try:
+                        updated_order = self.order_manager.update_order_status(order.client_id)
+                        if updated_order and updated_order.status.value != 'pending':
+                            logger.info(f"   📝 Order {order.client_id} status updated to: {updated_order.status.value}")
+                    except Exception as e:
+                        logger.debug(f"   Could not update status for {order.client_id}: {e}")
+            
+            logger.info(f"🏁 Single buy order enforcement completed for {market}")
+                
+        except Exception as e:
+            logger.error(f"Error in single buy order enforcement for {market}: {e}")
     
     async def _place_entry_order(self, market: str, side: str, price: float, signal: TradingSignal):
         """Place an entry order"""
         try:
+            # CRITICAL: Ensure only ONE buy order exists before placing new one
+            if side == 'buy':
+                await self._ensure_single_buy_order(market)
+                log_trading_event('order_cleanup', f"✅ Single buy order rule enforced for {market}")
+            
             account_balance = self.get_account_balance()
             position_size = self.position_sizer.calculate_position_size(
                 market, price, account_balance
@@ -706,9 +1090,9 @@ class DailyRangeBot:
                 current_price = self.market_data.get_current_price(market)
                 if current_price and current_price < price:
                     adjusted_price = current_price
-                    logger.info(f"💰 Buy price adjusted: ${price:.2f} → ${adjusted_price:.2f} (cheaper entry)")
+                    log_trading_event('price_adjustment', f"💰 Buy price adjusted: ${price:.2f} → ${adjusted_price:.2f} (cheaper entry) for {market}")
                 else:
-                    logger.info(f"📊 Buy price unchanged: ${price:.2f} (signal price optimal)")
+                    log_trading_event('price_no_adjustment', f"📊 Buy price unchanged: ${price:.2f} (signal price optimal) for {market}")
             
             # Place the order
             if side == 'buy':
@@ -730,7 +1114,7 @@ class DailyRangeBot:
                         amount=position_size.quantity,
                         price=adjusted_price
                     )
-                    logger.info(f"Started tracking buy order {order.exchange_order_id} for automatic sell pairing")
+                    log_trading_event('order_tracking', f"Started tracking buy order {order.exchange_order_id} for automatic sell pairing in {market}")
             else:
                 # For sell orders, use the traditional approach since this is for closing positions
                 # Note: Normal sell orders don't get price adjustment (as discussed)
@@ -754,7 +1138,7 @@ class DailyRangeBot:
                     )
             
             if order:
-                logger.info(f"Placed {side} order for {market}: "
+                log_trading_event('order_placed', f"Placed {side} order for {market}: "
                           f"Price=${adjusted_price:.2f}, Amount={position_size.quantity:.6f}, "
                           f"Size=${position_size.size_usdt:.2f}")
                 self.status.last_trade_time = datetime.now(timezone.utc)
@@ -1020,6 +1404,197 @@ class DailyRangeBot:
         except Exception as e:
             logger.error(f"Error handling position update: {e}")
     
+    def _handle_order_update(self, data: Dict[str, Any]):
+        """Handle order.update message from WebSocket"""
+        try:
+            order_data = data.get("order", {})
+            if not order_data:
+                return
+            
+            market = order_data.get("market")
+            side = order_data.get("side")
+            status = order_data.get("status")
+            
+            if market and side == "buy":
+                # Buy order event - update cache
+                self._update_buy_status_cache(market, trigger="order_update")
+                log_trading_event('buy_status_update', f"Buy order update for {market}: {status}")
+                
+        except Exception as e:
+            logger.error(f"Error handling order update: {e}")
+    
+    def _handle_user_deals_update(self, data: Dict[str, Any]):
+        """Handle user_deals.update message from WebSocket"""
+        try:
+            deals = data.get("user_deals", [])
+            if not deals:
+                return
+            
+            for deal in deals:
+                market = deal.get("market")
+                side = deal.get("side")
+                
+                if market and side == "buy":
+                    # Buy order filled - update cache
+                    self._update_buy_status_cache(market, trigger="order_fill")
+                    log_trading_event('buy_status_update', f"Buy order filled for {market}")
+                    
+        except Exception as e:
+            logger.error(f"Error handling user deals update: {e}")
+    
+    def _get_cached_buy_status(self, market: str) -> Dict[str, Any]:
+        """Get cached buy status or trigger update if needed"""
+        now = datetime.now(timezone.utc)
+        today = now.date()
+        
+        # Check if cache exists and is valid
+        if market in self._buy_status_cache:
+            cache_entry = self._buy_status_cache[market]
+            cache_date = cache_entry['last_check'].date()
+            
+            # Cache is valid if it's from today and less than 5 minutes old
+            cache_age = (now - cache_entry['last_check']).total_seconds()
+            if cache_date == today and cache_age < 300:
+                return cache_entry['status']
+            
+            # Day changed - cache is stale
+            if cache_date < today:
+                log_trading_event('buy_status_update', f"New trading day detected for {market}")
+                self._buy_status_triggers.add("new_day")
+        
+        # Cache miss or stale - update it
+        self._update_buy_status_cache(market, trigger="cache_refresh")
+        return self._buy_status_cache[market]['status']
+    
+    def _update_buy_status_cache(self, market: str, trigger: str):
+        """Update buy status cache for a market"""
+        try:
+            now = datetime.now(timezone.utc)
+            
+            # Perform the actual check (same logic as before)
+            buy_status = self._check_daily_buy_status(market)
+            
+            # Update cache
+            self._buy_status_cache[market] = {
+                'status': buy_status,
+                'last_check': now,
+                'trigger': trigger
+            }
+            
+            # Track what triggered this update
+            self._buy_status_triggers.add(trigger)
+            
+            # Log only on significant events or state changes
+            if trigger in ['new_day', 'order_fill', 'market_setup'] or buy_status['has_today_buy']:
+                log_trading_event(
+                    'buy_status_cache', 
+                    f"Cache updated for {market} ({trigger}): {len(buy_status['today_orders'])} buy orders today"
+                )
+            
+        except Exception as e:
+            logger.error(f"Error updating buy status cache for {market}: {e}")
+            # Fallback cache entry
+            self._buy_status_cache[market] = {
+                'status': {
+                    'has_today_buy': True,  # Conservative: assume we have buy
+                    'today_orders': [],
+                    'cancelled_stale': 0,
+                    'total_buy_orders': 0
+                },
+                'last_check': now,
+                'trigger': f'{trigger}_error'
+            }
+    
+    async def _perform_startup_order_cleanup(self):
+        """Comprehensive stale order cleanup during bot startup"""
+        try:
+            from src.utils.settlement_handler import settlement_retry_async
+            logger.info("🧹 Starting aggressive startup order cleanup...")
+            
+            total_cancelled = 0
+            cleanup_summary = []
+            
+            # Get all pending orders across all markets
+            all_orders = self.order_manager.get_pending_orders()
+            logger.info(f"📋 Found {len(all_orders)} total pending orders across all markets")
+            
+            if not all_orders:
+                logger.info("✓ No pending orders found during startup cleanup")
+                return
+            
+            now = datetime.now(timezone.utc)
+            today = now.date()
+            
+            # Group orders by market and type
+            orders_by_market = {}
+            for order in all_orders:
+                market = order.market
+                if market not in orders_by_market:
+                    orders_by_market[market] = {'buy': [], 'sell': []}
+                orders_by_market[market][order.side.value].append(order)
+            
+            # Process each market
+            for market, orders in orders_by_market.items():
+                buy_orders = orders['buy']
+                sell_orders = orders['sell']
+                
+                market_cancelled = 0
+                
+                # AGGRESSIVE CLEANUP: Cancel ALL buy orders except the first one from today
+                if len(buy_orders) > 0:
+                    logger.warning(f"⚠️  Found {len(buy_orders)} buy orders for {market}")
+                    
+                    # Separate today's orders from old orders
+                    today_buy_orders = [o for o in buy_orders if o.created_at.date() == today]
+                    old_buy_orders = [o for o in buy_orders if o.created_at.date() < today]
+                    
+                    # Cancel ALL old orders
+                    for order in old_buy_orders:
+                        try:
+                            logger.info(f"🗑️  Cancelling old buy order: {order.client_id} from {order.created_at.date()} in {market}")
+                            self.order_manager.cancel_order(order.client_id)
+                            market_cancelled += 1
+                            total_cancelled += 1
+                        except Exception as e:
+                            logger.error(f"Failed to cancel old buy order {order.client_id}: {e}")
+                    
+                    # If multiple orders from today, keep only first one
+                    if len(today_buy_orders) > 1:
+                        logger.warning(f"⚠️  Multiple buy orders from today! Keeping first, cancelling {len(today_buy_orders)-1} duplicates")
+                        for order in today_buy_orders[1:]:
+                            try:
+                                logger.info(f"🗑️  Cancelling duplicate buy order: {order.client_id} from today in {market}")
+                                self.order_manager.cancel_order(order.client_id)
+                                market_cancelled += 1
+                                total_cancelled += 1
+                            except Exception as e:
+                                logger.error(f"Failed to cancel duplicate buy order {order.client_id}: {e}")
+                
+                # Clean up very old sell orders (older than 7 days) that might be stuck
+                week_ago = today - timedelta(days=7)
+                for order in sell_orders:
+                    order_date = order.created_at.date()
+                    if order_date < week_ago:
+                        try:
+                            logger.warning(f"Cancelling very old sell order: {order.client_id} from {order_date} in {market}")
+                            self.order_manager.cancel_order(order.client_id)
+                            market_cancelled += 1
+                            total_cancelled += 1
+                        except Exception as e:
+                            logger.error(f"Failed to cancel old sell order {order.client_id}: {e}")
+                
+                if market_cancelled > 0:
+                    cleanup_summary.append(f"{market}: {market_cancelled} orders")
+            
+            if total_cancelled > 0:
+                logger.info(f"✓ Startup cleanup completed: Cancelled {total_cancelled} stale orders")
+                logger.info(f"  Details: {', '.join(cleanup_summary)}")
+            else:
+                logger.info("✓ No stale orders found during startup cleanup")
+                
+        except Exception as e:
+            logger.error(f"Error during startup order cleanup: {e}")
+    
     async def _update_account_status(self):
         """Update account balance and status (fallback for WebSocket)"""
         try:
@@ -1054,6 +1629,11 @@ class DailyRangeBot:
     async def _sync_positions(self):
         """Sync positions with exchange (periodic fallback for WebSocket)"""
         try:
+            # Check for WebSocket reconnections that might have caused missed events
+            ws_reconnected = self._detect_websocket_reconnection()
+            if ws_reconnected:
+                logger.warning("WebSocket reconnection detected - performing thorough cache validation")
+            
             # Log that we're doing periodic sync - should be rare with WebSocket
             logger.info("Performing periodic position sync via HTTP (WebSocket fallback)")
             
@@ -1062,10 +1642,102 @@ class DailyRangeBot:
             # Sync existing orders with order tracker
             await self.order_tracker.sync_existing_orders()
             
+            # CRITICAL: Also sync OrderManager cache to prevent stale order issues
+            logger.info("Syncing existing orders from exchange...")
+            orders_synced = self.order_manager.load_existing_orders()
+            logger.info(f"Synced {orders_synced} existing orders")
+            
+            # Force validation of OrderManager cache against exchange state
+            # More thorough validation if we detected a reconnection
+            await self._validate_order_manager_cache()
+            
             logger.info(f"Position sync completed: {len(self.position_manager.get_all_positions())} positions")
             
         except Exception as e:
             logger.error(f"Error syncing with exchange: {e}")
+    
+    def _detect_websocket_reconnection(self) -> bool:
+        """Detect if WebSocket has reconnected since last check"""
+        try:
+            if not self.websocket_client:
+                return False
+                
+            current_connected = self.websocket_client.is_connected
+            current_authenticated = self.websocket_client.is_authenticated
+            
+            # Check if connection state changed from disconnected to connected
+            reconnected = (
+                self._ws_connection_state['last_connected'] is False and
+                current_connected is True
+            )
+            
+            # Update state tracking
+            if self._ws_connection_state['last_connected'] != current_connected:
+                logger.info(f"WebSocket connection state changed: {self._ws_connection_state['last_connected']} -> {current_connected}")
+                self._ws_connection_state['last_connected'] = current_connected
+                
+            if self._ws_connection_state['last_authenticated'] != current_authenticated:
+                logger.info(f"WebSocket authentication state changed: {self._ws_connection_state['last_authenticated']} -> {current_authenticated}")
+                self._ws_connection_state['last_authenticated'] = current_authenticated
+                
+            if reconnected:
+                self._ws_connection_state['reconnection_count'] += 1
+                logger.warning(f"WebSocket reconnection #{self._ws_connection_state['reconnection_count']} detected")
+                
+            return reconnected
+            
+        except Exception as e:
+            logger.error(f"Error detecting WebSocket reconnection: {e}")
+            return False
+    
+    async def _validate_order_manager_cache(self):
+        """Validate OrderManager cache against live exchange data"""
+        try:
+            # Get current trading market
+            market = getattr(self, '_current_market', None)
+            if not market:
+                return
+                
+            # Get pending orders from OrderManager cache
+            cached_orders = self.order_manager.get_pending_orders(market)
+            
+            # Get actual pending orders from exchange
+            exchange_response = self.exchange_client.get_pending_orders(market=market)
+            exchange_orders = []
+            if isinstance(exchange_response, dict):
+                exchange_orders = exchange_response.get('data', [])
+            elif isinstance(exchange_response, list):
+                exchange_orders = exchange_response
+            
+            # Find orders in cache that are not on exchange (stale/filled orders)
+            stale_client_ids = []
+            exchange_order_ids = {str(order.get('order_id')) for order in exchange_orders}
+            exchange_client_ids = {order.get('client_id') for order in exchange_orders if order.get('client_id')}
+            
+            for cached_order in cached_orders:
+                # Check if this cached order exists on exchange
+                order_exists = (
+                    cached_order.exchange_order_id in exchange_order_ids or
+                    cached_order.client_id in exchange_client_ids
+                )
+                
+                if not order_exists:
+                    stale_client_ids.append(cached_order.client_id)
+            
+            # Remove stale orders from OrderManager cache
+            stale_removed = 0
+            for client_id in stale_client_ids:
+                if client_id in self.order_manager.active_orders:
+                    del self.order_manager.active_orders[client_id]
+                    self.order_manager._last_status_check.pop(client_id, None)
+                    stale_removed += 1
+                    logger.warning(f"Removed stale order from cache: {client_id}")
+            
+            if stale_removed > 0:
+                logger.info(f"HTTP fallback: Cleaned up {stale_removed} stale orders from OrderManager cache")
+                
+        except Exception as e:
+            logger.error(f"Error validating OrderManager cache: {e}")
     
     def get_pairing_status(self) -> Dict[str, Any]:
         """Get current pairing system status"""
@@ -1157,7 +1829,52 @@ class DailyRangeBot:
                 "subscriptions": list(self.websocket_client.subscriptions.keys())
             }
         
+        # Event-driven buy status cache statistics
+        stats["buy_status_cache"] = self.get_buy_status_cache_stats()
+        
         return stats
+    
+    def get_buy_status_cache_stats(self) -> Dict[str, Any]:
+        """Get statistics about the event-driven buy status cache"""
+        try:
+            now = datetime.now(timezone.utc)
+            cache_stats = {
+                "cached_markets": len(self._buy_status_cache),
+                "last_trading_day": str(self._last_trading_day) if self._last_trading_day else None,
+                "active_triggers": list(self._buy_status_triggers),
+                "cache_entries": {}
+            }
+            
+            for market, entry in self._buy_status_cache.items():
+                cache_age = (now - entry['last_check']).total_seconds()
+                cache_stats["cache_entries"][market] = {
+                    "last_check": entry['last_check'].isoformat(),
+                    "cache_age_seconds": round(cache_age, 1),
+                    "trigger": entry['trigger'],
+                    "has_today_buy": entry['status']['has_today_buy'],
+                    "today_orders_count": len(entry['status']['today_orders']),
+                    "is_fresh": cache_age < 300  # Fresh if less than 5 minutes
+                }
+            
+            return cache_stats
+            
+        except Exception as e:
+            logger.error(f"Error getting buy status cache stats: {e}")
+            return {"error": str(e)}
+    
+    def _should_log_state_change(self, market: str, state_type: str, current_value: Any) -> bool:
+        """Check if a state has changed and should be logged"""
+        if market not in self._logged_states:
+            self._logged_states[market] = {}
+        
+        last_value = self._logged_states[market].get(state_type)
+        
+        # If this is the first time or value changed, log it
+        if last_value != current_value:
+            self._logged_states[market][state_type] = current_value
+            return True
+        
+        return False
     
     async def shutdown(self):
         """Gracefully shutdown the bot"""
