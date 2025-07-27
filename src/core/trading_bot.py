@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
 from src.exchange.coinex_client import CoinExClient
-from src.exchange.order_manager import OrderManager
+from src.exchange.order_manager import OrderManager, OrderStatus
 from src.exchange.websocket_client import CoinExWebSocketClient
 from src.exchange.order_tracker import OrderTracker, OrderSide
 from src.core.order_pairing_manager import OrderPairingManager
@@ -30,25 +30,42 @@ logger = get_logger(__name__)
 
 
 class TradingCircuitBreaker:
-    """Circuit breaker to prevent rapid successive operations that could cause state inconsistency"""
+    """Enhanced circuit breaker with priority levels and dynamic cooldowns"""
     
-    def __init__(self, cooldown_seconds: int = 60):
+    def __init__(self, default_cooldown: int = 30):
         """
-        Initialize circuit breaker
+        Initialize enhanced circuit breaker
         
         Args:
-            cooldown_seconds: Minimum time between same operations for same market
+            default_cooldown: Default cooldown period in seconds
         """
         self._last_actions = {}  # f"{market}_{action}" -> timestamp
-        self._cooldown_period = cooldown_seconds
+        self._default_cooldown = default_cooldown
         
-    def should_allow_action(self, market: str, action_type: str) -> bool:
+        # Priority-based cooldown periods (seconds)
+        self._action_cooldowns = {
+            # Critical operations - shortest cooldowns
+            "emergency_sell": 5,      # Emergency position closure
+            "position_closure": 10,   # Manual position closure
+            
+            # Normal operations - standard cooldowns  
+            "buy_order": 30,          # Buy order placement
+            "sell_order": 30,         # Sell order placement
+            "cleanup": 45,            # Order cleanup operations
+            
+            # Administrative operations - longer cooldowns
+            "sync": 60,               # State synchronization
+            "validation": 60          # Manual validation
+        }
+        
+    def should_allow_action(self, market: str, action_type: str, priority: str = "normal") -> bool:
         """
-        Check if action should be allowed based on cooldown period
+        Check if action should be allowed with priority-based cooldowns
         
         Args:
             market: Market symbol
-            action_type: Type of action (e.g., 'buy_order', 'sell_order', 'cleanup')
+            action_type: Type of action
+            priority: Priority level ('emergency', 'high', 'normal', 'low')
             
         Returns:
             True if action is allowed, False if in cooldown period
@@ -56,17 +73,38 @@ class TradingCircuitBreaker:
         action_key = f"{market}_{action_type}"
         now = datetime.now(timezone.utc)
         
+        # Determine cooldown period based on action type and priority
+        cooldown_period = self._get_cooldown_period(action_type, priority)
+        
         last_time = self._last_actions.get(action_key)
         if last_time:
             elapsed = (now - last_time).total_seconds()
-            if elapsed < self._cooldown_period:
-                logger.info(f"🚧 Circuit breaker: {action_type} for {market} blocked - {elapsed:.1f}s < {self._cooldown_period}s cooldown")
-                return False
+            if elapsed < cooldown_period:
+                if priority == "emergency":
+                    logger.warning(f"🚨 EMERGENCY: Allowing {action_type} for {market} despite {elapsed:.1f}s < {cooldown_period}s cooldown")
+                else:
+                    logger.info(f"🚧 Circuit breaker: {action_type} for {market} blocked - {elapsed:.1f}s < {cooldown_period}s cooldown (priority: {priority})")
+                    return False
         
         # Record this action
         self._last_actions[action_key] = now
-        logger.debug(f"✅ Circuit breaker: {action_type} for {market} allowed")
+        logger.debug(f"✅ Circuit breaker: {action_type} for {market} allowed (priority: {priority}, cooldown: {cooldown_period}s)")
         return True
+    
+    def _get_cooldown_period(self, action_type: str, priority: str) -> int:
+        """Get cooldown period based on action type and priority"""
+        base_cooldown = self._action_cooldowns.get(action_type, self._default_cooldown)
+        
+        # Priority multipliers
+        priority_multipliers = {
+            "emergency": 0.0,   # No cooldown for emergencies
+            "high": 0.3,        # 30% of normal cooldown
+            "normal": 1.0,      # Full cooldown
+            "low": 1.5          # 150% of normal cooldown
+        }
+        
+        multiplier = priority_multipliers.get(priority, 1.0)
+        return int(base_cooldown * multiplier)
     
     def get_remaining_cooldown(self, market: str, action_type: str) -> float:
         """
@@ -504,16 +542,16 @@ class DailyRangeBot:
                 log_trading_event('new_day', f"New trading day detected: {current_day}")
                 logger.info(f"🌅 New trading day {current_day} - using fresh exchange data")
             
-            # Update account and positions periodically
-            # Reduced account update frequency from 60s to 300s (5 min) since we have WebSocket balance updates
+            # Update account and positions periodically with enhanced frequencies for better state consistency
+            # Account update every 2 minutes (reduced from 5 min) for better balance tracking
             if (not self._last_account_update or 
-                (now - self._last_account_update).seconds > 300):
+                (now - self._last_account_update).seconds > 120):
                 await self._update_account_status()
                 self._last_account_update = now
             
-            # Reduced position sync frequency from 120s to 600s (10 min) since we have WebSocket position updates
+            # Position sync every 3 minutes (reduced from 10 min) for critical state validation
             if (not self._last_positions_sync or 
-                (now - self._last_positions_sync).seconds > 600):
+                (now - self._last_positions_sync).seconds > 180):
                 await self._sync_positions()
                 self._last_positions_sync = now
             
@@ -1030,8 +1068,8 @@ class DailyRangeBot:
         Strategy Rule: Only ONE buy order should exist at any time.
         """
         try:
-            # Circuit breaker: Prevent rapid successive cleanup operations
-            if not self._order_circuit_breaker.should_allow_action(market, "cleanup"):
+            # Circuit breaker: Prevent rapid successive cleanup operations (high priority for cleanup)
+            if not self._order_circuit_breaker.should_allow_action(market, "cleanup", "high"):
                 remaining = self._order_circuit_breaker.get_remaining_cooldown(market, "cleanup")
                 logger.info(f"🚧 Order cleanup blocked by circuit breaker - {remaining:.1f}s remaining cooldown")
                 return
@@ -1141,9 +1179,9 @@ class DailyRangeBot:
     async def _place_entry_order(self, market: str, side: str, price: float, signal: TradingSignal):
         """Place an entry order"""
         try:
-            # Circuit breaker: Prevent rapid successive order placements
+            # Circuit breaker: Prevent rapid successive order placements (normal priority for standard trading)
             action_type = f"{side}_order"
-            if not self._order_circuit_breaker.should_allow_action(market, action_type):
+            if not self._order_circuit_breaker.should_allow_action(market, action_type, "normal"):
                 remaining = self._order_circuit_breaker.get_remaining_cooldown(market, action_type)
                 logger.info(f"🚧 Order placement blocked by circuit breaker - {remaining:.1f}s remaining cooldown")
                 return
@@ -1243,9 +1281,9 @@ class DailyRangeBot:
         when buy orders fill. This method is kept for manual position closure if needed.
         """
         try:
-            # Circuit breaker: Prevent rapid successive exit order placements
-            if not self._order_circuit_breaker.should_allow_action(position.market, "sell_order"):
-                remaining = self._order_circuit_breaker.get_remaining_cooldown(position.market, "sell_order")
+            # Circuit breaker: Prevent rapid successive exit order placements (high priority for position closure)
+            if not self._order_circuit_breaker.should_allow_action(position.market, "position_closure", "high"):
+                remaining = self._order_circuit_breaker.get_remaining_cooldown(position.market, "position_closure")
                 logger.info(f"🚧 Exit order placement blocked by circuit breaker - {remaining:.1f}s remaining cooldown")
                 return
             
@@ -1501,7 +1539,7 @@ class DailyRangeBot:
             logger.error(f"Error handling position update: {e}")
     
     def _handle_order_update(self, data: Dict[str, Any]):
-        """Handle order.update message from WebSocket"""
+        """Handle order.update message from WebSocket with real-time state updates"""
         try:
             order_data = data.get("order", {})
             if not order_data:
@@ -1510,20 +1548,29 @@ class DailyRangeBot:
             market = order_data.get("market")
             side = order_data.get("side")
             status = order_data.get("status")
+            client_id = order_data.get("client_id")
+            order_id = order_data.get("order_id")
             
             if market and side == "buy":
-                # REMOVED: Cache update - using direct exchange queries
                 log_trading_event('buy_status_update', f"Buy order update for {market}: {status}")
+                
+                # CRITICAL: Trigger OrderManager state update for buy orders
+                if status in ["done", "filled", "cancelled"] and client_id:
+                    logger.info(f"🔄 Buy order {status} - triggering state reconciliation for {market}")
+                    asyncio.create_task(self._reconcile_order_state(market, client_id, status))
             
             elif market and side == "sell" and status in ["done", "filled"]:
-                # REMOVED: Cache clearing - trading cycle completion now detected via direct exchange queries
                 logger.info(f"🔄 Trading cycle complete for {market} - sell order {status}")
+                
+                # CRITICAL: Trigger comprehensive state validation after sell completion
+                logger.info(f"🔍 Sell order completed - triggering full state validation for {market}")
+                asyncio.create_task(self._reconcile_trading_cycle_completion(market))
                 
         except Exception as e:
             logger.error(f"Error handling order update: {e}")
     
     def _handle_user_deals_update(self, data: Dict[str, Any]):
-        """Handle user_deals.update message from WebSocket"""
+        """Handle user_deals.update message from WebSocket with comprehensive state updates"""
         try:
             deals = data.get("user_deals", [])
             if not deals:
@@ -1532,22 +1579,109 @@ class DailyRangeBot:
             for deal in deals:
                 market = deal.get("market")
                 side = deal.get("side")
+                amount = deal.get("amount", 0)
+                price = deal.get("price", 0)
                 
                 if market and side == "buy":
-                    # REMOVED: Cache update - using direct exchange queries
-                    log_trading_event('buy_status_update', f"Buy order filled for {market}")
+                    log_trading_event('buy_status_update', f"Buy order filled for {market}: {amount} @ ${price}")
+                    
+                    # CRITICAL: Trigger immediate state validation after buy fill
+                    logger.info(f"💰 Buy order filled - triggering state validation for {market}")
+                    asyncio.create_task(self._reconcile_after_fill(market, "buy", amount, price))
                 
                 elif market and side == "sell":
-                    # CRITICAL FIX: Track sell order fills
-                    # Check if this completes a trading cycle
+                    log_trading_event('sell_fill', f"Sell order filled for {market}: {amount} @ ${price}")
+                    
+                    # CRITICAL: Check if this completes a trading cycle
                     position = self.position_manager.get_position(market)
                     if not position or position.size < 0.000001:
-                        # No position left - trading cycle complete
-                        # REMOVED: Cache clearing - using direct exchange queries
                         logger.info(f"🔄 Trading cycle complete for {market} via sell fill")
+                        
+                        # CRITICAL: Trigger comprehensive state reconciliation
+                        logger.info(f"🔍 Trading cycle completed - triggering full state reconciliation for {market}")
+                        asyncio.create_task(self._reconcile_trading_cycle_completion(market))
+                    else:
+                        # Partial fill - validate remaining position balance
+                        logger.info(f"🔄 Partial sell fill - validating position balance for {market}")
+                        asyncio.create_task(self._reconcile_after_fill(market, "sell", amount, price))
                     
         except Exception as e:
             logger.error(f"Error handling user deals update: {e}")
+    
+    async def _reconcile_order_state(self, market: str, client_id: str, status: str):
+        """Reconcile OrderManager state after order status change"""
+        try:
+            logger.debug(f"🔄 Reconciling order state for {client_id} ({status}) in {market}")
+            
+            # Update OrderManager state if order is completed
+            if status in ["done", "filled", "cancelled"]:
+                if client_id in self.order_manager.active_orders:
+                    # Update order status in OrderManager
+                    order = self.order_manager.active_orders[client_id]
+                    
+                    if status in ["done", "filled"]:
+                        order.status = OrderStatus.FILLED
+                    elif status == "cancelled":
+                        order.status = OrderStatus.CANCELLED
+                    
+                    # Remove completed orders from active tracking
+                    del self.order_manager.active_orders[client_id]
+                    logger.info(f"✅ Removed completed order {client_id} from OrderManager")
+            
+            # Force immediate validation against exchange
+            await self._validate_order_manager_state()
+            
+            # Trigger fresh buy status check for critical decisions
+            fresh_status = self._get_exchange_buy_status(market)
+            logger.debug(f"🔍 Post-reconciliation buy status for {market}: {fresh_status.get('total_buy_orders', 0)} orders")
+            
+        except Exception as e:
+            logger.error(f"Error reconciling order state for {market}: {e}")
+    
+    async def _reconcile_after_fill(self, market: str, side: str, amount: float, price: float):
+        """Reconcile state after order fill"""
+        try:
+            logger.debug(f"🔄 Reconciling state after {side} fill: {amount} @ ${price} for {market}")
+            
+            # Force OrderManager and PositionManager sync
+            await self._validate_order_manager_state()
+            self.position_manager.sync_with_exchange()
+            
+            # Get fresh state for decision making
+            buy_status = self._get_exchange_buy_status(market)
+            position = self.position_manager.get_position(market)
+            
+            logger.info(f"📊 Post-fill state for {market}: {buy_status.get('total_buy_orders', 0)} buy orders, "
+                       f"position: {position.size if position else 0:.6f}")
+            
+        except Exception as e:
+            logger.error(f"Error reconciling state after {side} fill for {market}: {e}")
+    
+    async def _reconcile_trading_cycle_completion(self, market: str):
+        """Comprehensive state reconciliation after trading cycle completion"""
+        try:
+            logger.info(f"🔍 Performing comprehensive state reconciliation for {market}")
+            
+            # Full state sync with exchange
+            await self._validate_order_manager_state()
+            self.position_manager.sync_with_exchange()
+            
+            # Verify trading cycle is actually complete
+            position = self.position_manager.get_position(market)
+            buy_status = self._get_exchange_buy_status(market)
+            
+            if not position or position.size < 0.000001:
+                logger.info(f"✅ Trading cycle confirmed complete for {market}")
+                logger.info(f"📊 Final state: Position={position.size if position else 0:.6f}, "
+                           f"Buy orders={buy_status.get('total_buy_orders', 0)}")
+                
+                # Log completion event for monitoring
+                log_trading_event('cycle_complete', f"✅ Trading cycle completed for {market}")
+            else:
+                logger.warning(f"⚠️ Trading cycle not fully complete for {market}: position={position.size:.6f}")
+            
+        except Exception as e:
+            logger.error(f"Error reconciling trading cycle completion for {market}: {e}")
     
     def _get_exchange_buy_status(self, market: str) -> Dict[str, Any]:
         """Get buy status directly from exchange - single source of truth"""

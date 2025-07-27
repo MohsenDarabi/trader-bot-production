@@ -210,30 +210,53 @@ class OrderManager:
             # Store in active orders
             self.active_orders[client_id] = order
             
-            # Additional validation: verify order exists on exchange
-            try:
-                # Brief delay to ensure exchange processing
-                import time
-                time.sleep(0.1)
-                
-                # Check if order actually exists on exchange
-                validation_response = self.client.get_order_status(
-                    market=market,
-                    order_id=order.exchange_order_id
-                )
-                
-                if not validation_response:
-                    logger.error(f"🚨 Order validation failed - order {client_id} not found on exchange after creation")
-                    # Remove from tracking since it doesn't exist
-                    del self.active_orders[client_id]
-                    self.used_client_ids.discard(client_id)
-                    return None
+            # Enhanced validation: verify order exists on exchange with retry logic
+            validation_success = False
+            max_retries = 3
+            base_delay = 0.5  # Increased from 0.1s to 0.5s for better exchange processing
+            
+            for attempt in range(max_retries):
+                try:
+                    # Progressive delay for exchange processing
+                    import time
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff: 0.5s, 1s, 2s
+                    time.sleep(delay)
                     
-                logger.info(f"✅ Order validation successful: {client_id} -> {order.exchange_order_id}")
+                    logger.debug(f"📋 Order validation attempt {attempt + 1}/{max_retries} for {client_id} (delay: {delay}s)")
+                    
+                    # Check if order actually exists on exchange
+                    validation_response = self.client.get_order_status(
+                        market=market,
+                        order_id=order.exchange_order_id
+                    )
+                    
+                    if validation_response:
+                        logger.info(f"✅ Order validation successful: {client_id} -> {order.exchange_order_id} (attempt {attempt + 1})")
+                        validation_success = True
+                        break
+                    else:
+                        logger.warning(f"⚠️ Order validation attempt {attempt + 1} failed - order {client_id} not found on exchange")
+                        
+                except Exception as validation_error:
+                    logger.warning(f"⚠️ Order validation attempt {attempt + 1} error for {client_id}: {validation_error}")
+                    
+                    # Handle specific error types
+                    if "timeout" in str(validation_error).lower() or "network" in str(validation_error).lower():
+                        logger.debug(f"🔄 Network/timeout error - will retry validation for {client_id}")
+                        continue
+                    elif attempt == max_retries - 1:  # Last attempt
+                        logger.error(f"🚨 All validation attempts failed for {client_id}")
+                        break
+            
+            # Handle validation failure
+            if not validation_success:
+                logger.error(f"🚨 Order validation completely failed - order {client_id} could not be verified on exchange")
+                logger.error(f"🔄 Removing unverified order from tracking - WebSocket events will detect if order actually exists")
                 
-            except Exception as validation_error:
-                logger.warning(f"⚠️ Order validation check failed for {client_id}: {validation_error}")
-                logger.info("Order placement proceeded - WebSocket tracking will handle validation")
+                # Remove from tracking since we can't verify it exists
+                del self.active_orders[client_id]
+                self.used_client_ids.discard(client_id)
+                return None
             
             logger.info(f"Buy order placed successfully: {client_id} -> {order.exchange_order_id}")
             return order
@@ -307,30 +330,53 @@ class OrderManager:
             # Store in active orders
             self.active_orders[client_id] = order
             
-            # Additional validation: verify order exists on exchange
-            try:
-                # Brief delay to ensure exchange processing
-                import time
-                time.sleep(0.1)
-                
-                # Check if order actually exists on exchange
-                validation_response = self.client.get_order_status(
-                    market=market,
-                    order_id=order.exchange_order_id
-                )
-                
-                if not validation_response:
-                    logger.error(f"🚨 Sell order validation failed - order {client_id} not found on exchange after creation")
-                    # Remove from tracking since it doesn't exist
-                    del self.active_orders[client_id]
-                    self.used_client_ids.discard(client_id)
-                    return None
+            # Enhanced validation: verify order exists on exchange with retry logic
+            validation_success = False
+            max_retries = 3
+            base_delay = 0.5  # Increased from 0.1s to 0.5s for better exchange processing
+            
+            for attempt in range(max_retries):
+                try:
+                    # Progressive delay for exchange processing
+                    import time
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff: 0.5s, 1s, 2s
+                    time.sleep(delay)
                     
-                logger.info(f"✅ Sell order validation successful: {client_id} -> {order.exchange_order_id}")
+                    logger.debug(f"📋 Sell order validation attempt {attempt + 1}/{max_retries} for {client_id} (delay: {delay}s)")
+                    
+                    # Check if order actually exists on exchange
+                    validation_response = self.client.get_order_status(
+                        market=market,
+                        order_id=order.exchange_order_id
+                    )
+                    
+                    if validation_response:
+                        logger.info(f"✅ Sell order validation successful: {client_id} -> {order.exchange_order_id} (attempt {attempt + 1})")
+                        validation_success = True
+                        break
+                    else:
+                        logger.warning(f"⚠️ Sell order validation attempt {attempt + 1} failed - order {client_id} not found on exchange")
+                        
+                except Exception as validation_error:
+                    logger.warning(f"⚠️ Sell order validation attempt {attempt + 1} error for {client_id}: {validation_error}")
+                    
+                    # Handle specific error types
+                    if "timeout" in str(validation_error).lower() or "network" in str(validation_error).lower():
+                        logger.debug(f"🔄 Network/timeout error - will retry validation for {client_id}")
+                        continue
+                    elif attempt == max_retries - 1:  # Last attempt
+                        logger.error(f"🚨 All sell order validation attempts failed for {client_id}")
+                        break
+            
+            # Handle validation failure
+            if not validation_success:
+                logger.error(f"🚨 Sell order validation completely failed - order {client_id} could not be verified on exchange")
+                logger.error(f"🔄 Removing unverified sell order from tracking - WebSocket events will detect if order actually exists")
                 
-            except Exception as validation_error:
-                logger.warning(f"⚠️ Sell order validation check failed for {client_id}: {validation_error}")
-                logger.info("Order placement proceeded - WebSocket tracking will handle validation")
+                # Remove from tracking since we can't verify it exists
+                del self.active_orders[client_id]
+                self.used_client_ids.discard(client_id)
+                return None
             
             logger.info(f"Sell order placed successfully: {client_id} -> {order.exchange_order_id}")
             return order
