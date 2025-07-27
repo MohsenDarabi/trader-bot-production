@@ -419,9 +419,11 @@ class DailyRangeBot:
             if self._last_trading_day and current_day > self._last_trading_day:
                 logger.info(f"New trading day detected: {current_day}")
                 self._last_trading_day = current_day
-                # Clear cache for new day - will be rebuilt on demand
-                for market in list(self._buy_status_cache.keys()):
-                    self._update_buy_status_cache(market, trigger="new_day")
+                # CRITICAL FIX: Completely clear cache for new day
+                # This ensures no stale data from previous day affects today's trading
+                self._buy_status_cache.clear()
+                log_trading_event('cache_clear', f"Cleared all buy status caches for new trading day: {current_day}")
+                logger.info(f"🌅 New trading day {current_day} - all buy status caches cleared")
             
             # Update account and positions periodically
             # Reduced account update frequency from 60s to 300s (5 min) since we have WebSocket balance updates
@@ -1391,6 +1393,13 @@ class DailyRangeBot:
                             f"{old_position.size:.6f} @ ${old_position.avg_entry_price:.2f}, "
                             f"Final PnL: {unrealized_pnl:+.2f}"
                         )
+                        
+                        # CRITICAL FIX: Clear buy status cache when position closes
+                        # This ensures the bot knows it can place new buy orders
+                        if market in self._buy_status_cache:
+                            del self._buy_status_cache[market]
+                            log_trading_event('cache_clear', f"Cleared buy status cache for {market} after position closure")
+                            logger.info(f"🔄 Position closed for {market} - buy status cache cleared")
                 
                 # Update bot status
                 self.status.total_positions = len(self.position_manager.get_all_positions())
@@ -1419,6 +1428,14 @@ class DailyRangeBot:
                 # Buy order event - update cache
                 self._update_buy_status_cache(market, trigger="order_update")
                 log_trading_event('buy_status_update', f"Buy order update for {market}: {status}")
+            
+            elif market and side == "sell" and status in ["done", "filled"]:
+                # CRITICAL FIX: Clear buy status cache when sell order completes
+                # This indicates the trading cycle is complete
+                if market in self._buy_status_cache:
+                    del self._buy_status_cache[market]
+                    log_trading_event('cache_clear', f"Cleared buy status cache for {market} after sell order {status}")
+                    logger.info(f"🔄 Trading cycle complete for {market} - cache cleared")
                 
         except Exception as e:
             logger.error(f"Error handling order update: {e}")
@@ -1438,6 +1455,17 @@ class DailyRangeBot:
                     # Buy order filled - update cache
                     self._update_buy_status_cache(market, trigger="order_fill")
                     log_trading_event('buy_status_update', f"Buy order filled for {market}")
+                
+                elif market and side == "sell":
+                    # CRITICAL FIX: Track sell order fills
+                    # Check if this completes a trading cycle
+                    position = self.position_manager.get_position(market)
+                    if not position or position.size < 0.000001:
+                        # No position left - trading cycle complete
+                        if market in self._buy_status_cache:
+                            del self._buy_status_cache[market]
+                            log_trading_event('cache_clear', f"Cleared buy status cache for {market} after sell fill (no position)")
+                            logger.info(f"🔄 Trading cycle complete for {market} via sell fill - cache cleared")
                     
         except Exception as e:
             logger.error(f"Error handling user deals update: {e}")
@@ -1454,8 +1482,16 @@ class DailyRangeBot:
             
             # Cache is valid if it's from today and less than 5 minutes old
             cache_age = (now - cache_entry['last_check']).total_seconds()
+            
+            # CRITICAL FIX: Add TTL to prevent stale cache data
+            # Force refresh if cache is older than 15 minutes to ensure accuracy
             if cache_date == today and cache_age < 300:
                 return cache_entry['status']
+            elif cache_age > 900:  # 15 minutes TTL
+                log_trading_event('cache_ttl', f"Cache TTL expired for {market} (age: {cache_age:.0f}s)")
+                del self._buy_status_cache[market]
+                self._update_buy_status_cache(market, trigger="ttl_expired")
+                return self._buy_status_cache[market]['status']
             
             # Day changed - cache is stale
             if cache_date < today:
