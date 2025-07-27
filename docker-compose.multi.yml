@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  bot-ada:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bot-ada
+    command: ["ADAUSDT"]
+    env_file: .env.ada
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+    volumes:
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
+    entrypoint: ["/app/entrypoint.sh"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  bot-eth:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bot-eth
+    command: ["ETHUSDT"]
+    env_file: .env.eth
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+    volumes:
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
+    entrypoint: ["/app/entrypoint.sh"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  default:
+    driver: bridge

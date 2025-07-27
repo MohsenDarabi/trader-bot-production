@@ -29,6 +29,95 @@ from config.settings import (
 logger = get_logger(__name__)
 
 
+class TradingCircuitBreaker:
+    """Circuit breaker to prevent rapid successive operations that could cause state inconsistency"""
+    
+    def __init__(self, cooldown_seconds: int = 60):
+        """
+        Initialize circuit breaker
+        
+        Args:
+            cooldown_seconds: Minimum time between same operations for same market
+        """
+        self._last_actions = {}  # f"{market}_{action}" -> timestamp
+        self._cooldown_period = cooldown_seconds
+        
+    def should_allow_action(self, market: str, action_type: str) -> bool:
+        """
+        Check if action should be allowed based on cooldown period
+        
+        Args:
+            market: Market symbol
+            action_type: Type of action (e.g., 'buy_order', 'sell_order', 'cleanup')
+            
+        Returns:
+            True if action is allowed, False if in cooldown period
+        """
+        action_key = f"{market}_{action_type}"
+        now = datetime.now(timezone.utc)
+        
+        last_time = self._last_actions.get(action_key)
+        if last_time:
+            elapsed = (now - last_time).total_seconds()
+            if elapsed < self._cooldown_period:
+                logger.info(f"🚧 Circuit breaker: {action_type} for {market} blocked - {elapsed:.1f}s < {self._cooldown_period}s cooldown")
+                return False
+        
+        # Record this action
+        self._last_actions[action_key] = now
+        logger.debug(f"✅ Circuit breaker: {action_type} for {market} allowed")
+        return True
+    
+    def get_remaining_cooldown(self, market: str, action_type: str) -> float:
+        """
+        Get remaining cooldown time for action
+        
+        Args:
+            market: Market symbol
+            action_type: Action type
+            
+        Returns:
+            Remaining cooldown time in seconds (0 if none)
+        """
+        action_key = f"{market}_{action_type}"
+        last_time = self._last_actions.get(action_key)
+        
+        if not last_time:
+            return 0.0
+        
+        elapsed = (datetime.now(timezone.utc) - last_time).total_seconds()
+        remaining = max(0, self._cooldown_period - elapsed)
+        return remaining
+    
+    def reset_action(self, market: str, action_type: str) -> None:
+        """
+        Reset cooldown for specific action (use sparingly)
+        
+        Args:
+            market: Market symbol
+            action_type: Action type
+        """
+        action_key = f"{market}_{action_type}"
+        self._last_actions.pop(action_key, None)
+        logger.info(f"🔄 Circuit breaker: Reset cooldown for {action_type} on {market}")
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get circuit breaker statistics"""
+        now = datetime.now(timezone.utc)
+        active_cooldowns = {}
+        
+        for action_key, last_time in self._last_actions.items():
+            remaining = max(0, self._cooldown_period - (now - last_time).total_seconds())
+            if remaining > 0:
+                active_cooldowns[action_key] = remaining
+        
+        return {
+            "cooldown_period_seconds": self._cooldown_period,
+            "total_tracked_actions": len(self._last_actions),
+            "active_cooldowns": active_cooldowns
+        }
+
+
 @dataclass
 class BotStatus:
     """Current bot status information"""
@@ -81,12 +170,15 @@ class DailyRangeBot:
         self._last_positions_sync = None
         
         # Event-driven buy status management
-        self._buy_status_cache = {}  # market -> {status, last_check, orders, position}
+        # REMOVED: _buy_status_cache - now using direct exchange queries for single source of truth
         self._last_trading_day = None
-        self._buy_status_triggers = set()  # Track what triggered cache updates
+        # REMOVED: _buy_status_triggers - no longer needed with direct exchange queries
         
         # State tracking for logging optimization
         self._logged_states = {}  # market -> {state_type -> last_logged_value}
+        
+        # Circuit breaker for order placement
+        self._order_circuit_breaker = TradingCircuitBreaker()
         
     async def initialize(self):
         """Initialize all bot components"""
@@ -179,26 +271,18 @@ class DailyRangeBot:
             await self._initialize_from_exchange()
             logger.info("✓ Exchange state loaded successfully")
             
-            # Initialize buy status cache for startup and clean stale orders
-            logger.info("Initializing buy status cache and cleaning stale orders...")
+            # Initialize trading day tracking
+            logger.info("Initializing bot and cleaning stale orders...")
             self._last_trading_day = datetime.now(timezone.utc).date()
-            
-            # Trigger initial cache population for any existing markets
-            # This will automatically clean up stale orders during cache population
             if self.trading_markets:
                 total_cleaned = 0
                 for market in self.trading_markets:
-                    self._update_buy_status_cache(market, trigger="bot_startup")
-                    # Get the cleanup count from the cache
-                    if market in self._buy_status_cache:
-                        cleaned = self._buy_status_cache[market]['status'].get('cancelled_stale', 0)
-                        total_cleaned += cleaned
+                    # REMOVED: Cache update - now using direct exchange queries
+                    logger.info(f"✅ Bot startup completed for {market}")
                 
-                if total_cleaned > 0:
-                    logger.info(f"✓ Startup cleanup: Cancelled {total_cleaned} stale orders across {len(self.trading_markets)} markets")
-                logger.info(f"✓ Buy status cache initialized for {len(self.trading_markets)} markets")
+                logger.info(f"✓ Bot initialization completed for {len(self.trading_markets)} markets")
             else:
-                logger.info("✓ Buy status cache initialized (no markets yet)")
+                logger.info("✓ Bot initialized (no markets yet)")
             
             # Update initial status
             await self._update_account_status()
@@ -333,10 +417,7 @@ class DailyRangeBot:
                                     logger.warning(f"Recreation error: {resolution_result.get('recreation_error', 'Unknown error')}")
                                     logger.info("🔄 Bot will create a new buy order through normal signal processing")
                                     
-                                    # Clear buy status cache so new order can be placed
-                                    if market in self._buy_status_cache:
-                                        del self._buy_status_cache[market]
-                                        logger.info(f"🗑️ Cleared buy status cache for {market} to allow new order")
+                                    # REMOVED: Cache clearing - no longer needed with direct exchange queries
                                     
                                 else:
                                     # Intelligent resolution completely failed
@@ -380,8 +461,8 @@ class DailyRangeBot:
             # Generate initial signal if needed
             await self._check_and_generate_signals(market)
             
-            # Initialize buy status cache for this market
-            self._update_buy_status_cache(market, trigger="market_setup")
+            # Initialize tracking for this market
+            # REMOVED: Cache update - now using direct exchange queries
             
             # Subscribe to market-specific WebSocket streams for real-time data
             if self.websocket_client and self.websocket_client.is_connected:
@@ -413,17 +494,15 @@ class DailyRangeBot:
             return
         
         try:
-            # Check for new trading day and update cache if needed
+            # Check for new trading day
             now = datetime.now(timezone.utc)
             current_day = now.date()
             if self._last_trading_day and current_day > self._last_trading_day:
                 logger.info(f"New trading day detected: {current_day}")
                 self._last_trading_day = current_day
-                # CRITICAL FIX: Completely clear cache for new day
-                # This ensures no stale data from previous day affects today's trading
-                self._buy_status_cache.clear()
-                log_trading_event('cache_clear', f"Cleared all buy status caches for new trading day: {current_day}")
-                logger.info(f"🌅 New trading day {current_day} - all buy status caches cleared")
+                # REMOVED: Cache clearing for new day - using direct exchange queries
+                log_trading_event('new_day', f"New trading day detected: {current_day}")
+                logger.info(f"🌅 New trading day {current_day} - using fresh exchange data")
             
             # Update account and positions periodically
             # Reduced account update frequency from 60s to 300s (5 min) since we have WebSocket balance updates
@@ -571,7 +650,7 @@ class DailyRangeBot:
             
             # Second priority: Check for new buy opportunities (only if no position exists)
             # CRITICAL FIX: Clean up duplicate orders before checking if we should place buy
-            buy_status = self._get_cached_buy_status(market)
+            buy_status = self._get_exchange_buy_status(market)
             total_buy_orders = buy_status.get('total_buy_orders', 0)
             all_buy_orders = buy_status.get('all_buy_orders', [])
             
@@ -589,12 +668,11 @@ class DailyRangeBot:
                 logger.warning(f"🧹 Cleanup needed for {market}: {cleanup_reason}")
                 await self._ensure_single_buy_order(market)
                 
-                # Force refresh of buy status cache after cleanup
-                if market in self._buy_status_cache:
-                    del self._buy_status_cache[market]
+                # Verify cleanup worked
+                # REMOVED: Cache clearing - using direct exchange queries
                     
-                # Immediately refresh cache to verify cleanup worked
-                updated_status = self._get_cached_buy_status(market)
+                # Immediately verify cleanup worked by checking exchange
+                updated_status = self._get_exchange_buy_status(market)
                 remaining_orders = updated_status.get('total_buy_orders', 0)
                 
                 if remaining_orders == 0:
@@ -700,19 +778,16 @@ class DailyRangeBot:
                         today_exchange_buys.append(order)
                 
                 # Log discrepancy if found
-                cache_count = len(today_buy_orders)
+                manager_count = len(today_buy_orders)
                 exchange_count = len(today_exchange_buys)
-                if cache_count != exchange_count:
-                    log_trading_event('cache_discrepancy', 
-                        f"Buy order count mismatch for {market}: cache={cache_count}, exchange={exchange_count}")
-                    logger.warning(f"Cache vs exchange discrepancy detected for {market}:")
-                    logger.warning(f"  Cache orders: {[o.client_id for o in today_buy_orders]}")
+                if manager_count != exchange_count:
+                    log_trading_event('order_discrepancy', 
+                        f"Buy order count mismatch for {market}: manager={manager_count}, exchange={exchange_count}")
+                    logger.warning(f"Order manager vs exchange discrepancy detected for {market}:")
+                    logger.warning(f"  Manager orders: {[o.client_id for o in today_buy_orders]}")
                     logger.warning(f"  Exchange orders: {[o.get('client_id', o.get('order_id')) for o in today_exchange_buys]}")
                     
-                    # Clear buy status cache to force refresh on next check
-                    if market in self._buy_status_cache:
-                        del self._buy_status_cache[market]
-                        log_trading_event('cache_refresh', f"Cleared buy status cache for {market} due to discrepancy")
+                    # REMOVED: Cache clearing logic - now using direct exchange queries only
                 
             except Exception as validation_error:
                 logger.debug(f"Validation check failed for {market}: {validation_error}")
@@ -864,10 +939,10 @@ class DailyRangeBot:
             return False
     
     def _should_place_buy_order(self, market: str, signal: TradingSignal, current_price: float) -> bool:
-        """Event-driven buy order decision using cached status"""
+        """Buy order decision using fresh exchange data"""
         
-        # Use event-driven cache instead of continuous polling
-        buy_status = self._get_cached_buy_status(market)
+        # Use direct exchange queries for single source of truth
+        buy_status = self._get_exchange_buy_status(market)
         
         # CRITICAL: Check for ANY buy orders (not just today's)
         total_buy_orders = buy_status.get('total_buy_orders', 0)
@@ -955,6 +1030,12 @@ class DailyRangeBot:
         Strategy Rule: Only ONE buy order should exist at any time.
         """
         try:
+            # Circuit breaker: Prevent rapid successive cleanup operations
+            if not self._order_circuit_breaker.should_allow_action(market, "cleanup"):
+                remaining = self._order_circuit_breaker.get_remaining_cooldown(market, "cleanup")
+                logger.info(f"🚧 Order cleanup blocked by circuit breaker - {remaining:.1f}s remaining cooldown")
+                return
+            
             logger.info(f"🔍 Enforcing single buy order rule for {market}")
             
             # Force a fresh sync with exchange before cleanup
@@ -1023,9 +1104,7 @@ class DailyRangeBot:
                 logger.info(f"✅ Keeping single buy order from today: {order.client_id} ({age_hours:.1f}h old)")
                 logger.info("📋 Conservative approach: Respecting existing same-day order, letting order tracking handle fills")
                         
-            # Clear buy status cache to force refresh
-            if market in self._buy_status_cache:
-                del self._buy_status_cache[market]
+            # REMOVED: Cache clearing - using direct exchange queries
                 
             # Wait a moment for exchange to process cancellations
             await asyncio.sleep(0.5)
@@ -1062,6 +1141,13 @@ class DailyRangeBot:
     async def _place_entry_order(self, market: str, side: str, price: float, signal: TradingSignal):
         """Place an entry order"""
         try:
+            # Circuit breaker: Prevent rapid successive order placements
+            action_type = f"{side}_order"
+            if not self._order_circuit_breaker.should_allow_action(market, action_type):
+                remaining = self._order_circuit_breaker.get_remaining_cooldown(market, action_type)
+                logger.info(f"🚧 Order placement blocked by circuit breaker - {remaining:.1f}s remaining cooldown")
+                return
+            
             # CRITICAL: Ensure only ONE buy order exists before placing new one
             if side == 'buy':
                 await self._ensure_single_buy_order(market)
@@ -1157,6 +1243,12 @@ class DailyRangeBot:
         when buy orders fill. This method is kept for manual position closure if needed.
         """
         try:
+            # Circuit breaker: Prevent rapid successive exit order placements
+            if not self._order_circuit_breaker.should_allow_action(position.market, "sell_order"):
+                remaining = self._order_circuit_breaker.get_remaining_cooldown(position.market, "sell_order")
+                logger.info(f"🚧 Exit order placement blocked by circuit breaker - {remaining:.1f}s remaining cooldown")
+                return
+            
             side = 'sell' if position.side.value == 'buy' else 'buy'
             
             # Check if we have automatic sell orders already in place for this position
@@ -1394,12 +1486,7 @@ class DailyRangeBot:
                             f"Final PnL: {unrealized_pnl:+.2f}"
                         )
                         
-                        # CRITICAL FIX: Clear buy status cache when position closes
-                        # This ensures the bot knows it can place new buy orders
-                        if market in self._buy_status_cache:
-                            del self._buy_status_cache[market]
-                            log_trading_event('cache_clear', f"Cleared buy status cache for {market} after position closure")
-                            logger.info(f"🔄 Position closed for {market} - buy status cache cleared")
+                        # REMOVED: Cache clearing - using direct exchange queries ensures fresh data
                 
                 # Update bot status
                 self.status.total_positions = len(self.position_manager.get_all_positions())
@@ -1425,17 +1512,12 @@ class DailyRangeBot:
             status = order_data.get("status")
             
             if market and side == "buy":
-                # Buy order event - update cache
-                self._update_buy_status_cache(market, trigger="order_update")
+                # REMOVED: Cache update - using direct exchange queries
                 log_trading_event('buy_status_update', f"Buy order update for {market}: {status}")
             
             elif market and side == "sell" and status in ["done", "filled"]:
-                # CRITICAL FIX: Clear buy status cache when sell order completes
-                # This indicates the trading cycle is complete
-                if market in self._buy_status_cache:
-                    del self._buy_status_cache[market]
-                    log_trading_event('cache_clear', f"Cleared buy status cache for {market} after sell order {status}")
-                    logger.info(f"🔄 Trading cycle complete for {market} - cache cleared")
+                # REMOVED: Cache clearing - trading cycle completion now detected via direct exchange queries
+                logger.info(f"🔄 Trading cycle complete for {market} - sell order {status}")
                 
         except Exception as e:
             logger.error(f"Error handling order update: {e}")
@@ -1452,8 +1534,7 @@ class DailyRangeBot:
                 side = deal.get("side")
                 
                 if market and side == "buy":
-                    # Buy order filled - update cache
-                    self._update_buy_status_cache(market, trigger="order_fill")
+                    # REMOVED: Cache update - using direct exchange queries
                     log_trading_event('buy_status_update', f"Buy order filled for {market}")
                 
                 elif market and side == "sell":
@@ -1462,84 +1543,45 @@ class DailyRangeBot:
                     position = self.position_manager.get_position(market)
                     if not position or position.size < 0.000001:
                         # No position left - trading cycle complete
-                        if market in self._buy_status_cache:
-                            del self._buy_status_cache[market]
-                            log_trading_event('cache_clear', f"Cleared buy status cache for {market} after sell fill (no position)")
-                            logger.info(f"🔄 Trading cycle complete for {market} via sell fill - cache cleared")
+                        # REMOVED: Cache clearing - using direct exchange queries
+                        logger.info(f"🔄 Trading cycle complete for {market} via sell fill")
                     
         except Exception as e:
             logger.error(f"Error handling user deals update: {e}")
     
-    def _get_cached_buy_status(self, market: str) -> Dict[str, Any]:
-        """Get cached buy status or trigger update if needed"""
-        now = datetime.now(timezone.utc)
-        today = now.date()
-        
-        # Check if cache exists and is valid
-        if market in self._buy_status_cache:
-            cache_entry = self._buy_status_cache[market]
-            cache_date = cache_entry['last_check'].date()
-            
-            # Cache is valid if it's from today and less than 5 minutes old
-            cache_age = (now - cache_entry['last_check']).total_seconds()
-            
-            # CRITICAL FIX: Add TTL to prevent stale cache data
-            # Force refresh if cache is older than 15 minutes to ensure accuracy
-            if cache_date == today and cache_age < 300:
-                return cache_entry['status']
-            elif cache_age > 900:  # 15 minutes TTL
-                log_trading_event('cache_ttl', f"Cache TTL expired for {market} (age: {cache_age:.0f}s)")
-                del self._buy_status_cache[market]
-                self._update_buy_status_cache(market, trigger="ttl_expired")
-                return self._buy_status_cache[market]['status']
-            
-            # Day changed - cache is stale
-            if cache_date < today:
-                log_trading_event('buy_status_update', f"New trading day detected for {market}")
-                self._buy_status_triggers.add("new_day")
-        
-        # Cache miss or stale - update it
-        self._update_buy_status_cache(market, trigger="cache_refresh")
-        return self._buy_status_cache[market]['status']
-    
-    def _update_buy_status_cache(self, market: str, trigger: str):
-        """Update buy status cache for a market"""
+    def _get_exchange_buy_status(self, market: str) -> Dict[str, Any]:
+        """Get buy status directly from exchange - single source of truth"""
         try:
-            now = datetime.now(timezone.utc)
+            # Get orders directly from exchange via OrderManager
+            pending_orders = self.order_manager.get_pending_orders(market)
+            buy_orders = [o for o in pending_orders if o.side.value == 'buy']
             
-            # Perform the actual check (same logic as before)
-            buy_status = self._check_daily_buy_status(market)
+            # Filter for today's orders
+            today = datetime.now(timezone.utc).date()
+            today_buy_orders = []
             
-            # Update cache
-            self._buy_status_cache[market] = {
-                'status': buy_status,
-                'last_check': now,
-                'trigger': trigger
+            for order in buy_orders:
+                if order.created_at.date() == today:
+                    today_buy_orders.append(order)
+            
+            # Return consistent format for buy status
+            return {
+                'total_buy_orders': len(buy_orders),
+                'all_buy_orders': buy_orders,
+                'today_orders': today_buy_orders,
+                'cancelled_stale': 0  # Always 0 with direct exchange queries
             }
-            
-            # Track what triggered this update
-            self._buy_status_triggers.add(trigger)
-            
-            # Log only on significant events or state changes
-            if trigger in ['new_day', 'order_fill', 'market_setup'] or buy_status['has_today_buy']:
-                log_trading_event(
-                    'buy_status_cache', 
-                    f"Cache updated for {market} ({trigger}): {len(buy_status['today_orders'])} buy orders today"
-                )
             
         except Exception as e:
-            logger.error(f"Error updating buy status cache for {market}: {e}")
-            # Fallback cache entry
-            self._buy_status_cache[market] = {
-                'status': {
-                    'has_today_buy': True,  # Conservative: assume we have buy
-                    'today_orders': [],
-                    'cancelled_stale': 0,
-                    'total_buy_orders': 0
-                },
-                'last_check': now,
-                'trigger': f'{trigger}_error'
+            logger.error(f"Error getting exchange buy status for {market}: {e}")
+            # Return safe default
+            return {
+                'total_buy_orders': 0,
+                'all_buy_orders': [],
+                'today_orders': [],
+                'cancelled_stale': 0
             }
+    
     
     async def _perform_startup_order_cleanup(self):
         """Comprehensive stale order cleanup during bot startup"""
@@ -1668,7 +1710,7 @@ class DailyRangeBot:
             # Check for WebSocket reconnections that might have caused missed events
             ws_reconnected = self._detect_websocket_reconnection()
             if ws_reconnected:
-                logger.warning("WebSocket reconnection detected - performing thorough cache validation")
+                logger.warning("WebSocket reconnection detected - performing thorough state validation")
             
             # Log that we're doing periodic sync - should be rare with WebSocket
             logger.info("Performing periodic position sync via HTTP (WebSocket fallback)")
@@ -1678,14 +1720,14 @@ class DailyRangeBot:
             # Sync existing orders with order tracker
             await self.order_tracker.sync_existing_orders()
             
-            # CRITICAL: Also sync OrderManager cache to prevent stale order issues
+            # CRITICAL: Also sync OrderManager state to prevent stale order issues
             logger.info("Syncing existing orders from exchange...")
             orders_synced = self.order_manager.load_existing_orders()
             logger.info(f"Synced {orders_synced} existing orders")
             
-            # Force validation of OrderManager cache against exchange state
+            # Force validation of OrderManager state against exchange state
             # More thorough validation if we detected a reconnection
-            await self._validate_order_manager_cache()
+            await self._validate_order_manager_state()
             
             logger.info(f"Position sync completed: {len(self.position_manager.get_all_positions())} positions")
             
@@ -1726,15 +1768,15 @@ class DailyRangeBot:
             logger.error(f"Error detecting WebSocket reconnection: {e}")
             return False
     
-    async def _validate_order_manager_cache(self):
-        """Validate OrderManager cache against live exchange data"""
+    async def _validate_order_manager_state(self):
+        """Validate OrderManager internal state against live exchange data"""
         try:
             # Get current trading market
             market = getattr(self, '_current_market', None)
             if not market:
                 return
                 
-            # Get pending orders from OrderManager cache
+            # Get pending orders from OrderManager state
             cached_orders = self.order_manager.get_pending_orders(market)
             
             # Get actual pending orders from exchange
@@ -1745,13 +1787,13 @@ class DailyRangeBot:
             elif isinstance(exchange_response, list):
                 exchange_orders = exchange_response
             
-            # Find orders in cache that are not on exchange (stale/filled orders)
+            # Find orders in OrderManager state that are not on exchange (stale/filled orders)
             stale_client_ids = []
             exchange_order_ids = {str(order.get('order_id')) for order in exchange_orders}
             exchange_client_ids = {order.get('client_id') for order in exchange_orders if order.get('client_id')}
             
             for cached_order in cached_orders:
-                # Check if this cached order exists on exchange
+                # Check if this tracked order exists on exchange
                 order_exists = (
                     cached_order.exchange_order_id in exchange_order_ids or
                     cached_order.client_id in exchange_client_ids
@@ -1760,20 +1802,20 @@ class DailyRangeBot:
                 if not order_exists:
                     stale_client_ids.append(cached_order.client_id)
             
-            # Remove stale orders from OrderManager cache
+            # Remove stale orders from OrderManager state
             stale_removed = 0
             for client_id in stale_client_ids:
                 if client_id in self.order_manager.active_orders:
                     del self.order_manager.active_orders[client_id]
                     self.order_manager._last_status_check.pop(client_id, None)
                     stale_removed += 1
-                    logger.warning(f"Removed stale order from cache: {client_id}")
+                    logger.warning(f"Removed stale order from OrderManager: {client_id}")
             
             if stale_removed > 0:
-                logger.info(f"HTTP fallback: Cleaned up {stale_removed} stale orders from OrderManager cache")
+                logger.info(f"HTTP fallback: Cleaned up {stale_removed} stale orders from OrderManager")
                 
         except Exception as e:
-            logger.error(f"Error validating OrderManager cache: {e}")
+            logger.error(f"Error validating OrderManager state: {e}")
     
     def get_pairing_status(self) -> Dict[str, Any]:
         """Get current pairing system status"""
@@ -1844,9 +1886,9 @@ class DailyRangeBot:
         if self.market_data:
             stats["market_data"] = self.market_data.get_data_source_stats()
         
-        # WebSocket market data cache statistics  
+        # WebSocket market data statistics  
         if self.websocket_market_data:
-            stats["websocket_cache"] = self.websocket_market_data.get_cache_stats()
+            stats["websocket_market_data"] = self.websocket_market_data.get_cache_stats()
         
         # Pairing statistics
         if self.pairing_manager and self.order_tracker:
@@ -1865,38 +1907,12 @@ class DailyRangeBot:
                 "subscriptions": list(self.websocket_client.subscriptions.keys())
             }
         
-        # Event-driven buy status cache statistics
-        stats["buy_status_cache"] = self.get_buy_status_cache_stats()
+        # Circuit breaker statistics
+        stats["circuit_breaker"] = self._order_circuit_breaker.get_statistics()
         
         return stats
     
-    def get_buy_status_cache_stats(self) -> Dict[str, Any]:
-        """Get statistics about the event-driven buy status cache"""
-        try:
-            now = datetime.now(timezone.utc)
-            cache_stats = {
-                "cached_markets": len(self._buy_status_cache),
-                "last_trading_day": str(self._last_trading_day) if self._last_trading_day else None,
-                "active_triggers": list(self._buy_status_triggers),
-                "cache_entries": {}
-            }
-            
-            for market, entry in self._buy_status_cache.items():
-                cache_age = (now - entry['last_check']).total_seconds()
-                cache_stats["cache_entries"][market] = {
-                    "last_check": entry['last_check'].isoformat(),
-                    "cache_age_seconds": round(cache_age, 1),
-                    "trigger": entry['trigger'],
-                    "has_today_buy": entry['status']['has_today_buy'],
-                    "today_orders_count": len(entry['status']['today_orders']),
-                    "is_fresh": cache_age < 300  # Fresh if less than 5 minutes
-                }
-            
-            return cache_stats
-            
-        except Exception as e:
-            logger.error(f"Error getting buy status cache stats: {e}")
-            return {"error": str(e)}
+    # REMOVED: get_buy_status_cache_stats() method - using direct exchange queries only
     
     def _should_log_state_change(self, market: str, state_type: str, current_value: Any) -> bool:
         """Check if a state has changed and should be logged"""

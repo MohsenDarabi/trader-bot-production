@@ -201,8 +201,39 @@ class OrderManager:
                 exchange_order_id=response.get('order_id')
             )
             
+            # CRITICAL: Validate order was actually created on exchange
+            if not order.exchange_order_id:
+                logger.error(f"🚨 Order creation failed - no exchange order ID returned for {client_id}")
+                self.used_client_ids.discard(client_id)
+                return None
+            
             # Store in active orders
             self.active_orders[client_id] = order
+            
+            # Additional validation: verify order exists on exchange
+            try:
+                # Brief delay to ensure exchange processing
+                import time
+                time.sleep(0.1)
+                
+                # Check if order actually exists on exchange
+                validation_response = self.client.get_order_status(
+                    market=market,
+                    order_id=order.exchange_order_id
+                )
+                
+                if not validation_response:
+                    logger.error(f"🚨 Order validation failed - order {client_id} not found on exchange after creation")
+                    # Remove from tracking since it doesn't exist
+                    del self.active_orders[client_id]
+                    self.used_client_ids.discard(client_id)
+                    return None
+                    
+                logger.info(f"✅ Order validation successful: {client_id} -> {order.exchange_order_id}")
+                
+            except Exception as validation_error:
+                logger.warning(f"⚠️ Order validation check failed for {client_id}: {validation_error}")
+                logger.info("Order placement proceeded - WebSocket tracking will handle validation")
             
             logger.info(f"Buy order placed successfully: {client_id} -> {order.exchange_order_id}")
             return order
@@ -267,8 +298,39 @@ class OrderManager:
                 exchange_order_id=response.get('order_id')
             )
             
+            # CRITICAL: Validate order was actually created on exchange
+            if not order.exchange_order_id:
+                logger.error(f"🚨 Sell order creation failed - no exchange order ID returned for {client_id}")
+                self.used_client_ids.discard(client_id)
+                return None
+            
             # Store in active orders
             self.active_orders[client_id] = order
+            
+            # Additional validation: verify order exists on exchange
+            try:
+                # Brief delay to ensure exchange processing
+                import time
+                time.sleep(0.1)
+                
+                # Check if order actually exists on exchange
+                validation_response = self.client.get_order_status(
+                    market=market,
+                    order_id=order.exchange_order_id
+                )
+                
+                if not validation_response:
+                    logger.error(f"🚨 Sell order validation failed - order {client_id} not found on exchange after creation")
+                    # Remove from tracking since it doesn't exist
+                    del self.active_orders[client_id]
+                    self.used_client_ids.discard(client_id)
+                    return None
+                    
+                logger.info(f"✅ Sell order validation successful: {client_id} -> {order.exchange_order_id}")
+                
+            except Exception as validation_error:
+                logger.warning(f"⚠️ Sell order validation check failed for {client_id}: {validation_error}")
+                logger.info("Order placement proceeded - WebSocket tracking will handle validation")
             
             logger.info(f"Sell order placed successfully: {client_id} -> {order.exchange_order_id}")
             return order
