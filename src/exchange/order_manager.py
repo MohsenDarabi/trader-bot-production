@@ -4,7 +4,7 @@ Order Management System with client_id duplicate prevention
 import time
 import signal
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Any
 from dataclasses import dataclass
 from enum import Enum
 
@@ -433,8 +433,24 @@ class OrderManager:
             return True
             
         except Exception as e:
-            logger.error(f"Failed to cancel order {client_id}: {e}")
-            return False
+            # INTELLIGENT ERROR HANDLING: Recognize and investigate "order not exists"
+            if "order not exists" in str(e).lower() or "order_not_exists" in str(e).lower():
+                logger.warning(f"🚨 Order {client_id} doesn't exist on exchange - investigating what happened...")
+                
+                # Investigate what happened to this missing order
+                reconciliation_success = self._reconcile_order_state(client_id, order.market)
+                
+                if reconciliation_success:
+                    logger.info(f"✅ Successfully reconciled missing order {client_id}")
+                    return True  # Treated as successful since we handled the discrepancy
+                else:
+                    logger.error(f"❌ Failed to reconcile missing order {client_id}")
+                    return False
+                    
+            # Handle other cancellation errors normally
+            else:
+                logger.error(f"Failed to cancel order {client_id}: {e}")
+                return False
     
     def update_order_status(self, client_id: str) -> Optional[Order]:
         """
@@ -495,13 +511,20 @@ class OrderManager:
             return order
             
         except Exception as e:
-            # Handle order not exists - remove from cache
+            # Handle order not exists - investigate and reconcile
             if "order not exists" in str(e).lower() or "order_not_exists" in str(e).lower():
-                logger.warning(f"Order {client_id} no longer exists on exchange - removing from cache")
-                if client_id in self.active_orders:
-                    del self.active_orders[client_id]
-                    self._last_status_check.pop(client_id, None)
-                return None
+                logger.warning(f"🚨 Order {client_id} no longer exists on exchange during status check - investigating...")
+                
+                # Investigate what happened to this missing order
+                reconciliation_success = self._reconcile_order_state(client_id, order.market)
+                
+                if reconciliation_success:
+                    logger.info(f"✅ Successfully reconciled missing order {client_id} during status check")
+                    # Order has been handled by reconciliation - it may have been removed from active_orders
+                    return self.active_orders.get(client_id)  # Return current state or None if removed
+                else:
+                    logger.error(f"❌ Failed to reconcile missing order {client_id} during status check")
+                    return None
                 
             # Handle common API signature errors gracefully
             if "Signature Incorrect" in str(e):
@@ -765,3 +788,165 @@ class OrderManager:
                 
         except Exception as e:
             logger.error(f"Error handling order completion from OrderTracker: {e}", exc_info=True)
+    
+    def _investigate_missing_order(self, client_id: str, market: str) -> Optional[Dict[str, Any]]:
+        """
+        CSI: Order Investigation - What happened to this missing order?
+        
+        Args:
+            client_id: Client order ID that's missing
+            market: Market symbol
+            
+        Returns:
+            Order data if found, None if order never existed or failed
+        """
+        try:
+            logger.info(f"🕵️ Investigating missing order: {client_id}")
+            
+            # Check 1: Query current pending orders for this market
+            logger.debug(f"🔍 Checking pending orders for {market}")
+            try:
+                # Get pending orders (this may include the missing order if it's still pending)
+                pending_response = self.client.get_pending_orders(market=market)
+                
+                # Handle different response formats
+                if isinstance(pending_response, list):
+                    pending_orders = pending_response
+                elif isinstance(pending_response, dict):
+                    pending_orders = pending_response.get('data', [])
+                else:
+                    pending_orders = []
+                
+                # Look for our missing order in pending orders
+                for order_data in pending_orders:
+                    if order_data.get('client_id') == client_id:
+                        status = order_data.get('status', 'pending')
+                        logger.info(f"🕵️ Found missing order in pending orders: {client_id} status={status}")
+                        return order_data
+                            
+            except Exception as e:
+                logger.warning(f"⚠️ Could not check pending orders: {e}")
+            
+            # Check 2: Try to query the specific order directly (last resort)
+            logger.debug(f"🔍 Direct order query for {client_id}")
+            try:
+                if client_id in self.active_orders:
+                    order = self.active_orders[client_id]
+                    if order.exchange_order_id:
+                        status_response = self.client.get_order_status(
+                            market=market,
+                            order_id=order.exchange_order_id
+                        )
+                        if status_response:
+                            logger.info(f"🕵️ Direct query found order: {client_id}")
+                            return status_response
+            except Exception as e:
+                logger.debug(f"Direct order query failed: {e}")
+            
+            logger.info(f"🕵️ Investigation complete: Order {client_id} likely failed silently during placement")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error during order investigation for {client_id}: {e}")
+            return None
+    
+    def _handle_discovered_fill(self, order_data: Dict[str, Any]) -> None:
+        """
+        Handle an order that was discovered to be filled during investigation
+        
+        Args:
+            order_data: Order data from investigation
+        """
+        try:
+            client_id = order_data.get('client_id')
+            if not client_id:
+                return
+            
+            logger.info(f"🔄 Processing discovered fill for {client_id}")
+            
+            # Update local order if it exists
+            if client_id in self.active_orders:
+                order = self.active_orders[client_id]
+                order.status = OrderStatus.FILLED
+                order.filled_amount = float(order_data.get('filled_amount', order.amount))
+                order.updated_at = datetime.now(timezone.utc)
+                
+                # Remove from active orders (it's completed)
+                del self.active_orders[client_id]
+                self._last_status_check.pop(client_id, None)
+                
+                logger.info(f"✅ Updated local state: {client_id} marked as filled")
+            else:
+                logger.debug(f"Order {client_id} not in local tracking - no local update needed")
+            
+        except Exception as e:
+            logger.error(f"Error handling discovered fill for {order_data}: {e}")
+    
+    def _mark_order_failed(self, client_id: str) -> None:
+        """
+        Mark an order as failed and clean up tracking
+        
+        Args:
+            client_id: Client order ID to mark as failed
+        """
+        try:
+            logger.info(f"🔄 Marking order as failed: {client_id}")
+            
+            # Remove from active orders if present  
+            if client_id in self.active_orders:
+                order = self.active_orders[client_id]
+                order.status = OrderStatus.FAILED  
+                order.updated_at = datetime.now(timezone.utc)
+                
+                # Remove from active tracking
+                del self.active_orders[client_id]
+                self._last_status_check.pop(client_id, None)
+                
+                logger.info(f"✅ Cleaned up failed order: {client_id}")
+            
+            # Clean up client_id reservation
+            self.used_client_ids.discard(client_id)
+            
+        except Exception as e:
+            logger.error(f"Error marking order as failed {client_id}: {e}")
+    
+    def _reconcile_order_state(self, client_id: str, market: str) -> bool:
+        """
+        Reconcile local order state with exchange reality
+        
+        Args:
+            client_id: Client order ID
+            market: Market symbol
+            
+        Returns:
+            True if reconciliation successful
+        """
+        try:
+            logger.info(f"🔄 Reconciling state for order: {client_id}")
+            
+            # Investigate what happened to this order
+            investigation_result = self._investigate_missing_order(client_id, market)
+            
+            if investigation_result:
+                status = investigation_result.get('status', '')
+                
+                if status in ['done', 'filled']:
+                    self._handle_discovered_fill(investigation_result)
+                    logger.info(f"✅ Reconciliation: {client_id} was filled")
+                    return True
+                elif status in ['cancel', 'cancelled']:
+                    self._mark_order_failed(client_id)  # Treat external cancellation as failure
+                    logger.info(f"✅ Reconciliation: {client_id} was cancelled externally") 
+                    return True
+                else:
+                    logger.warning(f"⚠️ Reconciliation: {client_id} status unclear: {status}")
+                    return False
+            else:
+                # Order never existed or failed silently
+                self._mark_order_failed(client_id)
+                logger.info(f"✅ Reconciliation: {client_id} marked as failed (never existed)")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error reconciling order state for {client_id}: {e}")
+            return False
