@@ -218,6 +218,9 @@ class DailyRangeBot:
         # Circuit breaker for order placement
         self._order_circuit_breaker = TradingCircuitBreaker()
         
+        # Cycle completion tracking for continuous trading
+        self._cycle_completion_flags = {}  # market -> bool (allows immediate new buy after cycle complete)
+        
     async def initialize(self):
         """Initialize all bot components"""
         logger.info("Initializing Daily Range Accumulation Bot...")
@@ -682,11 +685,8 @@ class DailyRangeBot:
                     if self._should_log_state_change(market, balance_key, True):
                         log_trading_event('position_balance', f"✅ Position properly balanced with {len(balance['sell_orders'])} sell orders for {market}")
                 
-                # With existing position, no new buy orders should be placed
-                # The _should_place_buy_order method will prevent this anyway
-                return
             
-            # Second priority: Check for new buy opportunities (only if no position exists)
+            # Second priority: Check for new buy opportunities
             # CRITICAL FIX: Clean up duplicate orders before checking if we should place buy
             buy_status = self._get_exchange_buy_status(market)
             total_buy_orders = buy_status.get('total_buy_orders', 0)
@@ -1004,20 +1004,24 @@ class DailyRangeBot:
             
             return False
         
-        # Phase 2: CRITICAL - Check if we have existing position from today's trading
+        # Phase 2: Check cycle completion flag and position status
+        cycle_complete_flag = self._cycle_completion_flags.get(market, False)
         balance = self._calculate_position_sell_balance(market)
+        today_orders = buy_status.get('today_orders', [])
+        has_today_buy = len(today_orders) > 0
         
-        if balance['position_exists']:
-            # Only log position if it's a state change
-            if self._should_log_state_change(market, 'position_exists', balance['position_size']):
-                log_trading_event('position_check', f"⚠️ FOUND EXISTING POSITION: {balance['position_size']:.6f} {market}")
+        # Determine if we should allow a buy order
+        if cycle_complete_flag:
+            # Cycle just completed - allow immediate new buy order regardless of daily count
+            logger.info(f"🔄 Cycle completion detected for {market} - allowing new buy order")
+            log_trading_event('cycle_buy', f"🔄 Placing new buy order after cycle completion for {market}")
             
-            # STRATEGY RULE: Only ONE buy order per day per market
-            # If position exists, we should NEVER place another buy order the same day
-            # Instead, ensure the position has proper sell orders
+            # Clear the flag once we use it
+            self._cycle_completion_flags[market] = False
             
+        elif balance['position_exists']:
+            # Position exists but no cycle completion flag - ensure it's balanced but don't place buy
             if not balance['is_balanced']:
-                # Position exists but not balanced - place missing sell order
                 log_trading_event('position_balance', f"🔧 Position unbalanced: {balance['position_size']:.6f} position vs {balance['total_sells']:.6f} sells for {market}")
                 log_trading_event('missing_sell', f"🔧 Placing missing sell order: {balance['missing_sell']:.6f} for {market}")
                 
@@ -1025,13 +1029,21 @@ class DailyRangeBot:
                     log_trading_event('sell_order', f"✅ Missing sell order placed for existing position in {market}")
                 else:
                     log_trading_event('sell_order_error', f"❌ Failed to place missing sell order for {market}")
-            else:
-                log_trading_event('position_balance', f"✅ Position is properly balanced with sell orders for {market}")
             
-            # NEVER place buy order when position exists - this is the core strategy rule
+            # Block buy order - position exists and no cycle completion
             if self._should_log_state_change(market, 'position_blocks_buy', True):
-                log_trading_event('buy_decision', f"❌ Cannot place buy - position already exists from today's trading for {market}")
+                log_trading_event('buy_decision', f"❌ Cannot place buy - position exists and no cycle completion for {market}")
             return False
+            
+        elif has_today_buy:
+            # Already placed buy order today and no cycle completion - block additional buys
+            if self._should_log_state_change(market, 'daily_buy_limit', True):
+                log_trading_event('buy_decision', f"❌ Cannot place buy - daily buy already placed for {market}")
+            return False
+        else:
+            # No position, no today's buy order, no cycle completion - this is first buy of day
+            logger.info(f"🌅 First buy order of the day allowed for {market}")
+            log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
         
         # Phase 3: Price validation
         price_diff_percent = abs(current_price - signal.buy_price) / signal.buy_price * 100
@@ -1674,6 +1686,10 @@ class DailyRangeBot:
                 logger.info(f"✅ Trading cycle confirmed complete for {market}")
                 logger.info(f"📊 Final state: Position={position.size if position else 0:.6f}, "
                            f"Buy orders={buy_status.get('total_buy_orders', 0)}")
+                
+                # CRITICAL: Set cycle completion flag to allow immediate new buy order
+                self._cycle_completion_flags[market] = True
+                logger.info(f"🔄 Cycle completion flag set for {market} - new buy order now allowed")
                 
                 # Log completion event for monitoring
                 log_trading_event('cycle_complete', f"✅ Trading cycle completed for {market}")
