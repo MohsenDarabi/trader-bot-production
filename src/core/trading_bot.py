@@ -989,6 +989,44 @@ class DailyRangeBot:
             logger.error(f"Error placing missing sell order for {market}: {e}")
             return False
     
+    def _get_today_pending_sell_orders(self, market: str) -> int:
+        """Count pending sell orders placed today for the given market"""
+        from src.exchange.order_manager import OrderSide
+        
+        today = datetime.now(timezone.utc).date()
+        
+        try:
+            # Get all pending orders for this market
+            pending_orders = self.order_manager.get_pending_orders(market)
+            
+            # Filter for sell orders placed today
+            today_pending_sells = [
+                order for order in pending_orders
+                if order.side == OrderSide.SELL and order.created_at.date() == today
+            ]
+            
+            sell_count = len(today_pending_sells)
+            
+            # Handle edge case of multiple pending sells from today
+            if sell_count > 1:
+                logger.warning(f"⚠️ Found {sell_count} pending sell orders from today for {market}")
+                logger.warning("This indicates a previous bug occurred - blocking new buy orders")
+                log_trading_event('multiple_sells_detected', f"Found {sell_count} today's pending sells - blocking new buys for {market}")
+                
+                # Log details for debugging
+                for i, sell_order in enumerate(today_pending_sells, 1):
+                    logger.info(f"  Sell #{i}: {sell_order.client_id} placed at {sell_order.created_at.time()}")
+            elif sell_count == 1:
+                sell_order = today_pending_sells[0]
+                logger.info(f"ℹ️ Found 1 pending sell order from today: {sell_order.client_id} placed at {sell_order.created_at.time()}")
+            
+            return sell_count
+            
+        except Exception as e:
+            logger.error(f"Error checking today's pending sell orders for {market}: {e}")
+            # Return 1 to be safe - block new buy orders if we can't determine state
+            return 1
+    
     def _should_place_buy_order(self, market: str, signal: TradingSignal, current_price: float) -> bool:
         """Buy order decision using fresh exchange data with day-start cancellation and funding fee protection"""
         
@@ -1046,7 +1084,15 @@ class DailyRangeBot:
         # Use direct exchange queries for single source of truth
         buy_status = self._get_exchange_buy_status(market)
         
-        # Phase 2: Check for pending buy orders (after day-start cancellation)
+        # Phase 2: Check for pending sell orders from today
+        today_pending_sells = self._get_today_pending_sell_orders(market)
+        if today_pending_sells > 0:
+            if self._should_log_state_change(market, f'pending_sells_{today_pending_sells}', True):
+                logger.info(f"❌ Cannot place buy - {today_pending_sells} pending sell orders from today for {market}")
+                log_trading_event('pending_sells_block', f"Buy blocked - {today_pending_sells} today's sell orders pending for {market}")
+            return False
+        
+        # Phase 3: Check for pending buy orders (after day-start cancellation and sell check)
         total_buy_orders = buy_status.get('total_buy_orders', 0)
         if total_buy_orders > 0:
             # Log detailed information about remaining buy orders
@@ -1066,7 +1112,7 @@ class DailyRangeBot:
             
             return False  # Wait for existing buy orders to fill first
         
-        # Phase 3: Check cycle completion or first buy of day conditions
+        # Phase 4: Check cycle completion or first buy of day conditions
         cycle_complete_flag = self._cycle_completion_flags.get(market, False)
         today_orders = buy_status.get('today_orders', [])
         has_today_buy = len(today_orders) > 0
@@ -1103,14 +1149,14 @@ class DailyRangeBot:
                 log_trading_event('buy_decision', f"❌ Cannot place buy - daily buy already placed for {market}")
             return False
         
-        # Phase 4: Price validation
+        # Phase 5: Price validation
         price_diff_percent = abs(current_price - signal.buy_price) / signal.buy_price * 100
         if price_diff_percent > MAX_RANGE_DEVIATION:
             if self._should_log_state_change(market, 'price_out_of_range', True):
                 log_trading_event('price_validation', f"❌ Cannot place buy - price too far from signal: {price_diff_percent:.2f}% deviation (max: {MAX_RANGE_DEVIATION}%) for {market}")
             return False
         
-        # Phase 5: Account balance and position sizing
+        # Phase 6: Account balance and position sizing
         account_balance = self.get_account_balance()
         position_size = self.position_sizer.calculate_position_size(
             market, signal.buy_price, account_balance
