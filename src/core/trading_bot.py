@@ -260,8 +260,8 @@ class DailyRangeBot:
                 'reconnection_count': 0
             }
             
-            # Set WebSocket client reference for enhanced availability monitoring
-            self.market_data.set_websocket_client(self.websocket_client)
+            # Set WebSocket provider reference for enhanced availability monitoring
+            self.market_data.set_websocket_provider(self.websocket_market_data)
             
             # Initialize WebSocket connection using proven pattern from tests
             logger.info("Starting WebSocket connection for real-time order tracking...")

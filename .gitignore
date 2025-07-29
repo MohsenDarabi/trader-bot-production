@@ -66,3 +66,6 @@ htmlcov/
 trading_state.json
 positions_backup/
 order_history/
+
+# Environment templates with credentials (local use only)
+env-templates/
