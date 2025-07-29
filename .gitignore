@@ -69,3 +69,8 @@ order_history/
 
 # Environment templates with credentials (local use only)
 env-templates/
+
+# Deployment artifacts
+trader-bot-update-*.tar.gz
+vm-deploy-*.sh
+backup_*/
