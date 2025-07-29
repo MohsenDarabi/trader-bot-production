@@ -2,16 +2,21 @@
 """
 CoinEx Daily Range Accumulation Trading Bot
 Main entry point for the live trading system
+VM-compatible version with enhanced error handling
 """
 import sys
 import asyncio
 import signal
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / 'src'))
+# Add src to path with absolute resolution for VM compatibility
+current_dir = Path(__file__).parent.resolve()
+src_path = str(current_dir / 'src')
+if src_path not in sys.path:
+    sys.path.insert(0, src_path)
 
 from rich.console import Console
 from rich.live import Live
@@ -217,31 +222,62 @@ class TradingBotManager:
             return False
     
     async def run_bot(self):
-        """Main bot execution loop with live display"""
+        """Main bot execution loop with live display - VM compatible"""
         if not await self.initialize_bot():
             return
         
         self.running = True
-        layout = self.create_display_layout()
+        
+        # Check if running in Docker/VM environment
+        is_container = os.getenv('DOCKER_CONTAINER', 'false').lower() == 'true' or os.path.exists('/.dockerenv')
         
         try:
-            with Live(layout, refresh_per_second=0.2, screen=True):
+            if is_container:
+                # Simplified display for container environments
+                self.console.print("🐳 Running in container mode - simplified display", style="blue")
                 cycle_count = 0
                 while self.running:
                     try:
-                        # Update display
-                        self.update_display(layout)
-                        
-                        # Execute bot logic
+                        # Execute bot logic without live display
                         await self.bot.execute_trading_cycle()
                         
-                        # Force log summaries every 12 cycles (1 minute)
+                        # Status update every 12 cycles (1 minute)
                         cycle_count += 1
                         if cycle_count % 12 == 0:
                             force_log_summaries()
+                            if self.bot:
+                                balance = self.bot.get_account_balance()
+                                positions = len(self.bot.get_open_positions())
+                                self.console.print(f"📊 Status: Balance=${balance:.2f}, Positions={positions}", style="cyan")
                         
                         # Wait before next cycle
                         await asyncio.sleep(5)
+                        
+                    except KeyboardInterrupt:
+                        break
+                    except Exception as e:
+                        logger.error(f"Trading cycle error: {e}", exc_info=True)
+                        await asyncio.sleep(10)  # Longer wait on error
+            else:
+                # Full live display for local environments
+                layout = self.create_display_layout()
+                with Live(layout, refresh_per_second=0.2, screen=True):
+                    cycle_count = 0
+                    while self.running:
+                        try:
+                            # Update display
+                            self.update_display(layout)
+                            
+                            # Execute bot logic
+                            await self.bot.execute_trading_cycle()
+                            
+                            # Force log summaries every 12 cycles (1 minute)
+                            cycle_count += 1
+                            if cycle_count % 12 == 0:
+                                force_log_summaries()
+                            
+                            # Wait before next cycle
+                            await asyncio.sleep(5)
                         
                     except KeyboardInterrupt:
                         break
