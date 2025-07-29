@@ -1019,8 +1019,15 @@ class DailyRangeBot:
             # Clear the flag once we use it
             self._cycle_completion_flags[market] = False
             
+        elif has_today_buy:
+            # Already placed buy order today and no cycle completion - block additional buys
+            if self._should_log_state_change(market, 'daily_buy_limit', True):
+                log_trading_event('buy_decision', f"❌ Cannot place buy - daily buy already placed for {market}")
+            return False
+            
         elif balance['position_exists']:
-            # Position exists but no cycle completion flag - ensure it's balanced but don't place buy
+            # Position exists but no today's buy - this could be from yesterday or earlier
+            # Ensure position is balanced, then allow new buy order (first of today)
             if not balance['is_balanced']:
                 log_trading_event('position_balance', f"🔧 Position unbalanced: {balance['position_size']:.6f} position vs {balance['total_sells']:.6f} sells for {market}")
                 log_trading_event('missing_sell', f"🔧 Placing missing sell order: {balance['missing_sell']:.6f} for {market}")
@@ -1029,19 +1036,14 @@ class DailyRangeBot:
                     log_trading_event('sell_order', f"✅ Missing sell order placed for existing position in {market}")
                 else:
                     log_trading_event('sell_order_error', f"❌ Failed to place missing sell order for {market}")
+                    return False  # Don't place buy if we can't balance the position
             
-            # Block buy order - position exists and no cycle completion
-            if self._should_log_state_change(market, 'position_blocks_buy', True):
-                log_trading_event('buy_decision', f"❌ Cannot place buy - position exists and no cycle completion for {market}")
-            return False
+            # Position is balanced, no today's buy order - allow first buy of day
+            logger.info(f"🌅 Position exists but balanced, allowing first buy order of the day for {market}")
+            log_trading_event('daily_buy', f"🌅 Placing first buy order of the day (position exists but balanced) for {market}")
             
-        elif has_today_buy:
-            # Already placed buy order today and no cycle completion - block additional buys
-            if self._should_log_state_change(market, 'daily_buy_limit', True):
-                log_trading_event('buy_decision', f"❌ Cannot place buy - daily buy already placed for {market}")
-            return False
         else:
-            # No position, no today's buy order, no cycle completion - this is first buy of day
+            # No position, no today's buy order - this is first buy of day
             logger.info(f"🌅 First buy order of the day allowed for {market}")
             log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
         
