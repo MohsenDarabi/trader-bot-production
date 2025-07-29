@@ -20,6 +20,9 @@ SETTLEMENT_HOURS = [0, 8, 16]
 # Settlement window duration (minutes)
 SETTLEMENT_WINDOW_MINUTES = 3  # Conservative estimate: 1-2 minutes actual + buffer
 
+# Pre-settlement buffer (minutes) - avoid actions approaching settlement
+PRE_SETTLEMENT_BUFFER_MINUTES = 1  # 1 minute buffer as suggested by user
+
 # Retry configuration
 MAX_RETRIES = 3
 INITIAL_RETRY_DELAY = 10  # seconds
@@ -59,6 +62,45 @@ def is_settlement_period(timestamp: Optional[datetime] = None) -> bool:
     # Check if we're at a settlement hour and within the window
     if current_hour in SETTLEMENT_HOURS and current_minute < SETTLEMENT_WINDOW_MINUTES:
         return True
+    
+    return False
+
+
+def is_approaching_settlement(timestamp: Optional[datetime] = None) -> bool:
+    """
+    Check if we're approaching a funding fee settlement period (within buffer time).
+    This is used to proactively avoid order operations that might conflict with settlement.
+    
+    Args:
+        timestamp: Optional datetime to check, uses current UTC time if not provided
+        
+    Returns:
+        True if approaching settlement (within buffer), False otherwise
+    """
+    if timestamp is None:
+        timestamp = datetime.now(timezone.utc)
+    
+    # Ensure we have a timezone-aware datetime
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    
+    current_hour = timestamp.hour
+    current_minute = timestamp.minute
+    
+    # Check if we're at a settlement hour and within pre-settlement buffer
+    if current_hour in SETTLEMENT_HOURS:
+        # Check if we're within the extended window (buffer + settlement window)
+        total_window = PRE_SETTLEMENT_BUFFER_MINUTES + SETTLEMENT_WINDOW_MINUTES
+        if current_minute < total_window:
+            return True
+    
+    # Also check if we're approaching the next settlement hour
+    for settlement_hour in SETTLEMENT_HOURS:
+        if settlement_hour == (current_hour + 1) % 24:
+            # We're in the hour before settlement, check if within buffer of next hour
+            minutes_to_next_hour = 60 - current_minute
+            if minutes_to_next_hour <= PRE_SETTLEMENT_BUFFER_MINUTES:
+                return True
     
     return False
 

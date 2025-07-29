@@ -922,8 +922,21 @@ class DailyRangeBot:
             }
     
     def _place_missing_sell_order(self, market: str, missing_amount: float) -> bool:
-        """Place sell order for missing position coverage with intelligent price adjustment"""
+        """Place sell order for missing position coverage with intelligent price adjustment and funding fee protection"""
         try:
+            # Funding fee protection check
+            from src.utils.settlement_handler import is_settlement_period, is_approaching_settlement
+            
+            if is_settlement_period():
+                logger.warning(f"⚠️ Cannot place sell order - currently in funding fee settlement period for {market}")
+                log_trading_event('settlement_block', f"Missing sell order blocked - settlement period active for {market}")
+                return False
+            
+            if is_approaching_settlement():
+                logger.warning(f"⚠️ Cannot place sell order - approaching funding fee settlement period for {market}")
+                log_trading_event('settlement_approach', f"Missing sell order blocked - approaching settlement for {market}")
+                return False
+            
             # Get position for entry price reference
             position = self.position_manager.get_position(market)
             if not position:
@@ -977,15 +990,66 @@ class DailyRangeBot:
             return False
     
     def _should_place_buy_order(self, market: str, signal: TradingSignal, current_price: float) -> bool:
-        """Buy order decision using fresh exchange data"""
+        """Buy order decision using fresh exchange data with day-start cancellation and funding fee protection"""
+        
+        # Phase 0: Funding fee protection check
+        from src.utils.settlement_handler import is_settlement_period, is_approaching_settlement
+        
+        if is_settlement_period():
+            if self._should_log_state_change(market, 'settlement_period', True):
+                logger.warning(f"⚠️ Cannot place buy order - currently in funding fee settlement period for {market}")
+                log_trading_event('settlement_block', f"Buy order blocked - settlement period active for {market}")
+            return False
+        
+        if is_approaching_settlement():
+            if self._should_log_state_change(market, 'approaching_settlement', True):
+                logger.warning(f"⚠️ Cannot place buy order - approaching funding fee settlement period for {market}")
+                log_trading_event('settlement_approach', f"Buy order blocked - approaching settlement for {market}")
+            return False
+        
+        # Phase 1: Day-start cancellation check (respecting settlement periods)
+        # Check if it's a new day and cancel old buy orders if needed
+        is_new_day = self.market_data.is_new_trading_day(market)
+        if is_new_day:
+            logger.info(f"🌅 New trading day detected for {market} - checking for old buy orders to cancel")
+            
+            # Don't cancel orders during settlement periods
+            if is_settlement_period() or is_approaching_settlement():
+                logger.info(f"⏳ Day-start cleanup delayed - waiting for settlement period to end for {market}")
+                log_trading_event('settlement_delay', f"Day-start cleanup delayed due to settlement period for {market}")
+                return False
+            
+            # Get current buy orders before making decision
+            current_buy_status = self._get_exchange_buy_status(market)
+            old_orders = current_buy_status.get('all_buy_orders', [])
+            
+            if old_orders:
+                today = datetime.now(timezone.utc).date()
+                cancelled_count = 0
+                
+                for order in old_orders:
+                    if order.created_at.date() < today:
+                        try:
+                            logger.info(f"🗑️ Cancelling yesterday's buy order: {order.client_id} from {order.created_at.date()}")
+                            if self.order_manager.cancel_order(order.client_id):
+                                cancelled_count += 1
+                                log_trading_event('day_start_cleanup', f"Cancelled old buy order {order.client_id} from {order.created_at.date()}")
+                        except Exception as e:
+                            logger.error(f"Failed to cancel old buy order {order.client_id}: {e}")
+                
+                if cancelled_count > 0:
+                    logger.info(f"✅ Day-start cleanup: Cancelled {cancelled_count} old buy orders for {market}")
+                    # Small delay to let cancellations process
+                    import time
+                    time.sleep(0.5)
         
         # Use direct exchange queries for single source of truth
         buy_status = self._get_exchange_buy_status(market)
         
-        # CRITICAL: Check for ANY buy orders (not just today's)
+        # Phase 2: Check for pending buy orders (after day-start cancellation)
         total_buy_orders = buy_status.get('total_buy_orders', 0)
         if total_buy_orders > 0:
-            # Log detailed information about ALL buy orders
+            # Log detailed information about remaining buy orders
             all_orders = buy_status.get('all_buy_orders', [])
             order_summary = []
             for order in all_orders:
@@ -997,38 +1061,33 @@ class DailyRangeBot:
             # Only log when state changes to avoid spam
             order_state_key = f"existing_buy_orders_{total_buy_orders}"
             if self._should_log_state_change(market, order_state_key, ', '.join([o.client_id for o in all_orders])):
-                logger.info(f"📋 Tracking {total_buy_orders} existing buy order(s) for {market}: {', '.join(order_summary)}")
-                log_trading_event('buy_tracking', f"📋 Tracking {total_buy_orders} existing buy order(s) for {market}")
+                logger.info(f"📋 Pending buy orders exist - waiting: {', '.join(order_summary)}")
+                log_trading_event('buy_waiting', f"❌ Cannot place buy - pending buy orders exist for {market}: {len(all_orders)} orders")
             
-            # Conservative approach: Respect existing orders from today and let order tracking handle fills
-            
-            return False
+            return False  # Wait for existing buy orders to fill first
         
-        # Phase 2: Check cycle completion flag and position status
+        # Phase 3: Check cycle completion or first buy of day conditions
         cycle_complete_flag = self._cycle_completion_flags.get(market, False)
-        balance = self._calculate_position_sell_balance(market)
         today_orders = buy_status.get('today_orders', [])
         has_today_buy = len(today_orders) > 0
         
-        # Determine if we should allow a buy order
+        # Simplified decision logic as requested by user
         if cycle_complete_flag:
-            # Cycle just completed - allow immediate new buy order regardless of daily count
+            # Cycle just completed - allow immediate new buy order
             logger.info(f"🔄 Cycle completion detected for {market} - allowing new buy order")
             log_trading_event('cycle_buy', f"🔄 Placing new buy order after cycle completion for {market}")
             
             # Clear the flag once we use it
             self._cycle_completion_flags[market] = False
             
-        elif has_today_buy:
-            # Already placed buy order today and no cycle completion - block additional buys
-            if self._should_log_state_change(market, 'daily_buy_limit', True):
-                log_trading_event('buy_decision', f"❌ Cannot place buy - daily buy already placed for {market}")
-            return False
+        elif not has_today_buy:
+            # No buy order placed today - allow first buy of day
+            logger.info(f"🌅 First buy order of the day allowed for {market}")
+            log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
             
-        elif balance['position_exists']:
-            # Position exists but no today's buy - this could be from yesterday or earlier
-            # Ensure position is balanced, then allow new buy order (first of today)
-            if not balance['is_balanced']:
+            # Balance any existing positions before placing new buy
+            balance = self._calculate_position_sell_balance(market)
+            if balance['position_exists'] and not balance['is_balanced']:
                 log_trading_event('position_balance', f"🔧 Position unbalanced: {balance['position_size']:.6f} position vs {balance['total_sells']:.6f} sells for {market}")
                 log_trading_event('missing_sell', f"🔧 Placing missing sell order: {balance['missing_sell']:.6f} for {market}")
                 
@@ -1038,23 +1097,20 @@ class DailyRangeBot:
                     log_trading_event('sell_order_error', f"❌ Failed to place missing sell order for {market}")
                     return False  # Don't place buy if we can't balance the position
             
-            # Position is balanced, no today's buy order - allow first buy of day
-            logger.info(f"🌅 Position exists but balanced, allowing first buy order of the day for {market}")
-            log_trading_event('daily_buy', f"🌅 Placing first buy order of the day (position exists but balanced) for {market}")
-            
         else:
-            # No position, no today's buy order - this is first buy of day
-            logger.info(f"🌅 First buy order of the day allowed for {market}")
-            log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
+            # Already placed buy today and no cycle completion - block additional buys
+            if self._should_log_state_change(market, 'daily_buy_limit', True):
+                log_trading_event('buy_decision', f"❌ Cannot place buy - daily buy already placed for {market}")
+            return False
         
-        # Phase 3: Price validation
+        # Phase 4: Price validation
         price_diff_percent = abs(current_price - signal.buy_price) / signal.buy_price * 100
         if price_diff_percent > MAX_RANGE_DEVIATION:
             if self._should_log_state_change(market, 'price_out_of_range', True):
                 log_trading_event('price_validation', f"❌ Cannot place buy - price too far from signal: {price_diff_percent:.2f}% deviation (max: {MAX_RANGE_DEVIATION}%) for {market}")
             return False
         
-        # Phase 4: Account balance and position sizing
+        # Phase 5: Account balance and position sizing
         account_balance = self.get_account_balance()
         position_size = self.position_sizer.calculate_position_size(
             market, signal.buy_price, account_balance
@@ -1606,7 +1662,37 @@ class DailyRangeBot:
                 elif market and side == "sell":
                     log_trading_event('sell_fill', f"Sell order filled for {market}: {amount} @ ${price}")
                     
-                    # CRITICAL: Check if this completes a trading cycle
+                    # NEW: Check if sell order was placed today for cycle completion
+                    order_id = deal.get("order_id")
+                    was_today_order = False
+                    
+                    if order_id:
+                        # Try to find the order by order_id in active orders
+                        matching_order = None
+                        for client_id, order in self.order_manager.active_orders.items():
+                            if str(order.exchange_order_id) == str(order_id):
+                                matching_order = order
+                                break
+                        
+                        if matching_order and matching_order.created_at:
+                            today = datetime.now(timezone.utc).date()
+                            order_date = matching_order.created_at.date()
+                            was_today_order = (order_date == today)
+                            
+                            if was_today_order:
+                                logger.info(f"✅ Sell order {order_id} was placed today ({order_date}) - cycle completion detected")
+                            else:
+                                logger.info(f"ℹ️  Sell order {order_id} was placed on {order_date} (not today) - no cycle completion")
+                        else:
+                            logger.debug(f"Could not find creation date for sell order {order_id}")
+                    
+                    # Set cycle completion flag if sell was from today
+                    if was_today_order:
+                        self._cycle_completion_flags[market] = True
+                        logger.info(f"🔄 Cycle completion flag set for {market} - sell from today completed")
+                        log_trading_event('cycle_complete', f"Cycle completion detected for {market} - sell order from today filled")
+                    
+                    # CRITICAL: Check if this completes a trading cycle (original logic)
                     position = self.position_manager.get_position(market)
                     if not position or position.size < 0.000001:
                         logger.info(f"🔄 Trading cycle complete for {market} via sell fill")
