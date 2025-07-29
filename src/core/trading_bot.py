@@ -1127,7 +1127,15 @@ class DailyRangeBot:
             self._cycle_completion_flags[market] = False
             
         elif not has_today_buy:
-            # No buy order placed today - allow first buy of day
+            # No buy order placed today - but check for pending sells first
+            # This ensures we don't place buy if today's sell orders are still pending
+            if today_pending_sells > 0:
+                if self._should_log_state_change(market, f'first_buy_blocked_sells_{today_pending_sells}', True):
+                    logger.info(f"❌ Cannot place first buy - {today_pending_sells} pending sell orders from today for {market}")
+                    log_trading_event('first_buy_blocked', f"First buy blocked - {today_pending_sells} today's sell orders pending for {market}")
+                return False
+            
+            # No pending sells from today - allow first buy of day
             logger.info(f"🌅 First buy order of the day allowed for {market}")
             log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
             
