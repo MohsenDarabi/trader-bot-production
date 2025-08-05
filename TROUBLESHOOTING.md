@@ -271,6 +271,73 @@ ORDER_STATUS_CHECK_INTERVAL=-1   # Disable REST API checks completely (recommend
 
 When set to `-1`, the bot relies entirely on WebSocket updates for order status changes, eliminating signature errors from periodic status checks. Since WebSocket provides real-time updates, this is the recommended approach.
 
+### Problem: Credential Displacement Between Bot Accounts - CRITICAL
+**Symptoms:**
+- ETH bot connects to ADA account despite correct environment variables
+- Orders placed by ETH bot appear in wrong CoinEx account
+- Bot logs show "loaded X existing orders" from different account
+- Balance updates reflect wrong account values
+
+**Root Cause:**
+Multi-bot deployments can have credential displacement when:
+1. **External SSD Environment Files**: Build location environment files contain wrong credentials
+2. **Docker Build Context**: Wrong credentials copied into Docker image layers during build
+3. **Cached Credentials**: Old credentials embedded in existing Docker images
+
+**Critical Impact:**
+- ETH orders placed in ADA account (cross-account contamination)
+- Trading strategy disrupted across multiple accounts
+- Positions opened in unintended accounts
+
+**Complete Fix Process:**
+```bash
+# 1. Audit all credential storage locations
+find /path/to/build/location -name "*.env*" -exec cat {} \;
+grep -r "COINEX_" /path/to/external/ssd/builds/
+
+# 2. Fix External SSD environment files
+# Update .env.eth with correct ETH credentials:
+COINEX_API_KEY="377EB9E769AB4D0AAC13224A54B37946"
+COINEX_API_SECRET="83ADBF2285D42A626FB0612E0D020EBE1452236217992B53"
+
+# 3. Clean all Docker images with wrong credentials  
+docker rmi $(docker images | grep trader-bot | awk '{print $3}')
+docker system prune -f
+
+# 4. Build fresh Docker image from clean source
+cd /external/ssd/build/location
+docker build --platform linux/amd64 -t trader-bot-final:amd64 /path/to/source
+docker save trader-bot-final:amd64 | gzip > trader-bot-final-amd64.tar.gz
+
+# 5. Deploy with verified credential separation
+./deploy-final.sh
+```
+
+**Verification Steps:**
+1. **Check order isolation**: ETH bot should show 0 existing orders (if new account)
+2. **Verify balance updates**: Balance changes should reflect correct account
+3. **Monitor order placement**: New orders should appear in intended account only
+4. **Test cross-account separation**: ADA bot stopped, ETH bot running independently
+
+**Example Success Indicators:**
+```
+# BEFORE (credential displacement)
+[INFO] Loading existing orders from exchange...
+[INFO] ✅ Loaded 7 existing orders for ETHUSDT  # ❌ From ADA account
+
+# AFTER (correct separation)  
+[INFO] Buy order placed successfully: DRA_1754434324_buy_ETHUSDT -> 179595936933
+[INFO] 💰 Balance updated: $164.90 → $147.13  # ✅ Correct ETH account
+```
+
+**Prevention:**
+- Always verify environment files in build locations match intended credentials
+- Use separate build directories for different bot accounts
+- Test credential separation before production deployment
+- Regular audit of all credential storage locations
+
+**Fixed in commit:** [Current commit] - Complete credential separation and documentation
+
 ### Problem: API Error 3007 - Funding Fee Settlement Period
 **Symptoms:**
 ```
@@ -552,6 +619,10 @@ export LOG_LEVEL=DEBUG
   - 8269c92: Fixed critical order tracking errors and API signature issues
   - WebSocket compression and authentication fixes
   - Process lock implementation
+  - **2025-08-05**: Fixed critical credential displacement between bot accounts
+    - External SSD environment files credential correction
+    - Docker image credential separation and cleanup
+    - Complete multi-bot deployment credential isolation
 
 ## Contributing
 

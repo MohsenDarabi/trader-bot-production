@@ -222,3 +222,228 @@ Default limits in docker-compose.yml:
 - **Logs not persisting**: Ensure `./logs` directory exists
 
 For more troubleshooting, see `TROUBLESHOOTING.md`
+
+## **📦 New Build and Deploy Method (2025)**
+
+### **🚀 Optimized Build Process**
+This new method significantly reduces Docker image size by excluding unnecessary files and using efficient compression:
+
+```bash
+# 1. Build with improved .dockerignore (excludes .tar.gz files)
+cd /Volumes/External_ssd_mohsen/docker-builds/trader-bot
+docker build --platform linux/amd64 -t trader-bot-final:amd64 /path/to/trader-bot-production
+
+# 2. Save with efficient compression (results in ~300MB vs 5GB)
+docker save trader-bot-final:amd64 | gzip > trader-bot-final-amd64.tar.gz
+
+# 3. Deploy to VM
+scp -i ssh-key.key trader-bot-final-amd64.tar.gz user@vm:/tmp/
+ssh -i ssh-key.key user@vm "sudo docker load < /tmp/trader-bot-final-amd64.tar.gz"
+```
+
+### **🔧 What Makes This Method Better**
+
+**Updated .dockerignore excludes:**
+```bash
+# Archive files (CRITICAL for size reduction)
+*.tar.gz
+*.tar
+*.zip
+
+# Temporary and build files
+tmp/
+temp/
+logs/
+*.log
+*.lock
+```
+
+**Key Improvements:**
+- **Size Reduction**: 300MB vs 5GB (95% reduction)
+- **Faster Transfers**: Optimized compression using `gzip`
+- **Build Exclusions**: `.tar.gz` files are excluded from Docker context
+- **External SSD**: Build location moved to avoid local disk space issues
+- **Architecture Specific**: `--platform linux/amd64` for VM compatibility
+
+### **📋 Complete Deployment Workflow**
+
+```bash
+# Step 1: Clean up old builds
+docker system prune -f
+rm -f /Volumes/External_ssd_mohsen/docker-builds/trader-bot/*.tar.gz
+
+# Step 2: Build with latest code
+cd /Volumes/External_ssd_mohsen/docker-builds/trader-bot
+docker build --platform linux/amd64 -t trader-bot-final:amd64 /Users/path/trader-bot-production
+
+# Step 3: Create compressed archive
+docker save trader-bot-final:amd64 | gzip > trader-bot-final-amd64.tar.gz
+
+# Step 4: Deploy to VM
+./deploy-final.sh  # Uses the deployment script
+
+# Step 5: Verify deployment
+ssh -i ssh-key.key user@vm "sudo docker ps | grep eth-bot"
+```
+
+### **🛠️ Deployment Script Template**
+
+```bash
+#!/bin/bash
+# Deploy script with latest method
+
+VM_HOST="your-vm-ip"
+VM_USER="ubuntu"
+SSH_KEY="ssh-key.key"
+DOCKER_IMAGE="/path/to/trader-bot-final-amd64.tar.gz"
+
+# Upload and deploy
+scp -i "$SSH_KEY" "$DOCKER_IMAGE" "$VM_USER@$VM_HOST:/tmp/"
+ssh -i "$SSH_KEY" "$VM_USER@$VM_HOST" '
+    sudo docker load < /tmp/trader-bot-final-amd64.tar.gz
+    sudo docker stop eth-bot || true
+    sudo docker rm eth-bot || true
+    sudo docker run -d --name eth-bot --restart unless-stopped \
+        --env-file .env.eth \
+        --volume $(pwd)/logs:/app/logs \
+        --volume $(pwd)/data:/app/data \
+        trader-bot-final:amd64 python main.py ETHUSDT
+'
+```
+
+### **⚡ Benefits Summary**
+- **95% smaller** Docker images
+- **Faster** build and transfer times  
+- **No storage crashes** on local machine
+- **Automated** exclusion of build artifacts
+- **VM compatible** architecture builds
+- **Efficient** gzip compression for transfers
+
+## **🔐 Multi-Bot Credential Management**
+
+### **Environment Variable Setup**
+For managing multiple bots (ADA, ETH) with separate credentials, add to your `~/.zshrc`:
+
+```bash
+# CoinEx API Credentials - Separate accounts for each bot
+export COINEX_API_KEY_ADA="your_ada_access_id"
+export COINEX_API_SECRET_ADA="your_ada_secret_key"
+
+export COINEX_API_KEY_ETH="your_eth_access_id" 
+export COINEX_API_SECRET_ETH="your_eth_secret_key"
+```
+
+Then reload: `source ~/.zshrc`
+
+### **Bot Environment Files**
+
+**ADA Bot (`.env.ada`):**
+```bash
+# Use ADA-specific credentials from environment
+COINEX_ACCESS_ID=${COINEX_API_KEY_ADA}
+COINEX_SECRET_KEY=${COINEX_API_SECRET_ADA}
+DEFAULT_TRADING_MARKET=ADAUSDT
+DATABASE_PATH=./storage/bot_state_ada.db
+```
+
+**ETH Bot (`.env.eth`):**
+```bash
+# Use ETH-specific credentials from environment  
+COINEX_ACCESS_ID=${COINEX_API_KEY_ETH}
+COINEX_SECRET_KEY=${COINEX_API_SECRET_ETH}
+DEFAULT_TRADING_MARKET=ETHUSDT
+DATABASE_PATH=./storage/bot_state_eth.db
+```
+
+### **Deployment Commands**
+
+```bash
+# Deploy ADA bot
+docker run -d --name ada-bot --env-file .env.ada trader-bot-final:amd64 python main.py ADAUSDT
+
+# Deploy ETH bot  
+docker run -d --name eth-bot --env-file .env.eth trader-bot-final:amd64 python main.py ETHUSDT
+
+# Check both bots
+docker ps | grep bot
+docker logs ada-bot --tail 20
+docker logs eth-bot --tail 20
+```
+
+### **Benefits of This Approach**
+- **Clear Separation:** Each bot uses distinct credentials
+- **Environment Management:** Credentials stored securely in shell environment
+- **Easy Switching:** Change credentials by updating environment variables
+- **Documentation:** Clear which credentials belong to which bot
+- **Deployment Safety:** Prevents credential mix-ups during deployment
+
+## **🚨 Critical: Credential Displacement Prevention**
+
+### **Problem Overview**
+Multi-bot deployments can suffer from credential displacement where bots connect to wrong accounts, causing cross-account contamination.
+
+### **Root Causes & Prevention**
+
+**1. External SSD Build Files**
+```bash
+# ❌ WRONG: Build location has displaced credentials
+/Volumes/External_ssd_mohsen/docker-builds/trader-bot/.env.eth  # Contains ADA credentials
+
+# ✅ CORRECT: Verify build location credentials match intended bot
+cat /Volumes/External_ssd_mohsen/docker-builds/trader-bot/.env.eth
+# Should show: COINEX_API_KEY="377EB9E769AB4D0AAC13224A54B37946"  # ETH credentials
+```
+
+**2. Docker Image Credential Contamination**
+```bash
+# ❌ WRONG: Building with contaminated credentials
+docker build -t trader-bot:latest .  # May copy wrong .env files
+
+# ✅ CORRECT: Clean build process
+docker rmi $(docker images | grep trader-bot)  # Remove old images
+docker system prune -f                         # Clean cached layers
+docker build --platform linux/amd64 -t trader-bot-final:amd64 /source/path
+```
+
+**3. Deployment Verification**
+```bash
+# ✅ CORRECT: Verify credential separation after deployment
+ssh user@vm "docker logs eth-bot --tail 20"
+# Should show fresh orders, not existing orders from other account
+
+# Example success indicators:
+# ✅ "Buy order placed successfully: DRA_1754434324_buy_ETHUSDT -> 179595936933"
+# ✅ "Balance updated: $164.90 → $147.13" (correct account balance)
+# ❌ "Loaded 7 existing orders for ETHUSDT" (wrong account)
+```
+
+### **Complete Fix Process**
+```bash
+# 1. Audit all credential locations
+find /build/location -name "*.env*" -exec cat {} \;
+
+# 2. Fix external SSD environment files
+cp /source/env-templates/.env.eth /external/ssd/builds/trader-bot/.env.eth
+cp /source/env-templates/.env.ada /external/ssd/builds/trader-bot/.env.ada
+
+# 3. Clean contaminated Docker images
+docker rmi $(docker images | grep trader-bot | awk '{print $3}')
+docker system prune -f
+
+# 4. Fresh build with correct credentials
+cd /external/ssd/build/location
+docker build --platform linux/amd64 -t trader-bot-final:amd64 /source/path
+docker save trader-bot-final:amd64 | gzip > trader-bot-final-amd64.tar.gz
+
+# 5. Deploy with verification
+./deploy-final.sh
+ssh user@vm "docker logs eth-bot --tail 20"  # Verify correct account connection
+```
+
+### **Regular Maintenance**
+- **Before each deployment**: Verify environment files match intended credentials
+- **After deployment**: Check logs for correct account connection
+- **Monthly audit**: Review all credential storage locations
+- **Test separation**: Run only one bot at a time to verify isolation
+
+**Fixed:** 2025-08-05 - Complete credential separation implemented and verified
