@@ -146,15 +146,8 @@ class OrderManager:
         Returns:
             Order object if successful, None otherwise
         """
-        # CRITICAL SAFETY CHECK: Ensure no existing buy orders before placing new one
-        pending_orders = self.get_pending_orders(market)
-        existing_buy_orders = [o for o in pending_orders if o.side.value == 'buy']
-        
-        if existing_buy_orders:
-            logger.error(f"🚨 SAFETY BLOCK: Cannot place buy order - {len(existing_buy_orders)} existing buy order(s) found for {market}")
-            for order in existing_buy_orders:
-                logger.error(f"   Existing order: {order.client_id} from {order.created_at}")
-            return None
+        # Safety checks are handled by the trading bot's can_place_buy_order() method
+        # Order manager focuses on order execution, not trading logic decisions
         
         # Generate client_id
         client_id = self.generate_client_id(market, OrderSide.BUY)

@@ -207,7 +207,8 @@ class TradingBotManager:
             
             # Get market from command line argument or use default
             import sys
-            self.selected_market = sys.argv[1] if len(sys.argv) > 1 else "BTCUSDT"
+            # Get market from command line or environment variable
+            self.selected_market = sys.argv[1] if len(sys.argv) > 1 else os.getenv('DEFAULT_TRADING_MARKET')
             self.console.print(f"📈 Selected Market: {self.selected_market}", style="cyan")
             
             # Initialize market for trading
@@ -278,12 +279,12 @@ class TradingBotManager:
                             
                             # Wait before next cycle
                             await asyncio.sleep(5)
-                        
-                    except KeyboardInterrupt:
-                        break
-                    except Exception as e:
-                        logger.error(f"Error in bot cycle: {e}", exc_info=True)
-                        await asyncio.sleep(10)  # Wait longer on error
+                            
+                        except KeyboardInterrupt:
+                            break
+                        except Exception as e:
+                            logger.error(f"Error in bot cycle: {e}", exc_info=True)
+                            await asyncio.sleep(10)  # Wait longer on error
                         
         except KeyboardInterrupt:
             pass

@@ -227,29 +227,32 @@ class MarketDataManager:
     
     def is_new_trading_day(self, market: str) -> bool:
         """
-        Check if it's a new trading day (after 00:00 UTC)
+        Check if it's a new trading day or bot startup requiring buy order reset
+        
+        This method enables 24/7 trading while providing clean daily resets.
+        Returns True in two scenarios:
+        1. Regular daily reset: 00:04-00:59 UTC (after funding fee settlement)
+        2. Bot startup: Anytime when no valid buy order exists for current day
         
         Args:
             market: Market symbol
             
         Returns:
-            True if new trading day
+            True if buy orders should be reset for new day trading
         """
-        # Get latest candle
-        df = self.get_daily_candles(market, days=1)
-        if df.empty:
-            return False
+        current_time = datetime.now(timezone.utc)
+        current_hour = current_time.hour
+        current_minute = current_time.minute
         
-        latest_candle_date = df.iloc[0]['date'].date()
-        current_date = datetime.now(timezone.utc).date()
+        # Scenario 1: Regular daily reset window (after settlement period)
+        is_daily_reset_window = current_hour == 0 and 4 <= current_minute <= 59
         
-        # For Daily Range Strategy, we want to generate signals when we have today's candle
-        # This allows us to use yesterday's OHLC data for today's trading signals
-        is_new_day = latest_candle_date >= current_date
+        # TODO: Scenario 2 will be implemented in the trading bot logic
+        # to check for bot startup without valid buy orders
         
-        logger.info(f"Trading day check for {market}: latest_candle={latest_candle_date}, current={current_date}, is_new_day={is_new_day}")
+        logger.info(f"Trading day check for {market}: current_time={current_time.strftime('%H:%M:%S UTC')}, is_daily_reset_window={is_daily_reset_window}")
         
-        return is_new_day
+        return is_daily_reset_window
     
     def get_available_markets(self) -> List[str]:
         """

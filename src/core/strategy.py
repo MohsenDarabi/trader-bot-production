@@ -104,14 +104,22 @@ class DailyRangeStrategy:
                     logger.debug(f"Using cached signal for {market} on {today}")
                     return signal
             
-            # Check if it's a new trading day
-            logger.info(f"🕐 Checking if it's a new trading day for {market} (force={force})")
-            is_new_day = self.market_data.is_new_trading_day(market)
-            logger.info(f"🕐 New trading day check result: {is_new_day}")
+            # For 24/7 trading: Allow signal generation when needed, not just in daily reset window
+            # The trading bot will handle when to use these signals appropriately
+            logger.info(f"🕐 Checking signal generation conditions for {market} (force={force})")
+            is_daily_reset_window = self.market_data.is_new_trading_day(market)
             
-            if not force and not is_new_day:
-                logger.info(f"Not a new trading day for {market}, skipping signal generation")
-                return None
+            # Allow signal generation if:
+            # 1. Force flag is set, OR
+            # 2. We're in the daily reset window, OR  
+            # 3. We don't have a signal for today (startup scenario)
+            should_generate = force or is_daily_reset_window or (market not in self._current_signals or self._current_signals[market].date != today)
+            
+            if not should_generate:
+                logger.info(f"Signal generation not needed for {market} - valid signal already exists")
+                return self._current_signals.get(market)
+            
+            logger.info(f"Proceeding with signal generation for {market} (force={force}, daily_reset={is_daily_reset_window})")
             
             logger.info(f"Generating new signal for {market} - getting previous day OHLC...")
             

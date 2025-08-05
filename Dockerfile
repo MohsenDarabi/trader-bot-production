@@ -14,8 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create logs directory with proper permissions
-RUN mkdir -p logs && chmod 777 logs
+# Create logs and data directories with proper permissions
+RUN mkdir -p logs data && chmod 777 logs data
 
 # Make entrypoint executable
 RUN chmod +x entrypoint.sh || true
@@ -26,6 +26,9 @@ USER botuser
 
 # Set environment
 ENV PYTHONUNBUFFERED=1
-ENV BOT_INSTANCE=development
+ENV BOT_INSTANCE=production
+
+# Create volume mount points
+VOLUME ["/app/logs", "/app/data"]
 
 CMD ["python", "main.py"]

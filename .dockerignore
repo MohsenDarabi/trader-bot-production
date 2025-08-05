@@ -60,3 +60,8 @@ main_trading_bot.lock
 # Temporary files
 tmp/
 temp/
+
+# Archive files
+*.tar.gz
+*.tar
+*.zip

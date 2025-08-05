@@ -23,7 +23,6 @@ class PairingRule:
     """Configuration for buy-sell pairing"""
     market: str
     sell_price_levels: List[float]  # Multiple sell prices for the same buy
-    max_age_minutes: int = 60  # Maximum age for unmatched buy fills
     min_fill_amount: float = 0.001  # Minimum fill amount to create sell order
 
 
@@ -64,20 +63,18 @@ class OrderPairingManager:
         self.order_tracker.add_order_complete_handler(self._handle_order_complete)
     
     def configure_pairing_rule(self, market: str, sell_price_levels: List[float],
-                              max_age_minutes: int = 60, min_fill_amount: float = 0.001) -> None:
+                              min_fill_amount: float = 0.001) -> None:
         """
         Configure pairing rule for a market
         
         Args:
             market: Market symbol
             sell_price_levels: List of sell price levels relative to buy price
-            max_age_minutes: Maximum age for unmatched fills
             min_fill_amount: Minimum fill amount to trigger sell order
         """
         self.pairing_rules[market] = PairingRule(
             market=market,
             sell_price_levels=sell_price_levels,
-            max_age_minutes=max_age_minutes,
             min_fill_amount=min_fill_amount
         )
         logger.info(f"Configured pairing rule for {market}: {len(sell_price_levels)} sell levels")
@@ -100,21 +97,30 @@ class OrderPairingManager:
             fill: Order fill information
         """
         try:
+            logger.info(f"🔄 Handling order fill: {fill.side} {fill.amount} {fill.market} @ ${fill.price}")
+            
             # Only process buy order fills for automatic pairing
-            if fill.side != OrderSide.BUY or not self.auto_pairing_enabled:
+            if fill.side != OrderSide.BUY:
+                logger.info(f"Skipping non-buy fill: {fill.side}")
+                return
+                
+            if not self.auto_pairing_enabled:
+                logger.warning(f"Auto pairing disabled - skipping fill processing")
                 return
             
             # Check if we have pairing rules for this market
             if fill.market not in self.pairing_rules:
-                logger.debug(f"No pairing rule configured for market {fill.market}")
+                logger.error(f"❌ No pairing rule configured for market {fill.market}")
+                logger.error(f"Available pairing rules: {list(self.pairing_rules.keys())}")
                 return
             
             # Check if fill meets minimum amount threshold
             rule = self.pairing_rules[fill.market]
             if fill.amount < rule.min_fill_amount:
-                logger.debug(f"Fill amount {fill.amount} below minimum {rule.min_fill_amount}")
+                logger.warning(f"Fill amount {fill.amount} below minimum {rule.min_fill_amount}")
                 return
             
+            logger.info(f"✅ Buy fill qualifies for pairing - creating sell orders with rule: {len(rule.sell_price_levels)} price levels")
             # Create sell orders for this buy fill
             asyncio.create_task(self._create_sell_orders_for_fill(fill, rule))
             
@@ -219,12 +225,6 @@ class OrderPairingManager:
                     continue
                 
                 rule = self.pairing_rules[buy_order.market]
-                
-                # Check if buy order is too old
-                age_minutes = (datetime.now() - buy_order.updated_at).total_seconds() / 60
-                if age_minutes > rule.max_age_minutes:
-                    logger.warning(f"Buy order {buy_order.order_id} is too old ({age_minutes:.1f}min), skipping")
-                    continue
                 
                 # Calculate remaining amount that needs sell orders
                 remaining_amount = pair.get_remaining_buy_amount()
@@ -355,3 +355,56 @@ class OrderPairingManager:
         except Exception as e:
             logger.error(f"Error in emergency balance check: {e}")
             return []
+    
+    async def check_and_handle_stale_sell_orders(self, max_sell_age_hours: float = 24.0) -> int:
+        """
+        Check for stale sell orders and handle them appropriately
+        
+        Args:
+            max_sell_age_hours: Maximum age in hours for a sell order before considering it stale
+            
+        Returns:
+            Number of stale sell orders found
+        """
+        stale_count = 0
+        
+        try:
+            current_time = datetime.now()
+            
+            # Check all order pairs
+            for pair in self.order_tracker.order_pairs.values():
+                for sell_order in pair.sell_orders:
+                    # Skip if order is already filled or cancelled
+                    if sell_order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED]:
+                        continue
+                    
+                    # Calculate order age
+                    order_age_hours = (current_time - sell_order.created_at).total_seconds() / 3600
+                    
+                    # Check if order is stale
+                    if order_age_hours > max_sell_age_hours:
+                        stale_count += 1
+                        
+                        # Log stale order information
+                        logger.warning(
+                            f"Stale sell order detected: {sell_order.order_id} "
+                            f"({order_age_hours:.1f} hours old, "
+                            f"filled: {sell_order.filled_amount}/{sell_order.original_amount})"
+                        )
+                        
+                        # Log additional context
+                        if sell_order.status == OrderStatus.PARTIAL:
+                            fill_percentage = (sell_order.filled_amount / sell_order.original_amount) * 100
+                            logger.info(
+                                f"Stale sell order is {fill_percentage:.1f}% filled. "
+                                f"Market: {sell_order.market}, Price: {sell_order.price}"
+                            )
+            
+            if stale_count > 0:
+                logger.warning(f"Found {stale_count} stale sell orders")
+            
+            return stale_count
+            
+        except Exception as e:
+            logger.error(f"Error checking stale sell orders: {e}")
+            return 0

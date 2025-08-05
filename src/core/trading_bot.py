@@ -488,14 +488,24 @@ class DailyRangeBot:
                 logger.error(f"Critical error configuring leverage for {market}: {e}")
                 raise ValueError(f"Cannot proceed without resolving leverage configuration: {e}")
             
-            # Configure pairing rules for this market
-            # Daily Range Strategy: One sell price per buy order (signal.sell_price)
-            self.pairing_manager.configure_pairing_rule(
-                market=market,
-                sell_price_levels=[],  # Will use signal.sell_price directly for each buy-sell pair
-                max_age_minutes=120,  # 2 hours max age for unmatched fills
-                min_fill_amount=0.001  # Minimum fill to trigger sell orders
-            )
+            # Get current trading signal to configure pairing rule
+            current_signal = self.strategy.get_current_signal(market)
+            if current_signal:
+                # Configure pairing rules with current signal's sell price
+                self.pairing_manager.configure_pairing_rule(
+                    market=market,
+                    sell_price_levels=[current_signal.sell_price],  # Use today's strategy sell price
+                    min_fill_amount=0.001  # Minimum fill to trigger sell orders
+                )
+                logger.info(f"Configured pairing rules for {market} with sell price ${current_signal.sell_price:.2f}")
+            else:
+                # Fallback: configure empty pairing rule, will be updated when signal is generated
+                self.pairing_manager.configure_pairing_rule(
+                    market=market,
+                    sell_price_levels=[],  # Will be updated when signal is generated
+                    min_fill_amount=0.001  # Minimum fill to trigger sell orders
+                )
+                logger.warning(f"No current signal for {market}, pairing rule will be updated when signal is generated")
             
             logger.info(f"Configured pairing rules for {market} with Daily Range Strategy (one sell price per buy)")
             
@@ -619,6 +629,15 @@ class DailyRangeBot:
                 self.last_signal_generation[market] = now
                 self.status.last_signal_time = now
                 log_trading_event('signal_generation', f"Generated signal for {market}: Buy=${signal.buy_price:.2f}, Sell=${signal.sell_price:.2f}")
+                
+                # Update pairing rule with new signal's sell price
+                if self.pairing_manager:
+                    self.pairing_manager.configure_pairing_rule(
+                        market=market,
+                        sell_price_levels=[signal.sell_price],  # Use new signal's sell price
+                        min_fill_amount=0.001  # Minimum fill to trigger sell orders
+                    )
+                    logger.info(f"Updated pairing rule for {market} with new sell price ${signal.sell_price:.2f}")
             else:
                 logger.warning(f"Failed to generate signal for {market}")
     
@@ -661,29 +680,9 @@ class DailyRangeBot:
             if not current_price:
                 return
             
-            # First priority: Check if we have existing position that needs sell orders
-            balance = self._calculate_position_sell_balance(market)
-            if balance['position_exists']:
-                # Only log position if state changed
-                if self._should_log_state_change(market, 'position_in_entry_check', balance['position_size']):
-                    log_trading_event('position_found', f"🎯 Found existing position in {market}: {balance['position_size']:.6f}")
-                
-                if not balance['is_balanced']:
-                    # Only log imbalance if state changed
-                    imbalance_key = f"missing_sell_{balance['missing_sell']:.6f}"
-                    if self._should_log_state_change(market, imbalance_key, True):
-                        log_trading_event('position_imbalance', f"⚠️ Position needs sell orders: missing {balance['missing_sell']:.6f} for {market}")
-                    
-                    # Place missing sell order for existing position
-                    if self._place_missing_sell_order(market, balance['missing_sell']):
-                        log_trading_event('sell_order', f"✅ Placed missing sell order for existing position in {market}")
-                    else:
-                        log_trading_event('sell_order_error', f"❌ Failed to place missing sell order for {market}")
-                else:
-                    # Only log balanced state if it changed
-                    balance_key = f"balanced_with_{len(balance['sell_orders'])}_orders"
-                    if self._should_log_state_change(market, balance_key, True):
-                        log_trading_event('position_balance', f"✅ Position properly balanced with {len(balance['sell_orders'])} sell orders for {market}")
+            # DISABLED: Position balancing logic completely removed to prevent dangerous bug
+            # This was causing the bot to place buy orders despite pending sells
+            # All position balancing should be handled manually
                 
             
             # Second priority: Check for new buy opportunities
@@ -999,11 +998,29 @@ class DailyRangeBot:
             # Get all pending orders for this market
             pending_orders = self.order_manager.get_pending_orders(market)
             
+            # Debug logging to understand order counts
+            if len(pending_orders) > 0:
+                logger.info(f"📊 Analyzing {len(pending_orders)} total pending orders for {market}")
+            
             # Filter for sell orders placed today
-            today_pending_sells = [
-                order for order in pending_orders
-                if order.side == OrderSide.SELL and order.created_at.date() == today
-            ]
+            today_pending_sells = []
+            yesterday_sells = []
+            today_buys = []
+            
+            for order in pending_orders:
+                if order.side == OrderSide.SELL:
+                    if order.created_at.date() == today:
+                        today_pending_sells.append(order)
+                    else:
+                        yesterday_sells.append(order)
+                elif order.side == OrderSide.BUY and order.created_at.date() == today:
+                    today_buys.append(order)
+            
+            # Log summary if there are any orders
+            if yesterday_sells:
+                logger.info(f"  └─ {len(yesterday_sells)} sell orders from previous days (ignored)")
+            if today_buys:
+                logger.info(f"  └─ {len(today_buys)} buy orders from today")
             
             sell_count = len(today_pending_sells)
             
@@ -1030,6 +1047,13 @@ class DailyRangeBot:
     def _should_place_buy_order(self, market: str, signal: TradingSignal, current_price: float) -> bool:
         """Buy order decision using fresh exchange data with day-start cancellation and funding fee protection"""
         
+        # EMERGENCY SAFETY CHECK: Absolutely block if ANY pending sells from today exist
+        emergency_pending_sells = self._get_today_pending_sell_orders(market)
+        if emergency_pending_sells > 0:
+            logger.error(f"🚨 EMERGENCY BLOCK: {emergency_pending_sells} pending sell orders from today - CANNOT PLACE BUY for {market}")
+            log_trading_event('emergency_block', f"🚨 Emergency safety check blocked buy - {emergency_pending_sells} today's pending sells for {market}")
+            return False
+        
         # Phase 0: Funding fee protection check
         from src.utils.settlement_handler import is_settlement_period, is_approaching_settlement
         
@@ -1046,40 +1070,88 @@ class DailyRangeBot:
             return False
         
         # Phase 1: Day-start cancellation check (respecting settlement periods)
-        # Check if it's a new day and cancel old buy orders if needed
-        is_new_day = self.market_data.is_new_trading_day(market)
-        if is_new_day:
-            logger.info(f"🌅 New trading day detected for {market} - checking for old buy orders to cancel")
+        # Check for two scenarios: regular daily reset OR startup without valid buy orders
+        is_daily_reset = self.market_data.is_new_trading_day(market)
+        
+        # Get current buy orders to check startup scenario
+        current_buy_status = self._get_exchange_buy_status(market)
+        all_buy_orders = current_buy_status.get('all_buy_orders', [])
+        today = datetime.now(timezone.utc).date()
+        
+        # Check if we have valid buy orders for today (startup scenario)
+        valid_today_orders = [order for order in all_buy_orders if order.created_at.date() == today]
+        has_buy_orders_today = len(valid_today_orders) > 0
+        
+        # CRITICAL: Also check for sell orders from today 
+        has_sell_orders_today = self._get_today_pending_sell_orders(market) > 0
+        
+        # Only safe for startup scenario if bot hasn't traded today (no buy OR sell orders from today)
+        # AND there are old orders that need cleaning up
+        is_startup_without_valid_orders = (
+            len(all_buy_orders) > 0 and  # There are old orders to clean up
+            not has_buy_orders_today and  # No buy orders from today
+            not has_sell_orders_today     # No sell orders from today - bot hasn't traded today
+        )
+        
+        # Determine if we need to cancel orders
+        should_cancel_orders = is_daily_reset or is_startup_without_valid_orders
+        
+        if should_cancel_orders:
+            if is_daily_reset:
+                logger.info(f"🌅 Daily reset window detected for {market} - checking for old buy orders to cancel")
+            elif is_startup_without_valid_orders:
+                logger.info(f"🚀 Bot startup detected for {market} - no trading activity today (no buy orders: {not has_buy_orders_today}, no sell orders: {not has_sell_orders_today}), cancelling old orders")
             
             # Don't cancel orders during settlement periods
             if is_settlement_period() or is_approaching_settlement():
-                logger.info(f"⏳ Day-start cleanup delayed - waiting for settlement period to end for {market}")
-                log_trading_event('settlement_delay', f"Day-start cleanup delayed due to settlement period for {market}")
+                logger.info(f"⏳ Order cleanup delayed - waiting for settlement period to end for {market}")
+                log_trading_event('settlement_delay', f"Order cleanup delayed due to settlement period for {market}")
                 return False
             
-            # Get current buy orders before making decision
-            current_buy_status = self._get_exchange_buy_status(market)
-            old_orders = current_buy_status.get('all_buy_orders', [])
-            
-            if old_orders:
-                today = datetime.now(timezone.utc).date()
+            if len(all_buy_orders) > 0:
                 cancelled_count = 0
                 
-                for order in old_orders:
-                    if order.created_at.date() < today:
+                for order in all_buy_orders:
+                    # Cancel orders from previous days OR all orders in startup scenario
+                    should_cancel = (is_daily_reset and order.created_at.date() < today) or is_startup_without_valid_orders
+                    
+                    if should_cancel:
                         try:
-                            logger.info(f"🗑️ Cancelling yesterday's buy order: {order.client_id} from {order.created_at.date()}")
+                            action = "old" if order.created_at.date() < today else "existing"
+                            logger.info(f"🗑️ Cancelling {action} buy order: {order.client_id} from {order.created_at.date()}")
                             if self.order_manager.cancel_order(order.client_id):
                                 cancelled_count += 1
-                                log_trading_event('day_start_cleanup', f"Cancelled old buy order {order.client_id} from {order.created_at.date()}")
+                                log_trading_event('order_cleanup', f"Cancelled {action} buy order {order.client_id} from {order.created_at.date()}")
                         except Exception as e:
-                            logger.error(f"Failed to cancel old buy order {order.client_id}: {e}")
+                            logger.error(f"Failed to cancel buy order {order.client_id}: {e}")
                 
                 if cancelled_count > 0:
-                    logger.info(f"✅ Day-start cleanup: Cancelled {cancelled_count} old buy orders for {market}")
+                    cleanup_type = "Daily reset" if is_daily_reset else "Startup"
+                    logger.info(f"✅ {cleanup_type} cleanup: Cancelled {cancelled_count} buy orders for {market}")
                     # Small delay to let cancellations process
                     import time
                     time.sleep(0.5)
+        
+        # Phase 1.5: Check for orphaned positions after cleanup
+        if should_cancel_orders:
+            try:
+                # Check for positions without corresponding sell orders
+                balance = self._calculate_position_sell_balance(market)
+                if balance['position_exists'] and balance['missing_sell'] > 0.000001:
+                    logger.info(f"🔧 Orphaned position detected for {market}: {balance['missing_sell']:.6f} uncovered, "
+                               f"position: {balance['position_size']:.6f}, sells: {balance['total_sells']:.6f}")
+                    
+                    # Place missing sell order using existing smart pricing logic
+                    success = self._place_missing_sell_order(market, balance['missing_sell'])
+                    if success:
+                        logger.info(f"✅ Missing sell order placed for orphaned position in {market}")
+                        log_trading_event('orphaned_position_fix', f"Placed missing sell order for {balance['missing_sell']:.6f} {market}")
+                    else:
+                        logger.error(f"❌ Failed to place missing sell order for orphaned position in {market}")
+                        log_trading_event('orphaned_position_fail', f"Failed to place missing sell order for {market}")
+                        
+            except Exception as e:
+                logger.error(f"Error checking for orphaned positions in {market}: {e}")
         
         # Use direct exchange queries for single source of truth
         buy_status = self._get_exchange_buy_status(market)
@@ -1139,17 +1211,9 @@ class DailyRangeBot:
             logger.info(f"🌅 First buy order of the day allowed for {market}")
             log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
             
-            # Balance any existing positions before placing new buy
-            balance = self._calculate_position_sell_balance(market)
-            if balance['position_exists'] and not balance['is_balanced']:
-                log_trading_event('position_balance', f"🔧 Position unbalanced: {balance['position_size']:.6f} position vs {balance['total_sells']:.6f} sells for {market}")
-                log_trading_event('missing_sell', f"🔧 Placing missing sell order: {balance['missing_sell']:.6f} for {market}")
-                
-                if self._place_missing_sell_order(market, balance['missing_sell']):
-                    log_trading_event('sell_order', f"✅ Missing sell order placed for existing position in {market}")
-                else:
-                    log_trading_event('sell_order_error', f"❌ Failed to place missing sell order for {market}")
-                    return False  # Don't place buy if we can't balance the position
+            # DISABLED: Position balancing logic removed to prevent bugs
+            # The bot should only place buy orders when no pending sells exist from today
+            # Any position imbalances should be handled manually or through separate recovery logic
             
         else:
             # Already placed buy today and no cycle completion - block additional buys
@@ -1485,8 +1549,17 @@ class DailyRangeBot:
             if unmatched_count > 0:
                 logger.info(f"Processed {unmatched_count} unmatched buy fills")
             
-            # Periodic emergency balance check (every 10 minutes)
+            # Check for stale sell orders (every hour)
             now = datetime.now(timezone.utc)
+            if not hasattr(self, '_last_stale_check'):
+                self._last_stale_check = now
+            elif (now - self._last_stale_check).seconds > 3600:  # 1 hour
+                stale_count = await self.pairing_manager.check_and_handle_stale_sell_orders()
+                if stale_count > 0:
+                    logger.warning(f"Found {stale_count} stale sell orders")
+                self._last_stale_check = now
+            
+            # Periodic emergency balance check (every 10 minutes)
             if not hasattr(self, '_last_balance_check'):
                 self._last_balance_check = now
             elif (now - self._last_balance_check).seconds > 600:  # 10 minutes
