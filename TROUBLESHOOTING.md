@@ -338,6 +338,76 @@ docker save trader-bot-final:amd64 | gzip > trader-bot-final-amd64.tar.gz
 
 **Fixed in commit:** [Current commit] - Complete credential separation and documentation
 
+### Problem: Missing Position Detection After Bot Restart - CRITICAL
+**Symptoms:**
+- Bot restarts and places new buy order despite existing uncovered position
+- Duplicate positions created instead of placing missing sell orders
+- Bot doesn't recognize existing positions without corresponding sell orders
+- Multiple buy orders accumulate over restarts
+
+**Root Cause:**
+Position detection logic had critical gaps:
+1. **Orphaned position detection only ran during cleanup phases** (day reset or startup with old orders)
+2. **Normal buy flow had NO position checking** despite comment claiming otherwise
+3. **Position balancing logic was completely DISABLED** (lines 683-686, 1214-1216)
+4. **Second restart scenario**: No cleanup triggered → No position check → Duplicate buy order
+
+**Example Bug Scenario:**
+```
+First restart:  ETH bot → places buy order → order fills → creates position
+Second restart: No old orders to clean up → Cleanup phase SKIPPED
+                → Position detection SKIPPED → Places duplicate buy order
+Result:         Two positions instead of missing sell order
+```
+
+**Complete Fix Applied:**
+```python
+# 1. Independent position check for ALL scenarios (Phase 1.9)
+if not should_cancel_orders:  # When cleanup didn't run
+    balance = self._calculate_position_sell_balance(market)
+    if balance['position_exists'] and balance['missing_sell'] > 0.000001:
+        # Place missing sell order, delay buy until covered
+        return False
+
+# 2. Position check before cycle completion buys
+if cycle_complete_flag:
+    balance = self._calculate_position_sell_balance(market)
+    if balance['position_exists']:
+        # Handle position first, delay cycle buy
+        return False
+
+# 3. Position check before daily first buy
+elif not has_today_buy:
+    balance = self._calculate_position_sell_balance(market)
+    if balance['position_exists']:
+        # Handle position first, delay first buy
+        return False
+```
+
+**Fix Strategy:**
+- **DELAY (not block)** buy orders when uncovered positions exist
+- **Place missing sell orders first**, then allow buy orders in next cycle
+- **Maintains trading flow** while ensuring position safety
+- **Preserves all existing safety logic** (pending sell blocks, funding fee protection, etc.)
+
+**Verification Steps:**
+1. **Restart with uncovered position**: Should detect position and place missing sell order
+2. **Second cycle**: Position now covered, allows normal buy order
+3. **No duplicate positions**: Never places buy while positions are uncovered
+4. **All existing protections maintained**: Pending sell blocking still works
+
+**Log Indicators:**
+```
+# SUCCESS: Position detected and handled
+[INFO] 🔧 Independent position check: Uncovered position detected for ETHUSDT: 0.001000 uncovered
+[INFO] ✅ Missing sell order placed during independent check - buy can proceed next cycle
+
+# THEN: Buy order proceeds in next cycle
+[INFO] 🌅 First buy order of the day allowed for ETHUSDT
+```
+
+**Fixed in commit:** [Current commit] - Critical position detection restored with delayed buy logic
+
 ### Problem: API Error 3007 - Funding Fee Settlement Period
 **Symptoms:**
 ```

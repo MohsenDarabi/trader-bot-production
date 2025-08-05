@@ -1156,6 +1156,29 @@ class DailyRangeBot:
         # Use direct exchange queries for single source of truth
         buy_status = self._get_exchange_buy_status(market)
         
+        # Phase 1.9: Independent position check for ALL scenarios (startup, restart, normal operation)
+        # This runs regardless of cleanup phase to catch uncovered positions
+        if not should_cancel_orders:  # Only when cleanup phase didn't already handle this
+            try:
+                balance = self._calculate_position_sell_balance(market)
+                if balance['position_exists'] and balance['missing_sell'] > 0.000001:
+                    logger.info(f"🔧 Independent position check: Uncovered position detected for {market}: "
+                               f"{balance['missing_sell']:.6f} uncovered, position: {balance['position_size']:.6f}")
+                    
+                    # Place missing sell order using existing logic
+                    success = self._place_missing_sell_order(market, balance['missing_sell'])
+                    if success:
+                        logger.info(f"✅ Missing sell order placed during independent check - buy can proceed next cycle")
+                        log_trading_event('independent_position_fix', f"Independent check placed missing sell order for {balance['missing_sell']:.6f} {market}")
+                    else:
+                        logger.error(f"❌ Failed to place missing sell order during independent check")
+                        log_trading_event('independent_position_fail', f"Independent check failed to place missing sell order for {market}")
+                    
+                    return False  # Delay buy order until position is properly covered
+                        
+            except Exception as e:
+                logger.error(f"Error during independent position check for {market}: {e}")
+        
         # Phase 2: Check for pending sell orders from today
         today_pending_sells = self._get_today_pending_sell_orders(market)
         if today_pending_sells > 0:
@@ -1198,6 +1221,23 @@ class DailyRangeBot:
             # Clear the flag once we use it
             self._cycle_completion_flags[market] = False
             
+            # CRITICAL: Check for uncovered positions even after cycle completion
+            balance = self._calculate_position_sell_balance(market)
+            if balance['position_exists'] and balance['missing_sell'] > 0.000001:
+                logger.info(f"⏳ Delaying cycle buy - uncovered position detected for {market}: "
+                           f"{balance['missing_sell']:.6f} uncovered, position: {balance['position_size']:.6f}")
+                
+                # Place missing sell order using existing logic
+                success = self._place_missing_sell_order(market, balance['missing_sell'])
+                if success:
+                    logger.info(f"✅ Missing sell order placed for uncovered position - cycle buy can proceed next trading cycle")
+                    log_trading_event('uncovered_position_fix', f"Placed missing sell order for {balance['missing_sell']:.6f} {market}")
+                else:
+                    logger.error(f"❌ Failed to place missing sell order for uncovered position")
+                    log_trading_event('uncovered_position_fail', f"Failed to place missing sell order for {market}")
+                
+                return False  # Delay buy order until position is properly covered
+            
         elif not has_today_buy:
             # No buy order placed today - but check for pending sells first
             # This ensures we don't place buy if today's sell orders are still pending
@@ -1211,9 +1251,23 @@ class DailyRangeBot:
             logger.info(f"🌅 First buy order of the day allowed for {market}")
             log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
             
-            # DISABLED: Position balancing logic removed to prevent bugs
-            # The bot should only place buy orders when no pending sells exist from today
-            # Any position imbalances should be handled manually or through separate recovery logic
+            # CRITICAL: Check for uncovered positions before allowing buy order
+            # This prevents duplicate buy orders when positions exist without sell orders
+            balance = self._calculate_position_sell_balance(market)
+            if balance['position_exists'] and balance['missing_sell'] > 0.000001:
+                logger.info(f"⏳ Delaying buy order - uncovered position detected for {market}: "
+                           f"{balance['missing_sell']:.6f} uncovered, position: {balance['position_size']:.6f}")
+                
+                # Place missing sell order using existing logic
+                success = self._place_missing_sell_order(market, balance['missing_sell'])
+                if success:
+                    logger.info(f"✅ Missing sell order placed for uncovered position - buy can proceed next cycle")
+                    log_trading_event('uncovered_position_fix', f"Placed missing sell order for {balance['missing_sell']:.6f} {market}")
+                else:
+                    logger.error(f"❌ Failed to place missing sell order for uncovered position")
+                    log_trading_event('uncovered_position_fail', f"Failed to place missing sell order for {market}")
+                
+                return False  # Delay buy order until position is properly covered
             
         else:
             # Already placed buy today and no cycle completion - block additional buys
@@ -1239,7 +1293,7 @@ class DailyRangeBot:
                 log_trading_event('position_sizing', f"❌ Cannot place buy - position sizing invalid: {position_size.reason} for {market}")
             return False
         
-        # All checks passed - no existing position, no pending buy orders
+        # All checks passed - positions are covered, no pending buy orders
         # Reset states when we're ready to buy
         if market in self._logged_states:
             self._logged_states[market] = {}  # Clear logged states for fresh start
