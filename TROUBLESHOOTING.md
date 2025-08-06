@@ -408,6 +408,63 @@ elif not has_today_buy:
 
 **Fixed in commit:** [Current commit] - Critical position detection restored with delayed buy logic
 
+### Problem: Orphaned Position Sell Orders Blocking New Buys
+**Symptoms:**
+- Day reset cancels old buy orders and detects uncovered positions (good)
+- Bot places missing sell orders for orphaned positions (good)
+- Fresh sell orders count as "today's sell orders" and block new buys (bad)
+- Bot gets stuck unable to place new buy orders despite proper position handling
+
+**Root Cause:**
+The `_get_today_pending_sell_orders()` function doesn't distinguish between:
+- **Orphaned position sell orders**: Placed to cover old uncovered positions
+- **Regular trading sell orders**: From today's fresh buy-sell trading cycles
+
+Result: Orphaned position recovery prevents new trading indefinitely.
+
+**Example Scenario:**
+```
+09:00 - Day reset → Cancels old orders
+09:01 - Detects uncovered ETH position from weeks ago
+09:01 - Places sell order to cover orphaned position
+09:02 - Tries to place new buy → BLOCKED by "today's sell order"
+Result: Trading stuck despite correct position handling
+```
+
+**Grace Period Solution Applied:**
+```python
+# When placing orphaned sell order:
+self._orphaned_sell_grace_until[market] = now + timedelta(minutes=10)
+
+# When checking today's sell orders:
+if in_grace_period:
+    # Exclude sells placed during grace period from blocking count
+    return only_regular_sells_count
+```
+
+**Fix Behavior:**
+1. **Orphaned sell placed**: 10-minute grace period starts
+2. **During grace period**: Orphaned sells don't count as blocking sells
+3. **New buys allowed**: Trading resumes immediately
+4. **After 10 minutes**: Normal sell blocking resumes
+
+**Log Indicators:**
+```
+[INFO] ✅ Missing sell order placed for orphaned position
+[INFO] ⏰ Grace period active for 10 minutes - new buys allowed despite orphaned sell
+[INFO] 📊 Grace period active (8 min remaining): 1 total sells, 1 orphaned, 0 blocking
+[INFO] ⏰ Orphaned sells ignored during grace period - new buys allowed
+[INFO] 🌅 First buy order of the day allowed for ETHUSDT
+```
+
+**Benefits:**
+- Allows immediate trading resumption after position recovery
+- Preserves safety for regular trading sell orders
+- Time-limited grace period prevents abuse
+- Works with any position age (weeks old or today's)
+
+**Fixed in commit:** [Current commit] - Grace period for orphaned position sell orders
+
 ### Problem: API Error 3007 - Funding Fee Settlement Period
 **Symptoms:**
 ```
