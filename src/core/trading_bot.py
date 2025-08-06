@@ -267,7 +267,7 @@ class DailyRangeBot:
             logger.info("✓ Connected OrderManager to OrderTracker for automatic order cleanup")
             
             # Establish unified coordination for immediate pairing
-            self.order_manager.set_tracking_coordination(self.order_tracker, self.pairing_manager)
+            self.order_manager.set_tracking_coordination(self.order_tracker, self.pairing_manager, self)
             logger.info("✓ Unified pairing coordination established between OrderManager and tracking system")
             
             # Initialize WebSocket state tracking for reconnection detection
@@ -1691,9 +1691,77 @@ class DailyRangeBot:
                 if imbalanced_markets:
                     logger.error(f"CRITICAL: Position imbalances detected in markets: {imbalanced_markets}")
                 self._last_balance_check = now
+            
+            # Fallback detection for missed fills (every 5 minutes)
+            if not hasattr(self, '_last_missed_fill_check'):
+                self._last_missed_fill_check = now
+            elif (now - self._last_missed_fill_check).seconds > 300:  # 5 minutes
+                await self._check_for_missed_fills()
+                self._last_missed_fill_check = now
                 
         except Exception as e:
             logger.error(f"Error in pairing tasks: {e}")
+    
+    async def _check_for_missed_fills(self):
+        """Check for buy orders that filled but have no corresponding sell orders"""
+        try:
+            logger.debug("🔍 Running fallback detection for missed fills...")
+            
+            for market in self.markets:
+                # Get current position and sell orders
+                balance = self._calculate_position_sell_balance(market)
+                
+                if not balance['position_exists']:
+                    continue
+                    
+                position_size = balance['position_size']
+                total_sells = balance['total_sells']
+                missing_sell = balance['missing_sell']
+                
+                # Check if we have a significant amount missing sell coverage
+                if missing_sell > 0.001:  # More than 0.001 units uncovered
+                    logger.warning(f"🚨 MISSED FILL DETECTED: {market} has {missing_sell:.6f} uncovered position")
+                    logger.warning(f"   Position: {position_size:.6f}, Sell orders: {total_sells:.6f}")
+                    
+                    # Get current signal to determine if we should create sell orders
+                    signal = self.strategy.get_current_signal(market)
+                    if signal and hasattr(signal, 'sell_price'):
+                        logger.info(f"🔧 Creating recovery sell order for missed fill using strategy price: ${signal.sell_price:.2f}")
+                        
+                        # Create sell order for the missing amount
+                        try:
+                            recovery_order = self.order_manager.place_sell_order(
+                                market=market,
+                                amount=missing_sell,
+                                price=signal.sell_price,
+                                position_size=missing_sell * signal.sell_price,
+                                is_hide=True,
+                                is_orphaned=False  # This is a recovery sell, not orphaned
+                            )
+                            
+                            if recovery_order:
+                                logger.info(f"✅ Recovery sell order created: {missing_sell:.6f} {market} @ ${signal.sell_price:.2f}")
+                                
+                                # Track the recovery order
+                                if self.order_tracker:
+                                    self.order_tracker.track_order(
+                                        order_id=str(recovery_order.exchange_order_id),
+                                        client_id=recovery_order.client_id,
+                                        market=market,
+                                        side=OrderSide.SELL,
+                                        amount=missing_sell,
+                                        price=signal.sell_price
+                                    )
+                            else:
+                                logger.error(f"❌ Failed to create recovery sell order for {market}")
+                                
+                        except Exception as e:
+                            logger.error(f"❌ Exception creating recovery sell order for {market}: {e}")
+                    else:
+                        logger.warning(f"⚠️ No valid signal available for {market} recovery sell order")
+                        
+        except Exception as e:
+            logger.error(f"Error in missed fill detection: {e}")
     
     def _handle_balance_update(self, data: Dict[str, Any]):
         """
@@ -2137,18 +2205,8 @@ class DailyRangeBot:
                             except Exception as e:
                                 logger.error(f"Failed to cancel duplicate buy order {order.client_id}: {e}")
                 
-                # Clean up very old sell orders (older than 7 days) that might be stuck
-                week_ago = today - timedelta(days=7)
-                for order in sell_orders:
-                    order_date = order.created_at.date()
-                    if order_date < week_ago:
-                        try:
-                            logger.warning(f"Cancelling very old sell order: {order.client_id} from {order_date} in {market}")
-                            self.order_manager.cancel_order(order.client_id)
-                            market_cancelled += 1
-                            total_cancelled += 1
-                        except Exception as e:
-                            logger.error(f"Failed to cancel old sell order {order.client_id}: {e}")
+                # REMOVED: Sell order cleanup - preserve all existing sell orders
+                # Daily Range Strategy: Sell orders remain until filled (no time limit)
                 
                 if market_cancelled > 0:
                     cleanup_summary.append(f"{market}: {market_cancelled} orders")

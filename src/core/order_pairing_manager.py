@@ -97,12 +97,17 @@ class OrderPairingManager:
             fill: Order fill information
         """
         try:
-            logger.info(f"🔄 Handling order fill: {fill.side} {fill.amount} {fill.market} @ ${fill.price}")
+            logger.info(f"🔄 WebSocket fill received: {fill.side} {fill.amount} {fill.market} @ ${fill.price:.4f} (order_id: {fill.order_id})")
             
-            # Only process buy order fills for automatic pairing
-            if fill.side != OrderSide.BUY:
-                logger.info(f"Skipping non-buy fill: {fill.side}")
+            # Log all fills for debugging purposes
+            if fill.side == OrderSide.SELL:
+                logger.info(f"📤 Sell fill detected (will be skipped for pairing): {fill.amount} {fill.market}")
                 return
+            elif fill.side != OrderSide.BUY:
+                logger.warning(f"⚠️ Unknown fill side: {fill.side} - skipping")
+                return
+                
+            logger.info(f"✅ Processing buy fill for automatic pairing: {fill.amount} {fill.market}")
                 
             if not self.auto_pairing_enabled:
                 logger.warning(f"Auto pairing disabled - skipping fill processing")
@@ -110,17 +115,26 @@ class OrderPairingManager:
             
             # Check if we have pairing rules for this market
             if fill.market not in self.pairing_rules:
-                logger.error(f"❌ No pairing rule configured for market {fill.market}")
-                logger.error(f"Available pairing rules: {list(self.pairing_rules.keys())}")
+                logger.error(f"❌ PAIRING FAILED: No pairing rule configured for market {fill.market}")
+                logger.error(f"   Available pairing rules: {list(self.pairing_rules.keys())}")
+                logger.error(f"   This buy fill will NOT create corresponding sell orders!")
                 return
             
             # Check if fill meets minimum amount threshold
             rule = self.pairing_rules[fill.market]
+            logger.info(f"🔍 Checking pairing rule: min_amount={rule.min_fill_amount}, sell_levels={len(rule.sell_price_levels)}")
+            
             if fill.amount < rule.min_fill_amount:
-                logger.warning(f"Fill amount {fill.amount} below minimum {rule.min_fill_amount}")
+                logger.warning(f"❌ Fill amount {fill.amount} below minimum {rule.min_fill_amount} - skipping pairing")
+                return
+                
+            if not rule.sell_price_levels:
+                logger.error(f"❌ PAIRING FAILED: Empty sell_price_levels for {fill.market}")
+                logger.error(f"   This buy fill will NOT create corresponding sell orders!")
                 return
             
             logger.info(f"✅ Buy fill qualifies for pairing - creating sell orders with rule: {len(rule.sell_price_levels)} price levels")
+            logger.info(f"   Sell price levels: {rule.sell_price_levels}")
             # Create sell orders for this buy fill
             asyncio.create_task(self._create_sell_orders_for_fill(fill, rule))
             
@@ -158,9 +172,18 @@ class OrderPairingManager:
             
             sell_orders_created = []
             
-            for sell_price_multiplier in rule.sell_price_levels:
-                # Calculate sell price
-                sell_price = fill.price * sell_price_multiplier
+            for sell_price_level in rule.sell_price_levels:
+                # Detect if this is an absolute price or a multiplier
+                if sell_price_level > 2.0:
+                    # This is an absolute price from strategy (e.g., $0.76, $3500)
+                    sell_price = sell_price_level
+                    logger.info(f"Using absolute strategy price: ${sell_price:.2f}")
+                else:
+                    # This is a multiplier (e.g., 1.015, 1.02)  
+                    sell_price = fill.price * sell_price_level
+                    logger.info(f"Using multiplier: {sell_price_level} → ${sell_price:.2f}")
+                
+                logger.info(f"Sell price calculation: fill=${fill.price:.2f}, level={sell_price_level}, result=${sell_price:.2f}")
                 
                 try:
                     # Place sell order

@@ -104,11 +104,14 @@ class OrderManager:
         self.order_tracker = None
         self.pairing_manager = None
     
-    def set_tracking_coordination(self, order_tracker, pairing_manager):
-        """Set references to order tracker and pairing manager for unified coordination"""
+    def set_tracking_coordination(self, order_tracker, pairing_manager, trading_bot=None):
+        """Set references to order tracker, pairing manager, and trading bot for unified coordination"""
         self.order_tracker = order_tracker
         self.pairing_manager = pairing_manager
+        self._trading_bot_ref = trading_bot  # Reference for over-selling protection
         logger.info("✅ OrderManager coordination with tracking system established")
+        if trading_bot:
+            logger.info("✅ Trading bot reference established for over-selling protection")
     
     def generate_client_id(self, market: str, side: OrderSide, 
                           timestamp: Optional[int] = None) -> str:
@@ -263,13 +266,24 @@ class OrderManager:
                 logger.info(f"🔄 Immediate fill detected: {filled_amount} {market} @ {last_filled_price} - using unified pairing")
                 
                 # Use the pairing manager's configured sell price if available
-                sell_price = price * 1.015  # Default 1.5% profit
+                sell_price = price * 1.015  # Default 1.5% profit fallback
+                strategy_price_used = False
+                
                 if self.pairing_manager and market in self.pairing_manager.pairing_rules:
                     rule = self.pairing_manager.pairing_rules[market]
                     if rule.sell_price_levels:
-                        # Use the strategy-configured sell price
+                        # Use the strategy-configured absolute sell price
                         sell_price = rule.sell_price_levels[0]
-                        logger.info(f"📊 Using strategy sell price: {sell_price:.2f} for {market}")
+                        strategy_price_used = True
+                        logger.info(f"📊 Using strategy sell price: ${sell_price:.2f} for {market}")
+                    else:
+                        logger.warning(f"⚠️ Empty pairing rule for {market} - using fallback price: ${sell_price:.2f}")
+                else:
+                    logger.warning(f"⚠️ No pairing rule for {market} - using fallback price: ${sell_price:.2f}")
+                
+                # Log the price calculation method for debugging
+                price_method = "strategy absolute price" if strategy_price_used else f"fallback (buy price * 1.015)"
+                logger.info(f"🔢 Sell price calculation: {price_method} = ${sell_price:.2f}")
                 
                 try:
                     # Place coordinated immediate paired sell order
@@ -394,6 +408,35 @@ class OrderManager:
             Order object if successful, None otherwise
         """
         # Profitability validation is handled by the trading bot before calling this method
+        
+        # CRITICAL: Over-selling protection - validate position balance before placing sell order
+        if hasattr(self, '_trading_bot_ref') and self._trading_bot_ref:
+            try:
+                balance = self._trading_bot_ref._calculate_position_sell_balance(market)
+                position_size_actual = balance['position_size']
+                total_sells_current = balance['total_sells']
+                
+                # Check if adding this sell order would exceed position size
+                total_sells_after = total_sells_current + amount
+                if total_sells_after > position_size_actual + 0.000001:  # Small tolerance for rounding
+                    logger.error(f"🚨 OVER-SELLING PREVENTED: Sell order would exceed position size!")
+                    logger.error(f"   Position: {position_size_actual:.6f} {market}")
+                    logger.error(f"   Current sells: {total_sells_current:.6f}")  
+                    logger.error(f"   Requested sell: {amount:.6f}")
+                    logger.error(f"   Would total: {total_sells_after:.6f} (EXCEEDS POSITION)")
+                    
+                    # Adjust amount to fit within position limits
+                    max_allowed = max(0, position_size_actual - total_sells_current)
+                    if max_allowed >= 0.000001:  # Minimum viable amount
+                        logger.warning(f"🔧 Adjusting sell amount from {amount:.6f} to {max_allowed:.6f} to prevent over-selling")
+                        amount = max_allowed
+                    else:
+                        logger.error(f"❌ Cannot place sell order - position fully covered or no position exists")
+                        return None
+                        
+                logger.info(f"✅ Over-selling check passed: {amount:.6f} sell + {total_sells_current:.6f} existing = {amount + total_sells_current:.6f} <= {position_size_actual:.6f} position")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not perform over-selling check: {e} - proceeding with order placement")
         
         # Generate client_id with orphaned marker if needed
         if is_orphaned:
