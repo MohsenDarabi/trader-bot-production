@@ -124,7 +124,8 @@ class TradingCircuitBreaker:
             return 0.0
         
         elapsed = (datetime.now(timezone.utc) - last_time).total_seconds()
-        remaining = max(0, self._cooldown_period - elapsed)
+        cooldown_period = self._get_cooldown_period(action_type, "normal")  # Use default priority for remaining time calc
+        remaining = max(0, cooldown_period - elapsed)
         return remaining
     
     def reset_action(self, market: str, action_type: str) -> None:
@@ -145,12 +146,17 @@ class TradingCircuitBreaker:
         active_cooldowns = {}
         
         for action_key, last_time in self._last_actions.items():
-            remaining = max(0, self._cooldown_period - (now - last_time).total_seconds())
+            # Extract action type from action_key (format: "market_actiontype")
+            parts = action_key.split('_', 1)
+            action_type = parts[1] if len(parts) > 1 else "unknown"
+            cooldown_period = self._get_cooldown_period(action_type, "normal")
+            
+            remaining = max(0, cooldown_period - (now - last_time).total_seconds())
             if remaining > 0:
                 active_cooldowns[action_key] = remaining
         
         return {
-            "cooldown_period_seconds": self._cooldown_period,
+            "default_cooldown_seconds": self._default_cooldown,
             "total_tracked_actions": len(self._last_actions),
             "active_cooldowns": active_cooldowns
         }
@@ -199,8 +205,15 @@ class DailyRangeBot:
         self.pairing_manager: Optional[OrderPairingManager] = None
         
         self.status = BotStatus()
+        
+        # Startup phase tracking for orphaned position checks
+        self.startup_time = datetime.now(timezone.utc)
+        self.startup_phase_duration = 60  # seconds
         self.trading_markets: List[str] = []
         self.last_signal_generation: Dict[str, datetime] = {}
+        
+        # One-time orphaned position check tracking (per market)
+        self._orphaned_positions_checked: Dict[str, bool] = {}
         
         # Trading state
         self._shutdown_requested = False
@@ -252,6 +265,10 @@ class DailyRangeBot:
             # Connect OrderManager to OrderTracker events for synchronized order cleanup
             self.order_tracker.add_order_complete_handler(self.order_manager.handle_order_completion)
             logger.info("✓ Connected OrderManager to OrderTracker for automatic order cleanup")
+            
+            # Establish unified coordination for immediate pairing
+            self.order_manager.set_tracking_coordination(self.order_tracker, self.pairing_manager)
+            logger.info("✓ Unified pairing coordination established between OrderManager and tracking system")
             
             # Initialize WebSocket state tracking for reconnection detection
             self._ws_connection_state = {
@@ -846,6 +863,11 @@ class DailyRangeBot:
                 'total_buy_orders': 0
             }
     
+    def is_startup_phase(self) -> bool:
+        """Check if bot is still in startup phase for orphaned position checks"""
+        elapsed = (datetime.now(timezone.utc) - self.startup_time).total_seconds()
+        return elapsed < self.startup_phase_duration
+    
     def _calculate_position_sell_balance(self, market: str) -> Dict[str, Any]:
         """Calculate position vs sell order balance using proven endpoints"""
         try:
@@ -923,6 +945,23 @@ class DailyRangeBot:
     def _place_missing_sell_order(self, market: str, missing_amount: float) -> bool:
         """Place sell order for missing position coverage with intelligent price adjustment and funding fee protection"""
         try:
+            # CRITICAL: Pre-validate to prevent over-selling
+            current_balance = self._calculate_position_sell_balance(market)
+            if current_balance['position_size'] <= 0:
+                logger.error(f"🚨 Cannot place sell order - no position exists for {market}")
+                return False
+            
+            # Check if adding this sell order would exceed position size
+            total_sells_after = current_balance['total_sells'] + missing_amount
+            if total_sells_after > current_balance['position_size'] + 0.000001:  # Small tolerance for rounding
+                logger.error(f"🚨 OVER-SELLING PREVENTED: Sell order would exceed position size!")
+                logger.error(f"   Position: {current_balance['position_size']:.6f}")
+                logger.error(f"   Current sells: {current_balance['total_sells']:.6f}")
+                logger.error(f"   Requested sell: {missing_amount:.6f}")
+                logger.error(f"   Would total: {total_sells_after:.6f} (EXCEEDS POSITION)")
+                log_trading_event('overselling_prevented', f"Prevented over-selling for {market}: {total_sells_after:.6f} > {current_balance['position_size']:.6f}")
+                return False
+            
             # Funding fee protection check
             from src.utils.settlement_handler import is_settlement_period, is_approaching_settlement
             
@@ -971,6 +1010,18 @@ class DailyRangeBot:
             if order:
                 logger.info(f"✅ Missing sell order placed: {order.client_id}")
                 logger.info(f"📌 Orphaned sell order marked - will not block new buy orders")
+                
+                # CRITICAL: Immediately recalculate position balance with fresh exchange data
+                updated_balance = self._calculate_position_sell_balance(market)
+                logger.info(f"🔄 Position balance updated after order placement:")
+                logger.info(f"   Position: {updated_balance['position_size']:.6f}, "
+                           f"Total sells: {updated_balance['total_sells']:.6f}, "
+                           f"Missing: {updated_balance['missing_sell']:.6f}")
+                
+                # Warn if still missing sell coverage (indicates potential issue)
+                if updated_balance['missing_sell'] > 0.000001:
+                    logger.warning(f"⚠️ Position still partially uncovered after sell placement: "
+                                 f"{updated_balance['missing_sell']:.6f} {market} remaining")
                 
                 # Track the order for automatic pairing
                 if self.order_tracker:
@@ -1174,28 +1225,40 @@ class DailyRangeBot:
         # Use direct exchange queries for single source of truth
         buy_status = self._get_exchange_buy_status(market)
         
-        # Phase 1.9: Independent position check for ALL scenarios (startup, restart, normal operation)
-        # This runs regardless of cleanup phase to catch uncovered positions
-        if not should_cancel_orders:  # Only when cleanup phase didn't already handle this
+        # Phase 1.9: One-time orphaned position check - STARTUP PHASE ONLY
+        # Only check for orphaned positions ONCE during startup, not every cycle
+        if (not should_cancel_orders and self.is_startup_phase() and 
+            not self._orphaned_positions_checked.get(market, False)):
             try:
+                logger.info(f"🔧 Performing one-time orphaned position check for {market}")
                 balance = self._calculate_position_sell_balance(market)
+                
+                # Mark this market as checked regardless of outcome
+                self._orphaned_positions_checked[market] = True
+                
                 if balance['position_exists'] and balance['missing_sell'] > 0.000001:
-                    logger.info(f"🔧 Independent position check: Uncovered position detected for {market}: "
+                    logger.info(f"🔧 Uncovered position detected during startup check for {market}: "
                                f"{balance['missing_sell']:.6f} uncovered, position: {balance['position_size']:.6f}")
                     
                     # Place missing sell order using existing logic
                     success = self._place_missing_sell_order(market, balance['missing_sell'])
                     if success:
-                        logger.info(f"✅ Missing sell order placed during independent check - buy can proceed next cycle")
-                        log_trading_event('independent_position_fix', f"Independent check placed missing sell order for {balance['missing_sell']:.6f} {market}")
+                        logger.info(f"✅ Missing sell order placed during startup check - buy can proceed next cycle")
+                        log_trading_event('startup_position_fix', f"Startup check placed missing sell order for {balance['missing_sell']:.6f} {market}")
                     else:
-                        logger.error(f"❌ Failed to place missing sell order during independent check")
-                        log_trading_event('independent_position_fail', f"Independent check failed to place missing sell order for {market}")
+                        logger.error(f"❌ Failed to place missing sell order during startup check")
+                        log_trading_event('startup_position_fail', f"Startup check failed to place missing sell order for {market}")
                     
                     return False  # Delay buy order until position is properly covered
+                else:
+                    logger.info(f"✅ No orphaned positions detected for {market} during startup check")
                         
             except Exception as e:
-                logger.error(f"Error during independent position check for {market}: {e}")
+                logger.error(f"Error during one-time orphaned position check for {market}: {e}")
+                # Still mark as checked to prevent infinite retries
+                self._orphaned_positions_checked[market] = True
+        elif not should_cancel_orders:
+            logger.debug(f"Startup phase complete - skipping orphaned position check for {market}")
         
         # Phase 2: Check for pending sell orders from today
         today_pending_sells = self._get_today_pending_sell_orders(market)
@@ -1439,12 +1502,9 @@ class DailyRangeBot:
     async def _place_entry_order(self, market: str, side: str, price: float, signal: TradingSignal):
         """Place an entry order"""
         try:
-            # Circuit breaker: Prevent rapid successive order placements (normal priority for standard trading)
+            # Let API response drive decisions, not artificial time delays
             action_type = f"{side}_order"
-            if not self._order_circuit_breaker.should_allow_action(market, action_type, "normal"):
-                remaining = self._order_circuit_breaker.get_remaining_cooldown(market, action_type)
-                logger.info(f"🚧 Order placement blocked by circuit breaker - {remaining:.1f}s remaining cooldown")
-                return
+            logger.debug(f"Placing {action_type} for {market} - using API response for immediate actions")
             
             # CRITICAL: Ensure only ONE buy order exists before placing new one
             if side == 'buy':
@@ -1490,17 +1550,9 @@ class DailyRangeBot:
                     is_hide=True  # Hidden orders for production
                 )
                 
-                # Track the buy order for automatic sell pairing
+                # Order tracking is now handled by the unified system in OrderManager
                 if order:
-                    self.order_tracker.track_order(
-                        order_id=str(order.exchange_order_id),
-                        client_id=order.client_id,
-                        market=market,
-                        side=OrderSide.BUY,
-                        amount=position_size.quantity,
-                        price=adjusted_price
-                    )
-                    log_trading_event('order_tracking', f"Started tracking buy order {order.exchange_order_id} for automatic sell pairing in {market}")
+                    log_trading_event('order_placed', f"Buy order placed {order.exchange_order_id} - unified tracking active in {market}")
             else:
                 # For sell orders, use the traditional approach since this is for closing positions
                 # Note: Normal sell orders don't get price adjustment (as discussed)

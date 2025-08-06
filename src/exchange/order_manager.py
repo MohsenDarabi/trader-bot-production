@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from src.exchange.coinex_client import CoinExClient
+from src.exchange.order_tracker import OrderSide
 from src.core.profitability import ProfitabilityValidator
 from src.utils.logger import get_logger
 from config.settings import ENABLE_REST_API_STATUS_CHECKS, ORDER_STATUS_CHECK_INTERVAL
@@ -98,6 +99,16 @@ class OrderManager:
         self.active_orders: Dict[str, Order] = {}
         self.used_client_ids: Set[str] = set()
         self._last_status_check: Dict[str, datetime] = {}  # Track last status check per order
+        
+        # Coordination with order tracking system for unified pairing
+        self.order_tracker = None
+        self.pairing_manager = None
+    
+    def set_tracking_coordination(self, order_tracker, pairing_manager):
+        """Set references to order tracker and pairing manager for unified coordination"""
+        self.order_tracker = order_tracker
+        self.pairing_manager = pairing_manager
+        logger.info("✅ OrderManager coordination with tracking system established")
     
     def generate_client_id(self, market: str, side: OrderSide, 
                           timestamp: Optional[int] = None) -> str:
@@ -185,17 +196,41 @@ class OrderManager:
                 signal.alarm(0)  # Clear the alarm
                 raise Exception("Order placement timed out - possible API or network issue")
             
-            # Create order object
+            # Extract comprehensive order data from exchange response
+            exchange_amount = float(response.get('amount', amount))
+            exchange_filled = float(response.get('filled_amount', 0))
+            exchange_unfilled = float(response.get('unfilled_amount', amount))
+            
+            # Determine order status based on fill state
+            if exchange_filled > 0 and exchange_filled >= exchange_amount:
+                order_status = OrderStatus.FILLED
+            elif exchange_filled > 0:
+                order_status = OrderStatus.PARTIALLY_FILLED
+            else:
+                order_status = OrderStatus.PENDING
+            
+            # Log exchange vs intended amounts for validation
+            if abs(exchange_amount - amount) > 0.000001:
+                logger.warning(f"⚠️ Exchange modified order amount: intended={amount}, actual={exchange_amount}")
+            
+            # Create order object with exchange-confirmed data
             order = Order(
                 client_id=client_id,
                 market=market,
                 side=OrderSide.BUY,
                 order_type='limit',
-                amount=amount,
+                amount=exchange_amount,  # Use exchange-confirmed amount
                 price=price,
-                status=OrderStatus.PENDING,
-                exchange_order_id=response.get('order_id')
+                status=order_status,     # Use calculated status
+                exchange_order_id=response.get('order_id'),
+                filled_amount=exchange_filled  # Use exchange-confirmed fills
             )
+            
+            # Log comprehensive order state
+            if exchange_filled > 0:
+                logger.info(f"✅ Buy order placed with immediate fill: {client_id} - {exchange_filled}/{exchange_amount} filled")
+            else:
+                logger.info(f"✅ Buy order placed and pending: {client_id} - {exchange_unfilled} unfilled")
             
             # CRITICAL: Validate order was actually created on exchange
             if not order.exchange_order_id:
@@ -205,6 +240,76 @@ class OrderManager:
             
             # Store in active orders
             self.active_orders[client_id] = order
+            
+            # UNIFIED IMMEDIATE PAIRING: Coordinate with tracking system
+            filled_amount = exchange_filled
+            unfilled_amount = exchange_unfilled
+            last_filled_price = float(response.get('last_filled_price', price))
+            
+            # Always track the buy order first
+            if self.order_tracker:
+                self.order_tracker.track_order(
+                    order_id=str(order.exchange_order_id),
+                    client_id=client_id,
+                    market=market,
+                    side=OrderSide.BUY,
+                    amount=exchange_amount,
+                    price=price
+                )
+                logger.info(f"🔗 Buy order tracked: {client_id} -> {order.exchange_order_id}")
+            
+            # Handle immediate fills with unified coordination
+            if filled_amount > 0:
+                logger.info(f"🔄 Immediate fill detected: {filled_amount} {market} @ {last_filled_price} - using unified pairing")
+                
+                # Use the pairing manager's configured sell price if available
+                sell_price = price * 1.015  # Default 1.5% profit
+                if self.pairing_manager and market in self.pairing_manager.pairing_rules:
+                    rule = self.pairing_manager.pairing_rules[market]
+                    if rule.sell_price_levels:
+                        # Use the strategy-configured sell price
+                        sell_price = rule.sell_price_levels[0]
+                        logger.info(f"📊 Using strategy sell price: {sell_price:.2f} for {market}")
+                
+                try:
+                    # Place coordinated immediate paired sell order
+                    paired_sell = self.place_sell_order(
+                        market=market,
+                        amount=filled_amount,
+                        price=sell_price,
+                        position_size=filled_amount * sell_price,
+                        is_hide=True,
+                        is_paired=True  # Mark as immediate pair
+                    )
+                    
+                    if paired_sell and self.order_tracker:
+                        # Track the paired sell order and link it to the buy order
+                        self.order_tracker.track_order(
+                            order_id=str(paired_sell.exchange_order_id),
+                            client_id=paired_sell.client_id,
+                            market=market,
+                            side=OrderSide.SELL,
+                            amount=filled_amount,
+                            price=sell_price
+                        )
+                        
+                        # Link sell order to buy order for coordinated tracking
+                        self.order_tracker.link_sell_order_to_buy(
+                            sell_order_id=str(paired_sell.exchange_order_id),
+                            buy_order_id=str(order.exchange_order_id)
+                        )
+                        
+                        logger.info(f"✅ Unified pairing completed: {filled_amount} @ {last_filled_price:.2f} → sell @ {sell_price:.2f}")
+                        logger.info(f"🔗 Paired orders linked: buy {order.exchange_order_id} ↔ sell {paired_sell.exchange_order_id}")
+                    else:
+                        logger.error(f"❌ Failed to place or track immediate paired sell for {filled_amount} {market}")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Exception during unified immediate pairing for {filled_amount} {market}: {e}")
+            
+            # Handle unfilled portion - will be managed by WebSocket events
+            if unfilled_amount > 0:
+                logger.info(f"📊 Unfilled portion {unfilled_amount} {market} will be handled by WebSocket pairing")
             
             # Enhanced validation: verify order exists on exchange with retry logic
             validation_success = False
@@ -272,7 +377,7 @@ class OrderManager:
     
     @settlement_retry
     def place_sell_order(self, market: str, amount: float, price: float,
-                        position_size: float, is_hide: bool = True, is_orphaned: bool = False) -> Optional[Order]:
+                        position_size: float, is_hide: bool = True, is_orphaned: bool = False, is_paired: bool = False) -> Optional[Order]:
         """
         Place a sell order with profitability validation
         
@@ -282,6 +387,8 @@ class OrderManager:
             price: Limit price
             position_size: Position size for validation
             is_hide: Whether to hide order from public order book
+            is_orphaned: Whether this is an orphaned position sell order
+            is_paired: Whether this is an immediate paired sell order from buy fill
             
         Returns:
             Order object if successful, None otherwise
@@ -297,7 +404,13 @@ class OrderManager:
         else:
             client_id = self.generate_client_id(market, OrderSide.SELL)
         
-        logger.info(f"Placing sell order: {market} {amount} @ ${price:.2f} [{client_id}]")
+        # Enhanced logging based on sell order type
+        if is_paired:
+            logger.info(f"🔗 Placing immediate paired sell order: {market} {amount} @ ${price:.2f} [{client_id}]")
+        elif is_orphaned:
+            logger.info(f"📍 Placing orphaned position sell order: {market} {amount} @ ${price:.2f} [{client_id}]")
+        else:
+            logger.info(f"📤 Placing regular sell order: {market} {amount} @ ${price:.2f} [{client_id}]")
         
         try:
             # Format order parameters with proper precision
@@ -314,17 +427,45 @@ class OrderManager:
                 is_hide=is_hide
             )
             
-            # Create order object
+            # Extract comprehensive order data from exchange response
+            exchange_amount = float(response.get('amount', amount))
+            exchange_filled = float(response.get('filled_amount', 0))
+            exchange_unfilled = float(response.get('unfilled_amount', amount))
+            
+            # Determine order status based on fill state
+            if exchange_filled > 0 and exchange_filled >= exchange_amount:
+                order_status = OrderStatus.FILLED
+            elif exchange_filled > 0:
+                order_status = OrderStatus.PARTIALLY_FILLED
+            else:
+                order_status = OrderStatus.PENDING
+            
+            # Log exchange vs intended amounts for validation
+            if abs(exchange_amount - amount) > 0.000001:
+                logger.warning(f"⚠️ Exchange modified sell order amount: intended={amount}, actual={exchange_amount}")
+            
+            # Create order object with exchange-confirmed data
             order = Order(
                 client_id=client_id,
                 market=market,
                 side=OrderSide.SELL,
                 order_type='limit',
-                amount=amount,
+                amount=exchange_amount,  # Use exchange-confirmed amount
                 price=price,
-                status=OrderStatus.PENDING,
-                exchange_order_id=response.get('order_id')
+                status=order_status,     # Use calculated status
+                exchange_order_id=response.get('order_id'),
+                filled_amount=exchange_filled  # Use exchange-confirmed fills
             )
+            
+            # Log comprehensive order state
+            if exchange_filled > 0:
+                logger.info(f"✅ Sell order placed with immediate fill: {client_id} - {exchange_filled}/{exchange_amount} filled")
+            else:
+                logger.info(f"✅ Sell order placed and pending: {client_id} - {exchange_unfilled} unfilled")
+            
+            # Special logging for orphaned position sells
+            if is_orphaned:
+                logger.info(f"📍 Orphaned position sell order successfully placed: {client_id} for {exchange_amount} {market}")
             
             # CRITICAL: Validate order was actually created on exchange
             if not order.exchange_order_id:
