@@ -215,9 +215,6 @@ class DailyRangeBot:
         # State tracking for logging optimization
         self._logged_states = {}  # market -> {state_type -> last_logged_value}
         
-        # Orphaned sell order grace period tracking
-        self._orphaned_sell_grace_until = {}  # market -> grace expiry datetime
-        
         # Circuit breaker for order placement
         self._order_circuit_breaker = TradingCircuitBreaker()
         
@@ -961,23 +958,19 @@ class DailyRangeBot:
             if optimal_sell_price['improvement'] > 0:
                 logger.info(f"💰 Profit improvement: +${optimal_sell_price['improvement']:.2f}")
             
-            # Place the missing sell order using optimal price
+            # Place the missing sell order using optimal price with orphaned marker
             order = self.order_manager.place_sell_order(
                 market=market,
                 amount=missing_amount,
                 price=optimal_sell_price['price'],
                 position_size=missing_amount * optimal_sell_price['price'],
-                is_hide=True
+                is_hide=True,
+                is_orphaned=True  # Mark as orphaned position sell order
             )
             
             if order:
                 logger.info(f"✅ Missing sell order placed: {order.client_id}")
-                
-                # Set grace period for orphaned sell orders (10 minutes)
-                grace_minutes = 10
-                from datetime import timedelta
-                self._orphaned_sell_grace_until[market] = datetime.now(timezone.utc) + timedelta(minutes=grace_minutes)
-                logger.info(f"⏰ Grace period active for {grace_minutes} minutes - new buys allowed despite orphaned sell")
+                logger.info(f"📌 Orphaned sell order marked - will not block new buy orders")
                 
                 # Track the order for automatic pairing
                 if self.order_tracker:
@@ -987,7 +980,7 @@ class DailyRangeBot:
                         market=market,
                         side=OrderSide.SELL,
                         amount=missing_amount,
-                        price=sell_price
+                        price=optimal_sell_price['price']
                     )
                 return True
             else:
@@ -1047,42 +1040,22 @@ class DailyRangeBot:
                 sell_order = today_pending_sells[0]
                 logger.info(f"ℹ️ Found 1 pending sell order from today: {sell_order.client_id} placed at {sell_order.created_at.time()}")
             
-            # Check if we're in grace period for orphaned sell orders
-            if market in self._orphaned_sell_grace_until:
-                now = datetime.now(timezone.utc)
-                if now < self._orphaned_sell_grace_until[market]:
-                    # We're in grace period - check if today's sells are from orphaned position handling
-                    from datetime import timedelta
-                    grace_start = self._orphaned_sell_grace_until[market] - timedelta(minutes=10)
-                    
-                    # Count sells that were placed during grace period (likely orphaned sells)
-                    orphaned_sells = []
-                    regular_sells = []
-                    
-                    for sell in today_pending_sells:
-                        # Sells placed around the time we set the grace period are orphaned sells
-                        if sell.created_at >= grace_start:
-                            orphaned_sells.append(sell)
-                        else:
-                            regular_sells.append(sell)
-                    
-                    adjusted_count = len(regular_sells)
-                    remaining_grace = int((self._orphaned_sell_grace_until[market] - now).total_seconds() / 60)
-                    
-                    logger.info(f"📊 Grace period active ({remaining_grace} min remaining): "
-                               f"{sell_count} total sells, {len(orphaned_sells)} orphaned, "
-                               f"{adjusted_count} blocking")
-                    
-                    if len(orphaned_sells) > 0:
-                        logger.info(f"⏰ Orphaned sells ignored during grace period - new buys allowed")
-                    
-                    return adjusted_count
-                else:
-                    # Grace period expired, clean up
-                    logger.info(f"⏰ Grace period expired for {market} - normal sell blocking resumes")
-                    del self._orphaned_sell_grace_until[market]
+            # Check for orphaned sell orders by client_id marker
+            regular_sell_count = 0
+            orphaned_sell_count = 0
             
-            return sell_count
+            for order in today_pending_sells:
+                if "orphaned_sell" in order.client_id:
+                    orphaned_sell_count += 1
+                    logger.debug(f"📌 Orphaned sell order detected: {order.client_id}")
+                else:
+                    regular_sell_count += 1
+            
+            if orphaned_sell_count > 0:
+                logger.info(f"📊 Today's sell orders: {sell_count} total, {orphaned_sell_count} orphaned (ignored), {regular_sell_count} blocking")
+                logger.info(f"✅ Orphaned sell orders do not block new buy orders")
+            
+            return regular_sell_count  # Only regular sells block new buys
             
         except Exception as e:
             logger.error(f"Error checking today's pending sell orders for {market}: {e}")

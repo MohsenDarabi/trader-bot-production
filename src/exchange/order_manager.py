@@ -269,7 +269,7 @@ class OrderManager:
     
     @settlement_retry
     def place_sell_order(self, market: str, amount: float, price: float,
-                        position_size: float, is_hide: bool = True) -> Optional[Order]:
+                        position_size: float, is_hide: bool = True, is_orphaned: bool = False) -> Optional[Order]:
         """
         Place a sell order with profitability validation
         
@@ -285,8 +285,13 @@ class OrderManager:
         """
         # Profitability validation is handled by the trading bot before calling this method
         
-        # Generate client_id
-        client_id = self.generate_client_id(market, OrderSide.SELL)
+        # Generate client_id with orphaned marker if needed
+        if is_orphaned:
+            # Use special marker for orphaned position sells
+            timestamp = int(time.time() * 1000)
+            client_id = f"DRA_{timestamp}_orphaned_sell_{market}"
+        else:
+            client_id = self.generate_client_id(market, OrderSide.SELL)
         
         logger.info(f"Placing sell order: {market} {amount} @ ${price:.2f} [{client_id}]")
         
