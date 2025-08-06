@@ -1740,7 +1740,7 @@ class DailyRangeBot:
         try:
             logger.debug("🔍 Running fallback detection for missed fills...")
             
-            for market in self.markets:
+            for market in self.trading_markets:
                 # Get current position and sell orders
                 balance = self._calculate_position_sell_balance(market)
                 
