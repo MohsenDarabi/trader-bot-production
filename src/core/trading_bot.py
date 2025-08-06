@@ -869,16 +869,44 @@ class DailyRangeBot:
         return elapsed < self.startup_phase_duration
     
     def _calculate_position_sell_balance(self, market: str) -> Dict[str, Any]:
-        """Calculate position vs sell order balance using proven endpoints"""
+        """Calculate position vs sell order balance using proven endpoints with exchange-aware counting"""
         try:
             # Get current position using proven method
             position = self.position_manager.get_position(market)
             position_size = position.size if position else 0.0
             
-            # Get all pending sell orders using proven method
+            # Get bot-created pending sell orders
             pending_orders = self.order_manager.get_pending_orders(market)
-            sell_orders = [o for o in pending_orders if o.side.value == 'sell']
-            total_sell_amount = sum(order.amount for order in sell_orders)
+            bot_sell_orders = [o for o in pending_orders if o.side.value == 'sell']
+            bot_sell_amount = sum(order.amount for order in bot_sell_orders)
+            
+            # CRITICAL: Also get ALL pending sell orders from exchange (including manual orders)
+            total_sell_amount = bot_sell_amount
+            exchange_sell_amount = 0.0
+            try:
+                # Fetch all pending orders directly from exchange 
+                response = self.order_manager.client.get_pending_orders(market=market)
+                if isinstance(response, dict):
+                    orders_data = response.get('data', [])
+                elif isinstance(response, list):
+                    orders_data = response
+                else:
+                    orders_data = []
+                
+                # Count ALL sell orders from exchange (bot + manual)
+                for order_data in orders_data:
+                    if order_data.get('side') == 'sell':
+                        order_amount = float(order_data.get('amount', 0))
+                        exchange_sell_amount += order_amount
+                
+                # Use exchange total if it's higher (includes manual orders bot doesn't track)
+                if exchange_sell_amount > bot_sell_amount:
+                    total_sell_amount = exchange_sell_amount
+                    logger.info(f"📊 Exchange has more sell orders than bot tracking: {exchange_sell_amount:.6f} vs {bot_sell_amount:.6f}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to fetch exchange sell orders for {market}, using bot tracking only: {e}")
+                total_sell_amount = bot_sell_amount
             
             # Calculate missing sell amount
             missing_sell = max(0, position_size - total_sell_amount)
@@ -887,15 +915,18 @@ class DailyRangeBot:
             result = {
                 'position_size': position_size,
                 'total_sells': total_sell_amount,
+                'bot_sells': bot_sell_amount,
+                'exchange_sells': exchange_sell_amount,
                 'missing_sell': missing_sell,
                 'is_balanced': is_balanced,
-                'sell_orders': sell_orders,
+                'sell_orders': bot_sell_orders,
                 'position_exists': position is not None
             }
             
             if position_size > 0:
-                logger.debug(f"Position balance for {market}: {position_size:.6f} position, "
-                           f"{total_sell_amount:.6f} sells, {missing_sell:.6f} missing")
+                logger.info(f"Position balance for {market}: {position_size:.6f} position, "
+                           f"{total_sell_amount:.6f} total sells (bot: {bot_sell_amount:.6f}, exchange: {exchange_sell_amount:.6f}), "
+                           f"{missing_sell:.6f} missing")
             
             return result
             
@@ -904,6 +935,8 @@ class DailyRangeBot:
             return {
                 'position_size': 0.0,
                 'total_sells': 0.0,
+                'bot_sells': 0.0,
+                'exchange_sells': 0.0,
                 'missing_sell': 0.0,
                 'is_balanced': True,
                 'sell_orders': [],
