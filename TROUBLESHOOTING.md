@@ -465,6 +465,62 @@ if in_grace_period:
 
 **Fixed in commit:** [Current commit] - Grace period for orphaned position sell orders
 
+### Problem: CoinEx API Client_ID Length Limit - "Invalid Argument" Errors
+**Symptoms:**
+```
+ERROR | API error: invalid argument
+ERROR | Failed to place sell order DRA_1754446528302_orphaned_sell_ETHUSDT: CoinEx API error: invalid argument
+```
+- Orphaned position sell orders consistently fail with "invalid argument" error
+- Regular buy/sell orders work fine
+- API authentication succeeds but order placement fails
+
+**Root Cause:**
+CoinEx futures API v2 has a **32-byte maximum length limit** for the `client_id` parameter. Our orphaned sell client_id format was exceeding this limit:
+
+```
+Original format: DRA_1754446528302_orphaned_sell_ETHUSDT (42 characters)
+API limit:       32 bytes maximum
+Result:          "invalid argument" API error
+```
+
+**Solution Applied:**
+Shortened the orphaned sell client_id format using "OS" abbreviation:
+
+```python
+# BEFORE (42 characters - exceeds limit)
+client_id = f"DRA_{timestamp}_orphaned_sell_{market}"
+
+# AFTER (24 characters - within limit)  
+client_id = f"DRA_{timestamp}_OS_{market}"
+```
+
+**Updated Detection Logic:**
+```python
+# Updated orphaned sell detection in trading_bot.py
+if "_OS_" in order.client_id:  # Was: "orphaned_sell" in order.client_id
+    orphaned_sell_count += 1
+```
+
+**Verification:**
+- Orphaned sell orders now place successfully: `DRA_1754446581616_OS_ETHUSDT`
+- API "invalid argument" errors eliminated
+- All orphaned sell detection logic continues to work
+- Client_id length: ~24 characters (well within 32-byte limit)
+
+**Example Success Logs:**
+```
+[INFO] Placing sell order: ETHUSDT 0.02 @ $3838.96 [DRA_1754446581616_OS_ETHUSDT]  
+[INFO] ✅ Missing sell order placed for orphaned position
+[INFO] 📊 Today's sell orders: 2 total, 2 orphaned (ignored), 0 blocking
+[INFO] ✅ Orphaned sell orders do not block new buy orders
+```
+
+**API Documentation Reference:**
+According to CoinEx futures API v2 documentation (https://docs.coinex.com/api/v2/), the `client_id` parameter has specific length restrictions that must be observed for successful order placement.
+
+**Fixed in commit:** [Current commit] - Shortened orphaned sell client_id format to comply with CoinEx API 32-byte limit
+
 ### Problem: API Error 3007 - Funding Fee Settlement Period
 **Symptoms:**
 ```

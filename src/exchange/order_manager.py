@@ -163,12 +163,15 @@ class OrderManager:
             signal.alarm(45)
             
             try:
+                # Format order parameters with proper precision
+                formatted_amount, formatted_price = self.client._format_order_params(market, amount, price)
+                
                 response = self.client.place_order(
                     market=market,
                     side='buy',
-                    amount=str(amount),
+                    amount=formatted_amount,
                     order_type='limit',
-                    price=str(price),
+                    price=formatted_price,
                     client_id=client_id,
                     is_hide=is_hide
                 )
@@ -288,21 +291,25 @@ class OrderManager:
         # Generate client_id with orphaned marker if needed
         if is_orphaned:
             # Use special marker for orphaned position sells
+            import time
             timestamp = int(time.time() * 1000)
-            client_id = f"DRA_{timestamp}_orphaned_sell_{market}"
+            client_id = f"DRA_{timestamp}_OS_{market}"
         else:
             client_id = self.generate_client_id(market, OrderSide.SELL)
         
         logger.info(f"Placing sell order: {market} {amount} @ ${price:.2f} [{client_id}]")
         
         try:
+            # Format order parameters with proper precision
+            formatted_amount, formatted_price = self.client._format_order_params(market, amount, price)
+            
             # Place order on exchange
             response = self.client.place_order(
                 market=market,
                 side='sell',
-                amount=str(amount),
+                amount=formatted_amount,
                 order_type='limit',
-                price=str(price),
+                price=formatted_price,
                 client_id=client_id,
                 is_hide=is_hide
             )

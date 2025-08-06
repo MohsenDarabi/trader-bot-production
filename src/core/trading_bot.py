@@ -1045,7 +1045,7 @@ class DailyRangeBot:
             orphaned_sell_count = 0
             
             for order in today_pending_sells:
-                if "orphaned_sell" in order.client_id:
+                if "_OS_" in order.client_id:
                     orphaned_sell_count += 1
                     logger.debug(f"📌 Orphaned sell order detected: {order.client_id}")
                 else:
