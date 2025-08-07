@@ -1171,38 +1171,14 @@ class DailyRangeBot:
                 log_trading_event('settlement_approach', f"Buy order blocked - approaching settlement for {market}")
             return False
         
-        # Phase 1: Day-start cancellation check (respecting settlement periods)
-        # Check for two scenarios: regular daily reset OR startup without valid buy orders
+        # Phase 1: Daily reset check (simplified - startup cleanup handled in _perform_startup_order_cleanup)
         is_daily_reset = self.market_data.is_new_trading_day(market)
         
-        # Get current buy orders to check startup scenario
-        current_buy_status = self._get_exchange_buy_status(market)
-        all_buy_orders = current_buy_status.get('all_buy_orders', [])
-        today = datetime.now(timezone.utc).date()
+        # Note: Startup buy order cleanup is now handled unconditionally in _perform_startup_order_cleanup()
+        # This eliminates the complex conditions that could cause cleanup to be skipped
         
-        # Check if we have valid buy orders for today (startup scenario)
-        valid_today_orders = [order for order in all_buy_orders if order.created_at.date() == today]
-        has_buy_orders_today = len(valid_today_orders) > 0
-        
-        # CRITICAL: Also check for sell orders from today 
-        has_sell_orders_today = self._get_today_pending_sell_orders(market) > 0
-        
-        # Only safe for startup scenario if bot hasn't traded today (no buy OR sell orders from today)
-        # AND there are old orders that need cleaning up
-        is_startup_without_valid_orders = (
-            len(all_buy_orders) > 0 and  # There are old orders to clean up
-            not has_buy_orders_today and  # No buy orders from today
-            not has_sell_orders_today     # No sell orders from today - bot hasn't traded today
-        )
-        
-        # Determine if we need to cancel orders
-        should_cancel_orders = is_daily_reset or is_startup_without_valid_orders
-        
-        if should_cancel_orders:
-            if is_daily_reset:
-                logger.info(f"🌅 Daily reset window detected for {market} - checking for old buy orders to cancel")
-            elif is_startup_without_valid_orders:
-                logger.info(f"🚀 Bot startup detected for {market} - no trading activity today (no buy orders: {not has_buy_orders_today}, no sell orders: {not has_sell_orders_today}), cancelling old orders")
+        if is_daily_reset:
+            logger.info(f"🌅 Daily reset window detected for {market} - checking for old buy orders to cancel")
             
             # Don't cancel orders during settlement periods
             if is_settlement_period() or is_approaching_settlement():
@@ -1210,32 +1186,33 @@ class DailyRangeBot:
                 log_trading_event('settlement_delay', f"Order cleanup delayed due to settlement period for {market}")
                 return False
             
+            # Get current buy orders for daily reset cleanup only
+            current_buy_status = self._get_exchange_buy_status(market)
+            all_buy_orders = current_buy_status.get('all_buy_orders', [])
+            today = datetime.now(timezone.utc).date()
+            
             if len(all_buy_orders) > 0:
                 cancelled_count = 0
                 
                 for order in all_buy_orders:
-                    # Cancel orders from previous days OR all orders in startup scenario
-                    should_cancel = (is_daily_reset and order.created_at.date() < today) or is_startup_without_valid_orders
-                    
-                    if should_cancel:
+                    # Only cancel orders from previous days during daily reset
+                    if order.created_at.date() < today:
                         try:
-                            action = "old" if order.created_at.date() < today else "existing"
-                            logger.info(f"🗑️ Cancelling {action} buy order: {order.client_id} from {order.created_at.date()}")
+                            logger.info(f"🗑️ Cancelling old buy order: {order.client_id} from {order.created_at.date()}")
                             if self.order_manager.cancel_order(order.client_id):
                                 cancelled_count += 1
-                                log_trading_event('order_cleanup', f"Cancelled {action} buy order {order.client_id} from {order.created_at.date()}")
+                                log_trading_event('order_cleanup', f"Cancelled old buy order {order.client_id} from {order.created_at.date()}")
                         except Exception as e:
                             logger.error(f"Failed to cancel buy order {order.client_id}: {e}")
                 
                 if cancelled_count > 0:
-                    cleanup_type = "Daily reset" if is_daily_reset else "Startup"
-                    logger.info(f"✅ {cleanup_type} cleanup: Cancelled {cancelled_count} buy orders for {market}")
+                    logger.info(f"✅ Daily reset cleanup: Cancelled {cancelled_count} old buy orders for {market}")
                     # Small delay to let cancellations process
                     import time
                     time.sleep(0.5)
         
-        # Phase 1.5: Check for orphaned positions after cleanup
-        if should_cancel_orders:
+        # Phase 1.5: Check for orphaned positions after daily reset cleanup
+        if is_daily_reset:
             try:
                 # Check for positions without corresponding sell orders
                 balance = self._calculate_position_sell_balance(market)
@@ -1260,7 +1237,8 @@ class DailyRangeBot:
         
         # Phase 1.9: One-time orphaned position check - STARTUP PHASE ONLY
         # Only check for orphaned positions ONCE during startup, not every cycle
-        if (not should_cancel_orders and self.is_startup_phase() and 
+        # Note: Startup cleanup now handles ALL buy orders, so this check runs independently
+        if (self.is_startup_phase() and 
             not self._orphaned_positions_checked.get(market, False)):
             try:
                 logger.info(f"🔧 Performing one-time orphaned position check for {market}")
@@ -1290,7 +1268,7 @@ class DailyRangeBot:
                 logger.error(f"Error during one-time orphaned position check for {market}: {e}")
                 # Still mark as checked to prevent infinite retries
                 self._orphaned_positions_checked[market] = True
-        elif not should_cancel_orders:
+        elif not self.is_startup_phase():
             logger.debug(f"Startup phase complete - skipping orphaned position check for {market}")
         
         # Phase 2: Check for pending sell orders from today
@@ -2208,35 +2186,20 @@ class DailyRangeBot:
                 
                 market_cancelled = 0
                 
-                # AGGRESSIVE CLEANUP: Cancel ALL buy orders except the first one from today
+                # SIMPLIFIED CLEANUP: Cancel ALL buy orders (regardless of age)
                 if len(buy_orders) > 0:
-                    logger.warning(f"⚠️  Found {len(buy_orders)} buy orders for {market}")
+                    logger.warning(f"🧹 Found {len(buy_orders)} buy orders for {market} - cancelling ALL")
                     
-                    # Separate today's orders from old orders
-                    today_buy_orders = [o for o in buy_orders if o.created_at.date() == today]
-                    old_buy_orders = [o for o in buy_orders if o.created_at.date() < today]
-                    
-                    # Cancel ALL old orders
-                    for order in old_buy_orders:
+                    # Cancel ALL buy orders unconditionally
+                    for order in buy_orders:
                         try:
-                            logger.info(f"🗑️  Cancelling old buy order: {order.client_id} from {order.created_at.date()} in {market}")
+                            age_info = f"from {order.created_at.date()}" if order.created_at.date() != today else "from today"
+                            logger.info(f"🗑️  Cancelling buy order: {order.client_id} {age_info} in {market}")
                             self.order_manager.cancel_order(order.client_id)
                             market_cancelled += 1
                             total_cancelled += 1
                         except Exception as e:
-                            logger.error(f"Failed to cancel old buy order {order.client_id}: {e}")
-                    
-                    # If multiple orders from today, keep only first one
-                    if len(today_buy_orders) > 1:
-                        logger.warning(f"⚠️  Multiple buy orders from today! Keeping first, cancelling {len(today_buy_orders)-1} duplicates")
-                        for order in today_buy_orders[1:]:
-                            try:
-                                logger.info(f"🗑️  Cancelling duplicate buy order: {order.client_id} from today in {market}")
-                                self.order_manager.cancel_order(order.client_id)
-                                market_cancelled += 1
-                                total_cancelled += 1
-                            except Exception as e:
-                                logger.error(f"Failed to cancel duplicate buy order {order.client_id}: {e}")
+                            logger.error(f"Failed to cancel buy order {order.client_id}: {e}")
                 
                 # REMOVED: Sell order cleanup - preserve all existing sell orders
                 # Daily Range Strategy: Sell orders remain until filled (no time limit)
