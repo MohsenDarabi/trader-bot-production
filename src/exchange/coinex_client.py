@@ -408,6 +408,104 @@ class CoinExClient:
         
         return self._request('POST', '/v2/futures/cancel-order', data=data)
     
+    def _format_order_params(self, market: str, amount: float, price: float) -> tuple:
+        """
+        Format order parameters with proper precision for CoinEx API
+        
+        Args:
+            market: Market symbol (e.g., ETHUSDT)
+            amount: Order amount
+            price: Order price
+            
+        Returns:
+            Tuple of (formatted_amount_str, formatted_price_str)
+        """
+        from decimal import Decimal, ROUND_HALF_UP
+        
+        try:
+            # Get market info to ensure proper precision
+            market_info = self.get_futures_markets()
+            market_data = next((m for m in market_info if m.get('market') == market), None)
+            
+            if market_data:
+                min_amount = float(market_data.get('min_amount', 0))
+                tick_size = float(market_data.get('tick_size', 0.0001))
+                
+                # Get amount precision from market data or derive from min_amount
+                amount_precision = market_data.get('amount_precision')
+                if amount_precision is None:
+                    # Derive precision from min_amount (e.g., 0.001 → 3 decimal places)
+                    if min_amount > 0:
+                        amount_precision = max(0, len(str(min_amount).split('.')[-1]) if '.' in str(min_amount) else 0)
+                    else:
+                        amount_precision = 6  # Default for crypto pairs
+                else:
+                    amount_precision = int(amount_precision)
+                
+                # Format amount with proper precision to fix floating point issues
+                amount_decimal = Decimal(str(amount))  # Convert to string first to avoid float precision issues
+                
+                # Round to proper decimal places
+                if amount_precision > 0:
+                    amount_rounded = amount_decimal.quantize(Decimal('0.' + '0' * amount_precision), rounding=ROUND_HALF_UP)
+                else:
+                    amount_rounded = amount_decimal.quantize(Decimal('1'), rounding=ROUND_HALF_UP)
+                
+                amount_float = float(amount_rounded)
+                
+                # Ensure amount meets minimum requirement
+                if amount_float < min_amount:
+                    logger.warning(f"Adjusting amount from {amount_float} to minimum {min_amount}")
+                    amount_float = min_amount
+                
+                # Format amount with proper decimal places
+                if amount_precision > 0:
+                    amount_str = f"{amount_float:.{amount_precision}f}".rstrip('0').rstrip('.')
+                else:
+                    amount_str = f"{int(amount_float)}"
+                
+                # Round price to proper tick size (existing logic)
+                price_decimal = Decimal(str(price))
+                tick_decimal = Decimal(str(tick_size))
+                rounded_price_decimal = (price_decimal / tick_decimal).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_decimal
+                price_float = float(rounded_price_decimal)
+                
+                # Format price with proper decimal places
+                tick_precision = len(str(tick_size).split('.')[-1]) if '.' in str(tick_size) else 0
+                price_str = f"{price_float:.{tick_precision}f}".rstrip('0').rstrip('.')
+                
+                logger.debug(f"Formatted order params: {amount_str} @ {price_str} (amount_precision={amount_precision}, tick_size={tick_size})")
+                
+            else:
+                # Fallback for unknown markets - use reasonable defaults
+                logger.warning(f"Market data not found for {market}, using fallback precision")
+                
+                # Fix floating point precision with defaults
+                amount_decimal = Decimal(str(amount))
+                amount_rounded = amount_decimal.quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)  # 6 decimal places default
+                amount_str = f"{float(amount_rounded):.6f}".rstrip('0').rstrip('.')
+                
+                price_decimal = Decimal(str(price))
+                price_rounded = price_decimal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)  # 2 decimal places default for price
+                price_str = f"{float(price_rounded):.2f}".rstrip('0').rstrip('.')
+                
+        except Exception as format_error:
+            logger.warning(f"Could not format order parameters for {market}: {format_error}")
+            # Fall back to basic formatting with floating point fix
+            from decimal import Decimal, ROUND_HALF_UP
+            try:
+                amount_decimal = Decimal(str(amount))
+                amount_rounded = amount_decimal.quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
+                amount_str = f"{float(amount_rounded):.6f}".rstrip('0').rstrip('.')
+                
+                price_str = f"{float(price):.4f}".rstrip('0').rstrip('.')
+            except:
+                # Last resort - basic string conversion
+                amount_str = str(float(amount))
+                price_str = str(float(price))
+        
+        return amount_str, price_str
+    
     def get_pending_orders(self, market: Optional[str] = None, 
                           page: int = 1, limit: Optional[int] = None) -> Dict:
         """
@@ -952,7 +1050,7 @@ class CoinExClient:
             
             # Get market info to ensure proper precision
             try:
-                market_info = self.get_market_list()
+                market_info = self.get_futures_markets()
                 market_data = next((m for m in market_info if m.get('market') == market), None)
                 if market_data:
                     min_amount = float(market_data.get('min_amount', 0))
