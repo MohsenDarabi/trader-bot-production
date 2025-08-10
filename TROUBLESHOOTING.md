@@ -816,4 +816,73 @@ When encountering new issues:
 4. Add the pattern to this guide
 5. Include git commit reference for tracking
 
+### Problem: Container Naming Inconsistencies
+**Symptoms:**
+- Deploy scripts fail with "container not found" errors
+- Manual deployments use different container names than automated scripts
+- Container management commands fail due to name mismatches
+
+**Root Cause:**
+Different deployment methods may use different container naming conventions:
+- Manual deployments might use: `ada-bot`, `eth-bot`
+- Docker Compose uses: `bot-ada`, `bot-eth`
+- Direct docker run might use: `ada`, `eth`
+
+**Solution:**
+1. **Check existing container names:**
+   ```bash
+   docker ps -a | grep -E "(ada|eth)"
+   ```
+
+2. **For manual deployment with simple names:**
+   ```bash
+   # Stop and remove old container
+   docker stop ada-bot && docker rm ada-bot
+   
+   # Run with simple name
+   docker run -d --name ada --env-file .env.ada --restart always trader-bot:latest python main.py ADAUSDT
+   ```
+
+3. **For automated deployment:**
+   ```bash
+   # Use the deploy.sh script which handles naming correctly
+   ./deploy.sh ada update
+   ```
+
+**Best Practice:**
+- Use the `deploy.sh` script for consistency
+- If deploying manually, use simple names: `ada`, `eth`
+- Document any custom container names in your deployment notes
+
+### Problem: Deployment After Code Updates
+**Symptoms:**
+- Bot running old code despite repository updates
+- Fixes not applied after pulling latest changes
+- Container still showing old error messages
+
+**Root Cause:**
+Docker containers run from images that need to be rebuilt after code changes.
+
+**Solution:**
+```bash
+# 1. Build new image with latest code
+docker build --platform linux/amd64 -t trader-bot:latest .
+
+# 2. Save for transfer to VM
+docker save trader-bot:latest | gzip > trader-bot-latest-amd64.tar.gz
+
+# 3. Transfer to VM
+scp -i ssh-key-2025-07-27.key trader-bot-latest-amd64.tar.gz ubuntu@VM_IP:~
+
+# 4. On VM: Load and deploy
+docker load < trader-bot-latest-amd64.tar.gz
+docker stop OLD_CONTAINER_NAME && docker rm OLD_CONTAINER_NAME
+docker run -d --name ada --env-file .env.ada --restart always trader-bot:latest python main.py ADAUSDT
+```
+
+**Verification:**
+- Check logs for absence of previously fixed errors
+- Verify new features/fixes are working as expected
+- Monitor initial startup for any configuration issues
+
 This guide should be the first place to check when debugging issues with the CoinEx trading bot.

@@ -71,6 +71,6 @@ order_history/
 env-templates/
 
 # Deployment artifacts
-trader-bot-update-*.tar.gz
+trader-bot-*.tar.gz
 vm-deploy-*.sh
 backup_*/
