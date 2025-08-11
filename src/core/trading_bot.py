@@ -206,14 +206,10 @@ class DailyRangeBot:
         
         self.status = BotStatus()
         
-        # Startup phase tracking for orphaned position checks
-        self.startup_time = datetime.now(timezone.utc)
-        self.startup_phase_duration = 60  # seconds
+        # One-time startup cleanup tracking (not time-based, just a flag)
+        self._startup_cleanup_completed = False
         self.trading_markets: List[str] = []
         self.last_signal_generation: Dict[str, datetime] = {}
-        
-        # One-time orphaned position check tracking (per market)
-        self._orphaned_positions_checked: Dict[str, bool] = {}
         
         # Trading state
         self._shutdown_requested = False
@@ -863,10 +859,6 @@ class DailyRangeBot:
                 'total_buy_orders': 0
             }
     
-    def is_startup_phase(self) -> bool:
-        """Check if bot is still in startup phase for orphaned position checks"""
-        elapsed = (datetime.now(timezone.utc) - self.startup_time).total_seconds()
-        return elapsed < self.startup_phase_duration
     
     def _calculate_position_sell_balance(self, market: str) -> Dict[str, Any]:
         """Calculate position vs sell order balance using proven endpoints with exchange-aware counting"""
@@ -1211,65 +1203,8 @@ class DailyRangeBot:
                     import time
                     time.sleep(0.5)
         
-        # Phase 1.5: Check for orphaned positions after daily reset cleanup
-        if is_daily_reset:
-            try:
-                # Check for positions without corresponding sell orders
-                balance = self._calculate_position_sell_balance(market)
-                if balance['position_exists'] and balance['missing_sell'] > 0.000001:
-                    logger.info(f"🔧 Orphaned position detected for {market}: {balance['missing_sell']:.6f} uncovered, "
-                               f"position: {balance['position_size']:.6f}, sells: {balance['total_sells']:.6f}")
-                    
-                    # Place missing sell order using existing smart pricing logic
-                    success = self._place_missing_sell_order(market, balance['missing_sell'])
-                    if success:
-                        logger.info(f"✅ Missing sell order placed for orphaned position in {market}")
-                        log_trading_event('orphaned_position_fix', f"Placed missing sell order for {balance['missing_sell']:.6f} {market}")
-                    else:
-                        logger.error(f"❌ Failed to place missing sell order for orphaned position in {market}")
-                        log_trading_event('orphaned_position_fail', f"Failed to place missing sell order for {market}")
-                        
-            except Exception as e:
-                logger.error(f"Error checking for orphaned positions in {market}: {e}")
-        
         # Use direct exchange queries for single source of truth
         buy_status = self._get_exchange_buy_status(market)
-        
-        # Phase 1.9: One-time orphaned position check - STARTUP PHASE ONLY
-        # Only check for orphaned positions ONCE during startup, not every cycle
-        # Note: Startup cleanup now handles ALL buy orders, so this check runs independently
-        if (self.is_startup_phase() and 
-            not self._orphaned_positions_checked.get(market, False)):
-            try:
-                logger.info(f"🔧 Performing one-time orphaned position check for {market}")
-                balance = self._calculate_position_sell_balance(market)
-                
-                # Mark this market as checked regardless of outcome
-                self._orphaned_positions_checked[market] = True
-                
-                if balance['position_exists'] and balance['missing_sell'] > 0.000001:
-                    logger.info(f"🔧 Uncovered position detected during startup check for {market}: "
-                               f"{balance['missing_sell']:.6f} uncovered, position: {balance['position_size']:.6f}")
-                    
-                    # Place missing sell order using existing logic
-                    success = self._place_missing_sell_order(market, balance['missing_sell'])
-                    if success:
-                        logger.info(f"✅ Missing sell order placed during startup check - buy can proceed next cycle")
-                        log_trading_event('startup_position_fix', f"Startup check placed missing sell order for {balance['missing_sell']:.6f} {market}")
-                    else:
-                        logger.error(f"❌ Failed to place missing sell order during startup check")
-                        log_trading_event('startup_position_fail', f"Startup check failed to place missing sell order for {market}")
-                    
-                    return False  # Delay buy order until position is properly covered
-                else:
-                    logger.info(f"✅ No orphaned positions detected for {market} during startup check")
-                        
-            except Exception as e:
-                logger.error(f"Error during one-time orphaned position check for {market}: {e}")
-                # Still mark as checked to prevent infinite retries
-                self._orphaned_positions_checked[market] = True
-        elif not self.is_startup_phase():
-            logger.debug(f"Startup phase complete - skipping orphaned position check for {market}")
         
         # Phase 2: Check for pending sell orders from today
         today_pending_sells = self._get_today_pending_sell_orders(market)
@@ -1313,23 +1248,6 @@ class DailyRangeBot:
             # Clear the flag once we use it
             self._cycle_completion_flags[market] = False
             
-            # CRITICAL: Check for uncovered positions even after cycle completion
-            balance = self._calculate_position_sell_balance(market)
-            if balance['position_exists'] and balance['missing_sell'] > 0.000001:
-                logger.info(f"⏳ Delaying cycle buy - uncovered position detected for {market}: "
-                           f"{balance['missing_sell']:.6f} uncovered, position: {balance['position_size']:.6f}")
-                
-                # Place missing sell order using existing logic
-                success = self._place_missing_sell_order(market, balance['missing_sell'])
-                if success:
-                    logger.info(f"✅ Missing sell order placed for uncovered position - cycle buy can proceed next trading cycle")
-                    log_trading_event('uncovered_position_fix', f"Placed missing sell order for {balance['missing_sell']:.6f} {market}")
-                else:
-                    logger.error(f"❌ Failed to place missing sell order for uncovered position")
-                    log_trading_event('uncovered_position_fail', f"Failed to place missing sell order for {market}")
-                
-                return False  # Delay buy order until position is properly covered
-            
         elif not has_today_buy:
             # No buy order placed today - but check for pending sells first
             # This ensures we don't place buy if today's sell orders are still pending
@@ -1342,24 +1260,6 @@ class DailyRangeBot:
             # No pending sells from today - allow first buy of day
             logger.info(f"🌅 First buy order of the day allowed for {market}")
             log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
-            
-            # CRITICAL: Check for uncovered positions before allowing buy order
-            # This prevents duplicate buy orders when positions exist without sell orders
-            balance = self._calculate_position_sell_balance(market)
-            if balance['position_exists'] and balance['missing_sell'] > 0.000001:
-                logger.info(f"⏳ Delaying buy order - uncovered position detected for {market}: "
-                           f"{balance['missing_sell']:.6f} uncovered, position: {balance['position_size']:.6f}")
-                
-                # Place missing sell order using existing logic
-                success = self._place_missing_sell_order(market, balance['missing_sell'])
-                if success:
-                    logger.info(f"✅ Missing sell order placed for uncovered position - buy can proceed next cycle")
-                    log_trading_event('uncovered_position_fix', f"Placed missing sell order for {balance['missing_sell']:.6f} {market}")
-                else:
-                    logger.error(f"❌ Failed to place missing sell order for uncovered position")
-                    log_trading_event('uncovered_position_fail', f"Failed to place missing sell order for {market}")
-                
-                return False  # Delay buy order until position is properly covered
             
         else:
             # Already placed buy today and no cycle completion - block additional buys
@@ -2152,10 +2052,15 @@ class DailyRangeBot:
     
     
     async def _perform_startup_order_cleanup(self):
-        """Comprehensive stale order cleanup during bot startup"""
+        """One-time comprehensive order cleanup and orphaned position check during bot startup"""
         try:
+            # Skip if already completed (ensure this only runs once)
+            if self._startup_cleanup_completed:
+                logger.debug("Startup cleanup already completed - skipping")
+                return
+            
             from src.utils.settlement_handler import settlement_retry_async
-            logger.info("🧹 Starting aggressive startup order cleanup...")
+            logger.info("🧹 Starting one-time startup order cleanup...")
             
             total_cancelled = 0
             cleanup_summary = []
@@ -2212,6 +2117,39 @@ class DailyRangeBot:
                 logger.info(f"  Details: {', '.join(cleanup_summary)}")
             else:
                 logger.info("✓ No stale orders found during startup cleanup")
+            
+            # CRITICAL: Check for orphaned positions after cancelling all buy orders
+            # This ensures we have a clean base for trading
+            logger.info("🔧 Checking for orphaned positions after buy order cleanup...")
+            
+            for market in self.trading_markets:
+                try:
+                    # Calculate position vs sell order balance
+                    balance = self._calculate_position_sell_balance(market)
+                    
+                    if balance['position_exists'] and balance['missing_sell'] > 0.000001:
+                        logger.info(f"🔧 Startup: Found {balance['missing_sell']:.6f} uncovered position for {market}")
+                        logger.info(f"   Position: {balance['position_size']:.6f}, Total sells: {balance['total_sells']:.6f}")
+                        
+                        # Place orphaned sell order for uncovered amount
+                        success = self._place_missing_sell_order(market, balance['missing_sell'])
+                        
+                        if success:
+                            logger.info(f"✅ Orphaned sell order placed for {market} - clean base established")
+                            log_trading_event('startup_orphaned_sell', f"Placed orphaned sell for {balance['missing_sell']:.6f} {market} at startup")
+                        else:
+                            logger.error(f"❌ Failed to place orphaned sell order for {market}")
+                            log_trading_event('startup_orphaned_fail', f"Failed to place orphaned sell for {market} at startup")
+                    else:
+                        logger.info(f"✅ No orphaned positions for {market} - position fully covered or no position")
+                        
+                except Exception as e:
+                    logger.error(f"Error checking orphaned position for {market}: {e}")
+            
+            logger.info("✅ Startup order cleanup and orphaned position check completed")
+            
+            # Mark startup cleanup as completed (one-time execution)
+            self._startup_cleanup_completed = True
                 
         except Exception as e:
             logger.error(f"Error during startup order cleanup: {e}")
