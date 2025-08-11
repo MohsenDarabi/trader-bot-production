@@ -575,9 +575,9 @@ class DailyRangeBot:
                 await self._update_account_status()
                 self._last_account_update = now
             
-            # Position sync every 3 minutes (reduced from 10 min) for critical state validation
+            # Position sync every 1 minute for critical state validation and order status checking
             if (not self._last_positions_sync or 
-                (now - self._last_positions_sync).seconds > 180):
+                (now - self._last_positions_sync).seconds > 60):
                 await self._sync_positions()
                 self._last_positions_sync = now
             
@@ -1141,7 +1141,25 @@ class DailyRangeBot:
     def _should_place_buy_order(self, market: str, signal: TradingSignal, current_price: float) -> bool:
         """Buy order decision using fresh exchange data with day-start cancellation and funding fee protection"""
         
-        # EMERGENCY SAFETY CHECK: Absolutely block if ANY pending sells from today exist
+        # CRITICAL: Force fresh order validation before emergency check to ensure accurate status
+        logger.debug(f"🔄 Forcing order validation before buy decision for {market}")
+        import asyncio
+        try:
+            # Run validation in current event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're already in an async context, schedule validation
+                asyncio.create_task(self._validate_order_manager_state())
+                # Small delay to let validation complete
+                import time
+                time.sleep(0.5)
+            else:
+                # Run validation synchronously
+                loop.run_until_complete(self._validate_order_manager_state())
+        except Exception as e:
+            logger.warning(f"⚠️ Could not force validation before buy decision: {e}")
+        
+        # EMERGENCY SAFETY CHECK: Block if ANY pending sells from today exist (after validation)
         emergency_pending_sells = self._get_today_pending_sell_orders(market)
         if emergency_pending_sells > 0:
             logger.error(f"🚨 EMERGENCY BLOCK: {emergency_pending_sells} pending sell orders from today - CANNOT PLACE BUY for {market}")
@@ -2249,51 +2267,87 @@ class DailyRangeBot:
             logger.error(f"Error detecting WebSocket reconnection: {e}")
             return False
     
+    async def _get_exchange_orders_with_retry(self, market: str, max_retries: int = 3):
+        """Get exchange orders with retry logic for reliability"""
+        for attempt in range(max_retries):
+            try:
+                response = self.client.get_pending_orders(market=market)
+                if response:
+                    logger.debug(f"✅ API call successful for {market} (attempt {attempt + 1})")
+                    return response
+                else:
+                    logger.warning(f"⚠️ API returned empty response for {market} (attempt {attempt + 1})")
+                    
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    delay = 2 ** attempt  # 2s, 4s, 8s exponential backoff
+                    logger.warning(f"⚠️ API call failed for {market} (attempt {attempt + 1}), retrying in {delay}s: {e}")
+                    import asyncio
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"❌ API call failed for {market} after {max_retries} attempts: {e}")
+                    raise
+        return None
+
     async def _validate_order_manager_state(self):
-        """Validate OrderManager internal state against live exchange data"""
+        """Validate OrderManager internal state against live exchange data for all trading markets"""
         try:
-            # Get current trading market
-            market = getattr(self, '_current_market', None)
-            if not market:
-                return
+            # Loop through all actual trading markets (from command line or environment)
+            for market in self.trading_markets:
+                if not market:
+                    continue
+                    
+                logger.info(f"🔍 Validating order status for {market}")
                 
-            # Get pending orders from OrderManager state
-            cached_orders = self.order_manager.get_pending_orders(market)
-            
-            # Get actual pending orders from exchange
-            exchange_response = self.exchange_client.get_pending_orders(market=market)
-            exchange_orders = []
-            if isinstance(exchange_response, dict):
-                exchange_orders = exchange_response.get('data', [])
-            elif isinstance(exchange_response, list):
-                exchange_orders = exchange_response
-            
-            # Find orders in OrderManager state that are not on exchange (stale/filled orders)
-            stale_client_ids = []
-            exchange_order_ids = {str(order.get('order_id')) for order in exchange_orders}
-            exchange_client_ids = {order.get('client_id') for order in exchange_orders if order.get('client_id')}
-            
-            for cached_order in cached_orders:
-                # Check if this tracked order exists on exchange
-                order_exists = (
-                    cached_order.exchange_order_id in exchange_order_ids or
-                    cached_order.client_id in exchange_client_ids
-                )
+                # Get pending orders from OrderManager state
+                cached_orders = self.order_manager.get_pending_orders(market)
+                logger.info(f"📊 Internal cache has {len(cached_orders)} orders for {market}")
                 
-                if not order_exists:
-                    stale_client_ids.append(cached_order.client_id)
-            
-            # Remove stale orders from OrderManager state
-            stale_removed = 0
-            for client_id in stale_client_ids:
-                if client_id in self.order_manager.active_orders:
-                    del self.order_manager.active_orders[client_id]
-                    self.order_manager._last_status_check.pop(client_id, None)
-                    stale_removed += 1
-                    logger.warning(f"Removed stale order from OrderManager: {client_id}")
-            
-            if stale_removed > 0:
-                logger.info(f"HTTP fallback: Cleaned up {stale_removed} stale orders from OrderManager")
+                # Get actual pending orders from exchange with retry logic
+                try:
+                    exchange_response = await self._get_exchange_orders_with_retry(market)
+                    exchange_orders = []
+                    if isinstance(exchange_response, dict):
+                        exchange_orders = exchange_response.get('data', [])
+                    elif isinstance(exchange_response, list):
+                        exchange_orders = exchange_response
+                    
+                    logger.info(f"🔍 Exchange has {len(exchange_orders)} pending orders for {market}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Could not get exchange orders for {market}: {e}")
+                    continue  # Skip this market but continue with others
+                
+                # Find orders in OrderManager state that are not on exchange (stale/filled orders)
+                stale_client_ids = []
+                exchange_order_ids = {str(order.get('order_id')) for order in exchange_orders}
+                exchange_client_ids = {order.get('client_id') for order in exchange_orders if order.get('client_id')}
+                
+                for cached_order in cached_orders:
+                    # Check if this tracked order exists on exchange
+                    order_exists = (
+                        str(cached_order.exchange_order_id) in exchange_order_ids or
+                        cached_order.client_id in exchange_client_ids
+                    )
+                    
+                    if not order_exists:
+                        stale_client_ids.append(cached_order.client_id)
+                        logger.debug(f"🗑️ Detected stale order: {cached_order.client_id}")
+                
+                # Remove stale orders from OrderManager state
+                stale_removed = 0
+                for client_id in stale_client_ids:
+                    if client_id in self.order_manager.active_orders:
+                        del self.order_manager.active_orders[client_id]
+                        self.order_manager._last_status_check.pop(client_id, None)
+                        stale_removed += 1
+                        logger.warning(f"🧹 Removed stale order from OrderManager: {client_id}")
+                
+                if stale_removed > 0:
+                    logger.warning(f"⚠️ Cleaned {stale_removed} stale orders for {market} that were filled but missed by WebSocket")
+                    log_trading_event('stale_orders_cleaned', f"Cleaned {stale_removed} stale orders for {market}")
+                else:
+                    logger.debug(f"✅ No stale orders found for {market}")
                 
         except Exception as e:
             logger.error(f"Error validating OrderManager state: {e}")
