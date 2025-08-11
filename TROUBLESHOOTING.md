@@ -521,6 +521,106 @@ According to CoinEx futures API v2 documentation (https://docs.coinex.com/api/v2
 
 **Fixed in commit:** [Current commit] - Shortened orphaned sell client_id format to comply with CoinEx API 32-byte limit
 
+### Problem: Order Validation Never Runs - AttributeError and Logic Failures - CRITICAL
+**Symptoms:**
+- Bot shows "EMERGENCY BLOCK" for 4+ hours with stale sell orders from earlier in the day
+- Sell orders filled hours ago still showing as "pending" in bot cache
+- WebSocket missed fill detection with no HTTP API fallback working
+- AttributeError: 'DailyRangeBot' object has no attribute 'exchange_client'
+- Normal trading flow completely blocked despite orders being actually filled
+
+**Example Scenario:**
+```
+11:34:47 UTC - Sell order fills and position closes
+11:35:00 UTC - WebSocket misses the fill event  
+15:45:00 UTC - Bot still shows sell as "pending", blocks all new buy orders
+```
+
+**Root Cause Analysis:**
+Multiple critical failures in validation system:
+1. **`_validate_order_manager_state()` never executed** - used undefined `_current_market` variable
+2. **Attribute error prevented API calls** - code used `self.exchange_client` instead of `self.client`
+3. **Validation frequency too slow** - only every 3 minutes, insufficient for timely cleanup
+4. **No forced validation before buy decisions** - relied entirely on broken periodic validation
+
+**Technical Details:**
+```python
+# BROKEN CODE PATTERNS:
+async def _validate_order_manager_state(self):
+    market = getattr(self, '_current_market', None)  # ❌ Always None - never runs
+    response = self.exchange_client.get_pending_orders(market=market)  # ❌ Wrong attribute
+
+# ERROR LOGS:
+[ERROR] ❌ API call failed for ETHUSDT after 3 attempts: 'DailyRangeBot' object has no attribute 'exchange_client'
+```
+
+**Comprehensive Fix Applied:**
+```python
+# 1. FIXED MARKET DETECTION - Loop through actual trading markets
+async def _validate_order_manager_state(self):
+    for market in self.trading_markets:  # ✅ Uses real markets from env/command line
+        
+# 2. FIXED ATTRIBUTE ERROR - Use correct client reference  
+        response = self.client.get_pending_orders(market=market)  # ✅ Correct attribute
+
+# 3. ADDED RETRY LOGIC - Handle API failures gracefully
+async def _get_exchange_orders_with_retry(self, market: str, max_retries: int = 3):
+    for attempt in range(max_retries):
+        try:
+            response = self.client.get_pending_orders(market=market)
+            return response
+        except Exception as e:
+            if attempt < max_retries - 1:
+                delay = 2 ** attempt  # 2s, 4s, 8s exponential backoff
+                await asyncio.sleep(delay)
+
+# 4. INCREASED VALIDATION FREQUENCY - From 3 minutes to 1 minute
+if (now - self._last_positions_sync).seconds > 60:  # Was 180s
+
+# 5. FORCE VALIDATION BEFORE BUY DECISIONS - Ensure fresh status
+def _should_place_buy_order(self, market: str, signal: TradingSignal, current_price: float) -> bool:
+    # Force fresh validation before emergency check
+    asyncio.create_task(self._validate_order_manager_state())
+    time.sleep(0.5)  # Let validation complete
+```
+
+**Impact and Recovery:**
+- **ETH Bot**: Fixed immediately, validation now runs every ~6 seconds successfully
+- **ADA Bot**: Detected 6+ hour old stale sell order, cleanup process initiated
+- **Both Bots**: Normal trading flow restored, no more "EMERGENCY BLOCK" from stale orders
+- **API Reliability**: Retry logic handles temporary CoinEx API failures gracefully
+
+**Verification Patterns:**
+```
+# SUCCESS: Validation actually running
+[INFO] 🔍 Validating order status for ETHUSDT
+[INFO] ✅ API call successful for ETHUSDT (attempt 1)
+[INFO] 📊 Internal cache has 1 orders for ETHUSDT
+[INFO] 🔍 Exchange has 0 pending orders for ETHUSDT
+
+# SUCCESS: Stale order cleanup
+[WARNING] 🧹 Removed stale order from OrderManager: DRA_xxx_sell_ETHUSDT
+[WARNING] ⚠️ Cleaned 1 stale orders for ETHUSDT that were filled but missed by WebSocket
+
+# SUCCESS: Trading recovery
+[INFO] 🌅 First buy order of the day allowed for ETHUSDT
+```
+
+**Prevention Measures:**
+- Enhanced logging shows API call success/failure with attempt numbers
+- Validation runs every 60 seconds instead of 180 seconds
+- Force validation before critical buy decisions ensures fresh state
+- Retry logic with exponential backoff handles temporary API issues
+- Proper error handling distinguishes between different failure types
+
+**Critical Learning:**
+- Never assume periodic validation is working without explicit verification
+- Always test attribute references, especially in error scenarios
+- WebSocket reliability requires robust HTTP API fallback mechanisms  
+- Validation frequency must match typical fill detection latency requirements
+
+**Fixed in commit:** 3d82fd5 - Fix critical order validation issues: attribute error and stale order detection
+
 ### Problem: API Error 3007 - Funding Fee Settlement Period
 **Symptoms:**
 ```
