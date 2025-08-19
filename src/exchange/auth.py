@@ -115,12 +115,21 @@ class CoinExAuth:
         if timestamp is None:
             timestamp = str(int(time.time() * 1000))
         
+        # DEBUG: Log credential information for debugging
+        from src.utils.logger import get_logger
+        logger = get_logger(__name__)
+        logger.info(f"🔐 WebSocket Auth - Access ID: {self.access_id}")
+        logger.info(f"🔐 WebSocket Auth - Secret Key (first 4 chars): {self.secret_key[:4]}****")
+        logger.info(f"🔐 WebSocket Auth - Timestamp: {timestamp}")
+        
         # For WebSocket, the prepared string is just the timestamp
         signature = hmac.new(
             self.secret_key.encode('utf-8'),
             timestamp.encode('utf-8'),
             hashlib.sha256
         ).hexdigest().lower()
+        
+        logger.info(f"🔐 WebSocket Auth - Generated signature (first 8 chars): {signature[:8]}****")
         
         return {
             'access_id': self.access_id,

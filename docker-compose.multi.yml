@@ -1,11 +1,11 @@
 version: '3.8'
 
 services:
-  bot-ada:
+  ada:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: bot-ada
+    container_name: ada
     command: ["ADAUSDT"]
     env_file: .env.ada
     restart: always
@@ -28,11 +28,11 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  bot-eth:
+  eth:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: bot-eth
+    container_name: eth
     command: ["ETHUSDT"]
     env_file: .env.eth
     restart: always

@@ -141,17 +141,17 @@ stop_containers() {
     
     case "$target" in
         "ada")
-            if docker ps -q -f name=bot-ada | grep -q .; then
-                docker stop bot-ada && print_vm_success "ADA bot stopped"
-                docker rm bot-ada 2>/dev/null || true
+            if docker ps -q -f name=ada | grep -q .; then
+                docker stop ada && print_vm_success "ADA bot stopped"
+                docker rm ada 2>/dev/null || true
             else
                 print_vm_status "ADA bot not running"
             fi
             ;;
         "eth")
-            if docker ps -q -f name=bot-eth | grep -q .; then
-                docker stop bot-eth && print_vm_success "ETH bot stopped"
-                docker rm bot-eth 2>/dev/null || true
+            if docker ps -q -f name=eth | grep -q .; then
+                docker stop eth && print_vm_success "ETH bot stopped"
+                docker rm eth 2>/dev/null || true
             else
                 print_vm_status "ETH bot not running"
             fi
@@ -247,13 +247,13 @@ start_containers() {
     
     case "$target" in
         "ada")
-            docker-compose -f docker-compose.multi.yml build --no-cache bot-ada
-            docker-compose -f docker-compose.multi.yml up -d bot-ada
+            docker-compose -f docker-compose.multi.yml build --no-cache ada
+            docker-compose -f docker-compose.multi.yml up -d ada
             print_vm_success "ADA bot started"
             ;;
         "eth")
-            docker-compose -f docker-compose.multi.yml build --no-cache bot-eth
-            docker-compose -f docker-compose.multi.yml up -d bot-eth
+            docker-compose -f docker-compose.multi.yml build --no-cache eth
+            docker-compose -f docker-compose.multi.yml up -d eth
             print_vm_success "ETH bot started"
             ;;
         "all")
@@ -276,17 +276,17 @@ check_health() {
     
     case "$target" in
         "ada"|"all")
-            if docker ps -q -f name=bot-ada | grep -q .; then
+            if docker ps -q -f name=ada | grep -q .; then
                 print_vm_success "ADA bot is running"
-                docker logs --tail 5 bot-ada
+                docker logs --tail 5 ada
             else
                 print_vm_error "ADA bot is not running!"
             fi
             ;;&
         "eth"|"all")
-            if docker ps -q -f name=bot-eth | grep -q .; then
+            if docker ps -q -f name=eth | grep -q .; then
                 print_vm_success "ETH bot is running"
-                docker logs --tail 5 bot-eth
+                docker logs --tail 5 eth
             else
                 print_vm_error "ETH bot is not running!"
             fi

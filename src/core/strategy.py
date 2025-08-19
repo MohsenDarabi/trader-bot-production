@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from config.settings import RANGE_DIVISOR, MAKER_FEE, TAKER_FEE
 from src.data.market_data import MarketDataManager
+from src.data.database import DatabaseManager
 from src.utils.logger import get_logger
 
 
@@ -52,6 +53,8 @@ class DailyRangeStrategy:
         self.market_data = market_data
         self.range_divisor = RANGE_DIVISOR
         self._current_signals = {}
+        self.db = DatabaseManager()
+        self._load_signals_from_database()
     
     def calculate_signal_prices(self, high: float, low: float) -> Tuple[float, float, float]:
         """
@@ -80,6 +83,58 @@ class DailyRangeStrategy:
                    f"Range: ${range_value:.2f}")
         
         return buy_price, sell_price, range_value
+    
+    def _load_signals_from_database(self):
+        """Load today's signals from database on startup"""
+        try:
+            today = datetime.now(timezone.utc).date().isoformat()
+            logger.info(f"Loading signals from database for date: {today}")
+            
+            # For now, we might not know which markets to load, so we'll load them as needed
+            # This method will be called during signal retrieval if signal not in memory
+            logger.info("Signal loading from database will be done on-demand per market")
+            
+        except Exception as e:
+            logger.error(f"Error loading signals from database: {e}")
+    
+    def _save_signal_to_database(self, signal: TradingSignal):
+        """Save signal to database for persistence"""
+        try:
+            signal_dict = signal.to_dict()
+            success = self.db.save_daily_signal(signal_dict)
+            if success:
+                logger.info(f"✅ Signal saved to database: {signal.market} on {signal.date}")
+            else:
+                logger.error(f"❌ Failed to save signal to database: {signal.market} on {signal.date}")
+                
+        except Exception as e:
+            logger.error(f"Error saving signal to database: {e}")
+    
+    def _load_signal_from_database(self, market: str, date: str) -> Optional[TradingSignal]:
+        """Load a specific signal from database"""
+        try:
+            signal_dict = self.db.load_daily_signal(market, date)
+            if signal_dict:
+                # Convert back to TradingSignal object
+                signal = TradingSignal(
+                    market=signal_dict['market'],
+                    date=signal_dict['date'],
+                    buy_price=signal_dict['buy_price'],
+                    sell_price=signal_dict['sell_price'],
+                    range_value=signal_dict['range_value'],
+                    previous_high=signal_dict['previous_high'],
+                    previous_low=signal_dict['previous_low'],
+                    created_at=datetime.fromisoformat(signal_dict['created_at'])
+                )
+                logger.info(f"✅ Loaded signal from database: {market} on {date}")
+                return signal
+            else:
+                logger.debug(f"No signal found in database for {market} on {date}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error loading signal from database for {market} on {date}: {e}")
+            return None
     
     def generate_daily_signal(self, market: str, 
                             force: bool = False) -> Optional[TradingSignal]:
@@ -145,11 +200,17 @@ class DailyRangeStrategy:
                 created_at=datetime.now(timezone.utc)
             )
             
-            # Cache the signal
+            # Cache the signal in memory
             self._current_signals[market] = signal
+            
+            # Save signal to database for persistence
+            self._save_signal_to_database(signal)
             
             logger.info(f"Generated signal for {market} on {today}: "
                        f"Buy=${buy_price:.2f}, Sell=${sell_price:.2f}")
+            
+            # Enhanced daily signal display
+            logger.info(f"📊 Daily Trading Signals for {market}: Buy=${buy_price:.4f} | Sell=${sell_price:.4f} | Range=${range_value:.4f}")
             
             return signal
             
@@ -159,7 +220,7 @@ class DailyRangeStrategy:
     
     def get_current_signal(self, market: str) -> Optional[TradingSignal]:
         """
-        Get current day's signal if exists
+        Get current day's signal if exists, checking memory first then database
         
         Args:
             market: Market symbol
@@ -169,11 +230,27 @@ class DailyRangeStrategy:
         """
         today = datetime.now(timezone.utc).date().isoformat()
         
+        # First check in-memory cache
         if market in self._current_signals:
             signal = self._current_signals[market]
             if signal.date == today:
+                logger.debug(f"Found signal in memory for {market} on {today}")
                 return signal
         
+        # If not in memory, try loading from database
+        logger.debug(f"Signal not in memory for {market}, checking database...")
+        signal = self._load_signal_from_database(market, today)
+        
+        if signal:
+            # Cache it in memory for future access
+            self._current_signals[market] = signal
+            logger.info(f"🔄 Loaded and cached signal from database: {market} on {today}")
+            
+            # Enhanced daily signal display for loaded signals
+            logger.info(f"📊 Daily Trading Signals for {market}: Buy=${signal.buy_price:.4f} | Sell=${signal.sell_price:.4f} | Range=${signal.range_value:.4f}")
+            return signal
+        
+        logger.debug(f"No signal found for {market} on {today}")
         return None
     
     def should_place_buy_order(self, market: str, current_price: float) -> bool:

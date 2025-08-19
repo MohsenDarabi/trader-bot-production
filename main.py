@@ -207,8 +207,29 @@ class TradingBotManager:
             
             # Get market from command line argument or use default
             import sys
-            # Get market from command line or environment variable
-            self.selected_market = sys.argv[1] if len(sys.argv) > 1 else os.getenv('DEFAULT_TRADING_MARKET')
+            
+            # Parse command line arguments more robustly
+            self.selected_market = None
+            
+            # Look for market argument in command line
+            for i, arg in enumerate(sys.argv[1:], 1):
+                # Skip Docker/system arguments that start with --
+                if arg.startswith('--'):
+                    continue
+                    
+                # Check if it's a valid market format (letters + USDT)
+                if arg and len(arg) >= 4 and arg.endswith('USDT') and arg[:-4].isalpha():
+                    self.selected_market = arg
+                    self.console.print(f"📈 Found market argument: {arg}", style="cyan")
+                    break
+            
+            # Fallback to environment variable if no valid market found in args
+            if not self.selected_market:
+                self.selected_market = os.getenv('DEFAULT_TRADING_MARKET')
+                if self.selected_market:
+                    self.console.print(f"📈 Using DEFAULT_TRADING_MARKET: {self.selected_market}", style="yellow")
+                else:
+                    raise ValueError("No valid market specified in command line or DEFAULT_TRADING_MARKET environment variable")
             self.console.print(f"📈 Selected Market: {self.selected_market}", style="cyan")
             
             # Initialize market for trading

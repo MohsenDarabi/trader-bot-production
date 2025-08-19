@@ -3,6 +3,7 @@ Daily Range Accumulation Trading Bot Core
 Orchestrates all trading components and executes the strategy
 """
 import asyncio
+import os
 from datetime import datetime, timezone, time, timedelta
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ logger = get_logger(__name__)
 
 
 class TradingCircuitBreaker:
-    """Enhanced circuit breaker with priority levels and dynamic cooldowns"""
+    """Enhanced circuit breaker with priority levels, dynamic cooldowns, and position coverage checks"""
     
     def __init__(self, default_cooldown: int = 30):
         """
@@ -42,11 +43,16 @@ class TradingCircuitBreaker:
         self._last_actions = {}  # f"{market}_{action}" -> timestamp
         self._default_cooldown = default_cooldown
         
+        # Track position coverage violations
+        self._coverage_violations = {}  # market -> violation count
+        self._last_coverage_check = {}  # market -> timestamp
+        
         # Priority-based cooldown periods (seconds)
         self._action_cooldowns = {
             # Critical operations - shortest cooldowns
             "emergency_sell": 5,      # Emergency position closure
             "position_closure": 10,   # Manual position closure
+            "orphaned_sell": 5,       # Orphaned position sell orders
             
             # Normal operations - standard cooldowns  
             "buy_order": 30,          # Buy order placement
@@ -140,6 +146,88 @@ class TradingCircuitBreaker:
         self._last_actions.pop(action_key, None)
         logger.info(f"🔄 Circuit breaker: Reset cooldown for {action_type} on {market}")
     
+    def check_position_coverage(self, market: str, position_size: float, sell_order_total: float) -> bool:
+        """
+        Check if position has adequate sell order coverage
+        
+        Args:
+            market: Market symbol
+            position_size: Current position size
+            sell_order_total: Total amount in sell orders
+            
+        Returns:
+            True if coverage is adequate, False if violation detected
+        """
+        now = datetime.now(timezone.utc)
+        
+        # Calculate coverage ratio
+        if position_size <= 0:
+            return True  # No position, no coverage needed
+        
+        coverage_ratio = sell_order_total / position_size
+        
+        # Check for violations (less than 95% coverage)
+        if coverage_ratio < 0.95:
+            # Track violation
+            if market not in self._coverage_violations:
+                self._coverage_violations[market] = 0
+            self._coverage_violations[market] += 1
+            
+            # Log violation
+            logger.warning(f"⚠️ Position coverage violation #{self._coverage_violations[market]} for {market}")
+            logger.warning(f"   Position: {position_size:.6f}, Sell orders: {sell_order_total:.6f}")
+            logger.warning(f"   Coverage ratio: {coverage_ratio:.1%} (minimum: 95%)")
+            
+            self._last_coverage_check[market] = now
+            return False
+        
+        # Reset violation count on good coverage
+        if market in self._coverage_violations:
+            self._coverage_violations[market] = 0
+        
+        self._last_coverage_check[market] = now
+        return True
+    
+    def should_allow_buy_with_coverage(self, market: str, position_manager, order_manager) -> bool:
+        """
+        Check if buy order should be allowed based on position coverage
+        
+        Args:
+            market: Market symbol
+            position_manager: Position manager instance
+            order_manager: Order manager instance
+            
+        Returns:
+            True if buy order can proceed, False if blocked by coverage issues
+        """
+        # Get current position
+        position = position_manager.get_position(market)
+        if not position or position.size <= 0:
+            return True  # No position, buy allowed
+        
+        # Get sell orders
+        pending_orders = order_manager.get_pending_orders(market)
+        from src.exchange.order_tracker import OrderSide
+        sell_orders = [order for order in pending_orders if order.side == OrderSide.SELL]
+        total_sell_amount = sum(order.amount for order in sell_orders)
+        
+        # Check coverage
+        if not self.check_position_coverage(market, position.size, total_sell_amount):
+            logger.error(f"🚨 Circuit breaker: Blocking buy order due to inadequate position coverage for {market}")
+            
+            # Apply escalating cooldown based on violation count
+            violations = self._coverage_violations.get(market, 0)
+            cooldown = min(300, 30 * violations)  # Max 5 minutes
+            
+            # Set cooldown for buy orders
+            action_key = f"{market}_buy_order"
+            self._last_actions[action_key] = datetime.now(timezone.utc)
+            
+            logger.info(f"⏰ Applied {cooldown}s cooldown for buy orders on {market} (violation #{violations})")
+            return False
+        
+        return True
+    
     def get_statistics(self) -> Dict[str, Any]:
         """Get circuit breaker statistics"""
         now = datetime.now(timezone.utc)
@@ -155,10 +243,20 @@ class TradingCircuitBreaker:
             if remaining > 0:
                 active_cooldowns[action_key] = remaining
         
+        # Add coverage violation statistics
+        coverage_stats = {}
+        for market, violations in self._coverage_violations.items():
+            if violations > 0:
+                coverage_stats[market] = {
+                    "violations": violations,
+                    "last_check": self._last_coverage_check.get(market).isoformat() if market in self._last_coverage_check else None
+                }
+        
         return {
             "default_cooldown_seconds": self._default_cooldown,
             "total_tracked_actions": len(self._last_actions),
-            "active_cooldowns": active_cooldowns
+            "active_cooldowns": active_cooldowns,
+            "coverage_violations": coverage_stats
         }
 
 
@@ -386,8 +484,38 @@ class DailyRangeBot:
             logger.error(f"Failed to initialize from exchange: {e}")
             raise
     
+    async def _clean_startup_state(self, market: str):
+        """Clean startup state to ensure fresh initialization"""
+        try:
+            logger.info(f"🧹 Performing startup cleanup for {market}...")
+            
+            # Clear in-memory signal cache for this market
+            if hasattr(self.strategy, '_current_signals') and market in self.strategy._current_signals:
+                del self.strategy._current_signals[market]
+                logger.debug(f"Cleared in-memory signal cache for {market}")
+            
+            # Clear pairing rules for this market
+            if self.pairing_manager and market in self.pairing_manager.pairing_rules:
+                del self.pairing_manager.pairing_rules[market]
+                logger.debug(f"Cleared pairing rules for {market}")
+                
+            logger.info(f"✅ Startup cleanup completed for {market}")
+            
+        except Exception as e:
+            logger.warning(f"Error during startup cleanup for {market}: {e}")
+
     async def set_trading_market(self, market: str):
-        """Set up a market for trading"""
+        """Set up a market for trading with proper initialization order"""
+        
+        # 1. VALIDATE MARKET FIRST  
+        if not market or market == 'None':
+            raise ValueError("No valid market specified - this should have been handled by main.py")
+        
+        # Additional validation for market format
+        if not (len(market) >= 4 and market.endswith('USDT') and market[:-4].isalpha()):
+            logger.error(f"Invalid market format: {market} (should be like ETHUSDT, ADAUSDT, etc.)")
+            raise ValueError(f"Invalid market format: {market}")
+        
         if market not in self.trading_markets:
             logger.info(f"Adding {market} to trading markets")
             self.trading_markets.append(market)
@@ -501,7 +629,10 @@ class DailyRangeBot:
                 logger.error(f"Critical error configuring leverage for {market}: {e}")
                 raise ValueError(f"Cannot proceed without resolving leverage configuration: {e}")
             
-            # Get current trading signal to configure pairing rule
+            # Generate initial signal FIRST before configuring pairing rules
+            await self._check_and_generate_signals(market)
+            
+            # Get current trading signal to configure pairing rule (after generation)
             current_signal = self.strategy.get_current_signal(market)
             if current_signal:
                 # Configure pairing rules with current signal's sell price
@@ -512,18 +643,29 @@ class DailyRangeBot:
                 )
                 logger.info(f"Configured pairing rules for {market} with sell price ${current_signal.sell_price:.2f}")
             else:
-                # Fallback: configure empty pairing rule, will be updated when signal is generated
-                self.pairing_manager.configure_pairing_rule(
-                    market=market,
-                    sell_price_levels=[],  # Will be updated when signal is generated
-                    min_fill_amount=0.001  # Minimum fill to trigger sell orders
-                )
-                logger.warning(f"No current signal for {market}, pairing rule will be updated when signal is generated")
+                # This should rarely happen now that we generate signals first
+                logger.error(f"❌ CRITICAL: No signal available for {market} even after generation attempt")
+                logger.error("This could cause the infinite buy loop bug!")
+                
+                # Force signal generation with force=True flag
+                logger.info(f"🔧 Attempting forced signal generation for {market}")
+                forced_signal = self.strategy.generate_daily_signal(market, force=True)
+                
+                if forced_signal:
+                    logger.info(f"✅ Forced signal generation successful for {market}")
+                    # Configure pairing rules with forced signal
+                    self.pairing_manager.configure_pairing_rule(
+                        market=market,
+                        sell_price_levels=[forced_signal.sell_price],
+                        min_fill_amount=0.001
+                    )
+                    logger.info(f"Configured pairing rules for {market} with forced signal sell price ${forced_signal.sell_price:.2f}")
+                else:
+                    # Absolute fallback - should never happen
+                    logger.error(f"❌ FATAL: Cannot generate signal for {market} - refusing to start trading")
+                    raise ValueError(f"Cannot generate trading signal for {market}. This prevents safe trading.")
             
-            logger.info(f"Configured pairing rules for {market} with Daily Range Strategy (one sell price per buy)")
-            
-            # Generate initial signal if needed
-            await self._check_and_generate_signals(market)
+            logger.info(f"✅ Configured pairing rules for {market} with Daily Range Strategy (one sell price per buy)")
             
             # Initialize tracking for this market
             # REMOVED: Cache update - now using direct exchange queries
@@ -567,6 +709,11 @@ class DailyRangeBot:
                 # REMOVED: Cache clearing for new day - using direct exchange queries
                 log_trading_event('new_day', f"New trading day detected: {current_day}")
                 logger.info(f"🌅 New trading day {current_day} - using fresh exchange data")
+            
+            # CRITICAL: Check for orphaned positions FIRST (before any other trading logic)
+            # This runs independently on EVERY cycle to catch positions without sell orders
+            for market in self.trading_markets:
+                await self._check_and_cover_orphaned_positions(market)
             
             # Update account and positions periodically with enhanced frequencies for better state consistency
             # Account update every 2 minutes (reduced from 5 min) for better balance tracking
@@ -686,6 +833,66 @@ class DailyRangeBot:
             except Exception as e:
                 logger.error(f"Error checking exit for position {position.position_id}: {e}")
     
+    async def _check_and_cover_orphaned_positions(self, market: str):
+        """
+        Check for orphaned positions (positions without sell orders) and place sell orders
+        This runs INDEPENDENTLY every cycle to ensure all positions have exit orders
+        CRITICAL: This function ONLY places SELL orders, never BUY orders
+        """
+        try:
+            # Get current position for this market
+            position = self.position_manager.get_position(market)
+            if not position or position.size <= 0:
+                # No position to cover
+                return
+            
+            # Get all pending sell orders for this market
+            pending_orders = self.order_manager.get_pending_orders(market)
+            sell_orders = [order for order in pending_orders if order.side == OrderSide.SELL]
+            
+            # Calculate total sell order amount
+            total_sell_amount = sum(order.amount for order in sell_orders)
+            
+            # Check if position is fully covered
+            uncovered_amount = position.size - total_sell_amount
+            
+            if uncovered_amount > 0.000001:  # Small tolerance for rounding
+                logger.warning(f"🔧 ORPHANED POSITION DETECTED: {market}")
+                logger.warning(f"   Position size: {position.size:.6f}")
+                logger.warning(f"   Sell orders total: {total_sell_amount:.6f}")
+                logger.warning(f"   Uncovered amount: {uncovered_amount:.6f}")
+                
+                # Get current signal to determine sell price
+                signal = self.strategy.get_current_signal(market)
+                if not signal:
+                    logger.error(f"❌ Cannot cover orphaned position - no signal available for {market}")
+                    return
+                
+                # Place sell order for uncovered amount at strategy sell price
+                logger.info(f"📍 Placing sell order to cover orphaned position: {uncovered_amount:.6f} @ ${signal.sell_price:.2f}")
+                
+                sell_order = self.order_manager.place_sell_order(
+                    market=market,
+                    amount=uncovered_amount,
+                    price=signal.sell_price,
+                    position_size=uncovered_amount * signal.sell_price,
+                    is_hide=True,
+                    is_orphaned=True  # Mark as orphaned position sell
+                )
+                
+                if sell_order:
+                    logger.info(f"✅ Orphaned position covered with sell order: {sell_order.client_id}")
+                    log_trading_event('orphaned_position_covered', 
+                                    f"Placed sell order for uncovered position: {uncovered_amount:.6f} {market} @ ${signal.sell_price:.2f}")
+                else:
+                    logger.error(f"❌ Failed to place sell order for orphaned position in {market}")
+                    log_trading_event('orphaned_position_failed', 
+                                    f"Failed to cover orphaned position: {uncovered_amount:.6f} {market}")
+            
+        except Exception as e:
+            logger.error(f"Error checking orphaned positions for {market}: {e}")
+            # Don't crash the bot on error - log and continue
+    
     async def _check_entry_opportunities(self, market: str, signal: TradingSignal):
         """Check for new entry opportunities and manage existing positions"""
         try:
@@ -693,10 +900,8 @@ class DailyRangeBot:
             if not current_price:
                 return
             
-            # DISABLED: Position balancing logic completely removed to prevent dangerous bug
-            # This was causing the bot to place buy orders despite pending sells
-            # All position balancing should be handled manually
-                
+            # Position balancing is now handled by _check_and_cover_orphaned_positions()
+            # which runs independently at the start of each cycle
             
             # Second priority: Check for new buy opportunities
             # CRITICAL FIX: Clean up duplicate orders before checking if we should place buy
@@ -1077,9 +1282,11 @@ class DailyRangeBot:
             # Get all pending orders for this market
             pending_orders = self.order_manager.get_pending_orders(market)
             
-            # Debug logging to understand order counts
+            # Enhanced order analysis logging with detailed information
             if len(pending_orders) > 0:
                 logger.info(f"📊 Analyzing {len(pending_orders)} total pending orders for {market}")
+                for order in pending_orders:
+                    logger.info(f"📋 Order: {order.side.value} | ${order.price:.4f} | Amount: {order.amount:.6f} | ID: {order.client_id}")
             
             # Filter for sell orders placed today
             today_pending_sells = []
@@ -1140,6 +1347,39 @@ class DailyRangeBot:
     
     def _should_place_buy_order(self, market: str, signal: TradingSignal, current_price: float) -> bool:
         """Buy order decision using fresh exchange data with day-start cancellation and funding fee protection"""
+        
+        # CRITICAL PHASE 0: Signal availability check
+        if not signal:
+            logger.error(f"❌ CRITICAL: Cannot place buy order for {market} - no trading signal available!")
+            logger.error("This is the root cause of the infinite buy loop bug!")
+            log_trading_event('signal_missing', f"❌ Buy order blocked - no signal for {market}")
+            return False
+        
+        # Verify signal has required attributes
+        if not hasattr(signal, 'buy_price') or not hasattr(signal, 'sell_price'):
+            logger.error(f"❌ CRITICAL: Invalid signal for {market} - missing buy/sell prices!")
+            logger.error("This could cause order placement failures or missing pairing rules!")
+            log_trading_event('signal_invalid', f"❌ Buy order blocked - invalid signal for {market}")
+            return False
+        
+        # Verify signal is for today (not stale)
+        today = datetime.now(timezone.utc).date().isoformat()
+        if signal.date != today:
+            logger.warning(f"⚠️ Signal for {market} is stale (signal date: {signal.date}, today: {today})")
+            logger.warning("Attempting to generate fresh signal...")
+            
+            # Try to generate a fresh signal
+            fresh_signal = self.strategy.generate_daily_signal(market, force=True)
+            if fresh_signal and fresh_signal.date == today:
+                logger.info(f"✅ Generated fresh signal for {market}")
+                # Note: We can't update the signal parameter, but the caller should get a fresh one next cycle
+                return False  # Skip this cycle, let caller get fresh signal
+            else:
+                logger.error(f"❌ Could not generate fresh signal for {market}")
+                log_trading_event('signal_stale', f"❌ Buy order blocked - stale signal for {market}")
+                return False
+        
+        logger.debug(f"✅ Signal validation passed for {market}: Buy=${signal.buy_price:.2f}, Sell=${signal.sell_price:.2f}")
         
         # CRITICAL: Force fresh order validation before emergency check to ensure accurate status
         logger.debug(f"🔄 Forcing order validation before buy decision for {market}")
@@ -1224,7 +1464,25 @@ class DailyRangeBot:
         # Use direct exchange queries for single source of truth
         buy_status = self._get_exchange_buy_status(market)
         
-        # Phase 2: Check for pending sell orders from today
+        # Phase 2: Check for uncovered positions BEFORE placing new buy orders
+        # This prevents accumulating more positions before existing ones have sell orders
+        position = self.position_manager.get_position(market)
+        if position and position.size > 0:
+            # Get all pending sell orders for this market
+            pending_orders = self.order_manager.get_pending_orders(market)
+            sell_orders = [order for order in pending_orders if order.side == OrderSide.SELL]
+            total_sell_amount = sum(order.amount for order in sell_orders)
+            uncovered_amount = position.size - total_sell_amount
+            
+            if uncovered_amount > 0.000001:  # Small tolerance for rounding
+                if self._should_log_state_change(market, 'uncovered_position', True):
+                    logger.warning(f"❌ Cannot place buy - position has {uncovered_amount:.6f} uncovered amount for {market}")
+                    logger.info(f"   Position: {position.size:.6f}, Sell orders: {total_sell_amount:.6f}")
+                    log_trading_event('uncovered_position_block', 
+                                    f"Buy blocked - uncovered position {uncovered_amount:.6f} for {market}")
+                return False
+        
+        # Phase 3: Check for pending sell orders from today
         today_pending_sells = self._get_today_pending_sell_orders(market)
         if today_pending_sells > 0:
             if self._should_log_state_change(market, f'pending_sells_{today_pending_sells}', True):
@@ -1232,8 +1490,37 @@ class DailyRangeBot:
                 log_trading_event('pending_sells_block', f"Buy blocked - {today_pending_sells} today's sell orders pending for {market}")
             return False
         
-        # Phase 3: Check for pending buy orders (after day-start cancellation and sell check)
+        # Phase 4: Check for pending buy orders (after day-start cancellation and sell check)
         total_buy_orders = buy_status.get('total_buy_orders', 0)
+        
+        # CRITICAL SAFETY CHECK: Multiple buy orders indicate a serious bug
+        if total_buy_orders > 1:
+            logger.error(f"🚨 CRITICAL BUG: {total_buy_orders} buy orders detected for {market}!")
+            logger.error("Daily Range Strategy should NEVER have multiple buy orders!")
+            logger.error("This violates the core trading logic - investigating...")
+            
+            all_orders = buy_status.get('all_buy_orders', [])
+            for i, order in enumerate(all_orders, 1):
+                logger.error(f"  Buy #{i}: {order.client_id} @ ${order.price:.2f} placed {order.created_at}")
+            
+            log_trading_event('critical_bug', f"🚨 MULTIPLE BUY ORDERS BUG: {total_buy_orders} orders for {market}")
+            
+            # Attempt to fix by cancelling all but the most recent order
+            if len(all_orders) > 1:
+                # Sort by creation time, keep newest
+                sorted_orders = sorted(all_orders, key=lambda x: x.created_at)
+                orders_to_cancel = sorted_orders[:-1]  # All but the last (newest)
+                
+                logger.warning(f"🔧 Attempting to fix by cancelling {len(orders_to_cancel)} older buy orders")
+                for order in orders_to_cancel:
+                    try:
+                        if self.order_manager.cancel_order(order.client_id):
+                            logger.info(f"✅ Cancelled duplicate buy order: {order.client_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to cancel duplicate order {order.client_id}: {e}")
+            
+            return False  # Block new orders until issue is resolved
+        
         if total_buy_orders > 0:
             # Log detailed information about remaining buy orders
             all_orders = buy_status.get('all_buy_orders', [])
@@ -2023,12 +2310,12 @@ class DailyRangeBot:
                 logger.info(f"📊 Final state: Position={position.size if position else 0:.6f}, "
                            f"Buy orders={buy_status.get('total_buy_orders', 0)}")
                 
-                # CRITICAL: Set cycle completion flag to allow immediate new buy order
-                self._cycle_completion_flags[market] = True
-                logger.info(f"🔄 Cycle completion flag set for {market} - new buy order now allowed")
+                # DO NOT set cycle completion flag here - only when sell orders actually fill
+                # The cycle is only complete when the sell order fills and position closes
+                logger.info(f"🔄 Buy order processed for {market} - waiting for sell order to complete cycle")
                 
-                # Log completion event for monitoring
-                log_trading_event('cycle_complete', f"✅ Trading cycle completed for {market}")
+                # Log buy processing event for monitoring  
+                log_trading_event('buy_processed', f"✅ Buy order processed for {market} - sell order pending")
             else:
                 logger.warning(f"⚠️ Trading cycle not fully complete for {market}: position={position.size:.6f}")
             
@@ -2228,7 +2515,14 @@ class DailyRangeBot:
             # More thorough validation if we detected a reconnection
             await self._validate_order_manager_state()
             
-            logger.info(f"Position sync completed: {len(self.position_manager.get_all_positions())} positions")
+            # Enhanced position sync logging with details
+            positions = self.position_manager.get_all_positions()
+            logger.info(f"Position sync completed: {len(positions)} positions")
+            
+            # Display detailed position information
+            for position in positions:
+                value = position.size * position.avg_entry_price
+                logger.info(f"📍 Position: {position.market} | Size: {position.size:.6f} | Avg Entry: ${position.avg_entry_price:.4f} | Value: ${value:.2f}")
             
         except Exception as e:
             logger.error(f"Error syncing with exchange: {e}")
