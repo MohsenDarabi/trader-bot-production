@@ -1775,7 +1775,8 @@ class DailyRangeBot:
                     adjusted_price = current_price
                     log_trading_event('price_adjustment', f"💰 PRICE ADJUST | Signal=${price:.8f} → Market=${adjusted_price:.8f} (cheaper entry) | {market}")
                 else:
-                    log_trading_event('price_no_adjustment', f"📊 PRICE OPTIMAL | Signal=${price:.8f} | Market=${current_price:.8f if current_price else 'N/A'} | Using signal price | {market}")
+                    market_price_str = f"${current_price:.8f}" if current_price else "N/A"
+                    log_trading_event('price_no_adjustment', f"📊 PRICE OPTIMAL | Signal=${price:.8f} | Market={market_price_str} | Using signal price | {market}")
             
             # Place the order
             if side == 'buy':
