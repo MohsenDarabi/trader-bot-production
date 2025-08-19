@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Trading Bot Deployment Script - Local Coordinator
-# Usage: ./deploy.sh [ada|eth|all] [stop|update|restart]
+# Enhanced Trading Bot Deployment Script with Cross-Platform Build Support
+# Usage: ./deploy.sh [ada|eth] [stop|update|restart]
 
 set -e  # Exit on any error
 
@@ -10,7 +10,9 @@ VM_USER="ubuntu"
 VM_HOST="89.168.111.195"
 SSH_KEY="./ssh-key-2025-07-27.key"
 VM_DIR="/home/ubuntu/trader-bot-production"
-LOCAL_EXCLUDE=".git,.gitignore,logs/*,*.tar.gz,__pycache__,*.pyc,env-templates"
+
+# ENHANCED: Exclude build artifacts and temporary files
+LOCAL_EXCLUDE=".git,.gitignore,logs/*,*.tar.gz,*.tar,__pycache__,*.pyc,env-templates,vm-deploy-*.sh,*-bot-*.tar.gz,ada-bot-*,eth-bot-*"
 
 # Colors for output
 RED='\033[0;31m'
@@ -38,27 +40,31 @@ print_error() {
 
 # Function to show usage
 show_usage() {
+    echo "Enhanced Trading Bot Deployment Script"
     echo "Usage: $0 [SYMBOL] [ACTION]"
     echo ""
     echo "SYMBOL:"
     echo "  ada     - Deploy ADA bot only"
     echo "  eth     - Deploy ETH bot only" 
-    echo "  all     - Deploy both ADA and ETH bots"
     echo ""
     echo "ACTION:"
     echo "  stop    - Stop specified bot(s)"
     echo "  update  - Update code and restart bot(s)"
     echo "  restart - Restart bot(s) without code update"
     echo ""
+    echo "Credentials:"
+    echo "  ADA bot uses: .env.ada (API key: 0744B5...)"
+    echo "  ETH bot uses: .env.eth (API key: 377EB9...)"
+    echo ""
     echo "Examples:"
     echo "  $0 ada update     # Update ADA bot with latest code"
-    echo "  $0 all restart    # Restart both bots"
-    echo "  $0 eth stop       # Stop ETH bot only"
+    echo "  $0 eth restart    # Restart ETH bot"
+    echo "  $0 ada stop       # Stop ADA bot only"
 }
 
 # Function to validate inputs
 validate_inputs() {
-    if [[ ! "$1" =~ ^(ada|eth|all)$ ]]; then
+    if [[ ! "$1" =~ ^(ada|eth)$ ]]; then
         print_error "Invalid symbol: $1"
         show_usage
         exit 1
@@ -68,6 +74,66 @@ validate_inputs() {
         print_error "Invalid action: $2"
         show_usage
         exit 1
+    fi
+}
+
+# Function to ensure Docker is running
+ensure_docker_running() {
+    print_status "Checking Docker status..."
+    
+    if ! docker info &>/dev/null; then
+        print_warning "Docker is not running. Starting Docker..."
+        
+        # macOS Docker Desktop
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            open -a Docker
+            print_status "Waiting for Docker to start..."
+            
+            # Wait up to 60 seconds for Docker to start
+            local count=0
+            while ! docker info &>/dev/null && [ $count -lt 60 ]; do
+                sleep 1
+                count=$((count + 1))
+                echo -n "."
+            done
+            echo ""
+            
+            if docker info &>/dev/null; then
+                print_success "Docker started successfully"
+            else
+                print_error "Failed to start Docker. Please start Docker manually."
+                exit 1
+            fi
+        else
+            # Linux
+            print_error "Docker is not running. Please start Docker service:"
+            print_error "  sudo systemctl start docker"
+            exit 1
+        fi
+    else
+        print_success "Docker is running"
+    fi
+}
+
+# Function to clean up old build artifacts
+cleanup_old_builds() {
+    print_status "Cleaning up old build artifacts..."
+    
+    # Remove old compressed builds
+    rm -f ada-bot-*.tar.gz eth-bot-*.tar.gz 2>/dev/null || true
+    rm -f daily-range-bot*.tar* 2>/dev/null || true
+    rm -f trader-bot-update-*.tar.gz 2>/dev/null || true
+    rm -f vm-deploy-*.sh 2>/dev/null || true
+    
+    print_success "Old build artifacts cleaned"
+}
+
+# Function to check if buildx is available
+check_buildx_support() {
+    if docker buildx version &>/dev/null; then
+        echo "true"
+    else
+        echo "false"
     fi
 }
 
@@ -88,292 +154,174 @@ check_prerequisites() {
         exit 1
     fi
     
+    # Check buildx support
+    if [[ $(check_buildx_support) != "true" ]]; then
+        print_error "Docker buildx not available. Please install buildx or update Docker."
+        exit 1
+    fi
+    
     print_success "Prerequisites check passed"
 }
 
-# Function to create VM deployment script
-create_vm_script() {
+# Enhanced local build function
+build_image_locally() {
     local symbol="$1"
-    local action="$2"
     local timestamp=$(date '+%Y%m%d_%H%M%S')
-    local script_name="vm-deploy-${timestamp}.sh"
+    local image_name="${symbol}-bot-${timestamp}"
+    local tar_file="${symbol}-bot-${timestamp}.tar.gz"
     
-    print_status "Creating VM deployment script for $symbol $action..."
+    print_status "Building $symbol image locally for linux/amd64..."
     
-    cat > "$script_name" << 'EOF'
-#!/bin/bash
-
-# VM Deployment Executor Script
-# This script runs entirely on the VM for reliable execution
-
-set -e  # Exit on any error
-
-SYMBOL="$1"
-ACTION="$2" 
-TIMESTAMP="$3"
-VM_DIR="/home/ubuntu/trader-bot-production"
-
-# Colors for VM output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-print_vm_status() {
-    echo -e "${BLUE}[VM-$(date '+%H:%M:%S')]${NC} $1"
-}
-
-print_vm_success() {
-    echo -e "${GREEN}[VM-$(date '+%H:%M:%S')] ✅${NC} $1"
-}
-
-print_vm_error() {
-    echo -e "${RED}[VM-$(date '+%H:%M:%S')] ❌${NC} $1"
-}
-
-# Function to stop containers safely
-stop_containers() {
-    local target="$1"
-    print_vm_status "Stopping $target container(s)..."
+    # Clean up any existing builds first
+    cleanup_old_builds
     
-    cd "$VM_DIR"
-    
-    case "$target" in
-        "ada")
-            if docker ps -q -f name=ada | grep -q .; then
-                docker stop ada && print_vm_success "ADA bot stopped"
-                docker rm ada 2>/dev/null || true
-            else
-                print_vm_status "ADA bot not running"
-            fi
-            ;;
-        "eth")
-            if docker ps -q -f name=eth | grep -q .; then
-                docker stop eth && print_vm_success "ETH bot stopped"
-                docker rm eth 2>/dev/null || true
-            else
-                print_vm_status "ETH bot not running"
-            fi
-            ;;
-        "all")
-            docker-compose -f docker-compose.multi.yml down && print_vm_success "All bots stopped"
-            ;;
-    esac
-    
-    # Wait for containers to fully stop
-    sleep 3
-}
-
-# Function to clean Docker safely
-clean_docker() {
-    print_vm_status "Cleaning unused Docker resources..."
-    
-    # Remove unused images (keep base images)
-    docker image prune -f && print_vm_success "Unused images cleaned"
-    
-    # Remove unused containers
-    docker container prune -f && print_vm_success "Unused containers cleaned"
-    
-    # Remove unused networks
-    docker network prune -f && print_vm_success "Unused networks cleaned"
-    
-    # Show disk usage
-    print_vm_status "Docker disk usage after cleanup:"
-    docker system df
-}
-
-# Function to preserve important files
-preserve_files() {
-    print_vm_status "Preserving important files..."
-    
-    cd "$VM_DIR"
-    
-    # Create backup directory with timestamp
-    BACKUP_DIR="backup_${TIMESTAMP}"
-    mkdir -p "$BACKUP_DIR"
-    
-    # Preserve environment files
-    if [[ -f ".env.ada" ]]; then
-        cp ".env.ada" "$BACKUP_DIR/" && print_vm_success "Preserved .env.ada"
+    # Build with buildx for linux/amd64
+    if ! docker buildx build --platform linux/amd64 \
+        -t "${image_name}:latest" \
+        -f Dockerfile \
+        --load \
+        . ; then
+        print_error "Failed to build image"
+        return 1
     fi
     
-    if [[ -f ".env.eth" ]]; then
-        cp ".env.eth" "$BACKUP_DIR/" && print_vm_success "Preserved .env.eth"
+    print_success "Image built successfully: ${image_name}:latest"
+    
+    # Save as compressed tar
+    print_status "Compressing image (this may take a minute)..."
+    docker save "${image_name}:latest" | gzip > "${tar_file}"
+    
+    local size=$(ls -lh "${tar_file}" | awk '{print $5}')
+    print_success "Image compressed: ${tar_file} (${size})"
+    
+    # Transfer to VM
+    print_status "Transferring image to VM..."
+    if ! scp -i "$SSH_KEY" -o StrictHostKeyChecking=no \
+        "${tar_file}" \
+        "$VM_USER@$VM_HOST:~/"; then
+        print_error "Failed to transfer image"
+        rm -f "${tar_file}"
+        return 1
     fi
     
-    # Preserve other important configs
-    for file in ".env" "ssh-key-2025-07-27.key" "docker-compose.multi.yml"; do
-        if [[ -f "$file" ]]; then
-            cp "$file" "$BACKUP_DIR/" && print_vm_success "Preserved $file"
-        fi
-    done
+    print_success "Image transferred successfully"
     
-    print_vm_success "Files preserved in $BACKUP_DIR"
+    # Load on VM
+    print_status "Loading image on VM (this may take a minute)..."
+    if ! ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "gunzip -c ~/${tar_file} | docker load && rm -f ~/${tar_file}"; then
+        print_error "Failed to load image on VM"
+        rm -f "${tar_file}"
+        return 1
+    fi
+    
+    print_success "Image loaded on VM"
+    
+    # Clean up local files
+    print_status "Cleaning up local temporary files..."
+    rm -f "${tar_file}"
+    docker rmi "${image_name}:latest" 2>/dev/null || true
+    
+    print_success "Local cleanup completed"
+    
+    # Store image name for container restart
+    echo "${image_name}:latest" > ".last_built_${symbol}"
 }
 
-# Function to extract and update code
-update_code() {
-    print_vm_status "Extracting updated code..."
+# Enhanced restart function with proper credential handling
+restart_containers() {
+    local symbol="$1"
+    local image_name="ada-bot-fixed:latest"  # Default fallback
     
-    cd "$VM_DIR"
+    # Get the image name from last build
+    if [[ -f ".last_built_${symbol}" ]]; then
+        image_name=$(cat ".last_built_${symbol}")
+        rm -f ".last_built_${symbol}"
+    fi
     
-    # Extract the uploaded code
-    if [[ -f "trader-bot-update-${TIMESTAMP}.tar.gz" ]]; then
-        tar -xzf "trader-bot-update-${TIMESTAMP}.tar.gz" && print_vm_success "Code extracted"
-        
-        # Restore preserved files
-        BACKUP_DIR="backup_${TIMESTAMP}"
-        if [[ -d "$BACKUP_DIR" ]]; then
-            cp "$BACKUP_DIR"/.env* . 2>/dev/null || true
-            cp "$BACKUP_DIR"/ssh-key* . 2>/dev/null || true
-            print_vm_success "Important files restored"
-        fi
-        
-        # Clean up
-        rm -f "trader-bot-update-${TIMESTAMP}.tar.gz"
-    else
-        print_vm_error "Update archive not found!"
+    # CRITICAL: Use correct env file for each bot
+    local env_file=".env.${symbol}"
+    
+    print_status "Verifying ${env_file} exists on VM..."
+    if ! ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "test -f $VM_DIR/${env_file}"; then
+        print_error "Environment file ${env_file} not found on VM!"
+        print_error "Please ensure ${env_file} exists with correct API credentials"
         exit 1
     fi
+    
+    print_success "Found ${env_file} - will use these credentials"
+    
+    print_status "Stopping old ${symbol} container..."
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "docker stop ${symbol} 2>/dev/null || true; docker rm ${symbol} 2>/dev/null || true"
+    
+    print_status "Starting ${symbol} container with ${env_file}..."
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "cd $VM_DIR && docker run -d --name ${symbol} \
+         --env-file ${env_file} \
+         --restart always \
+         --memory=128m \
+         --cpus=0.25 \
+         ${image_name} \
+         python main.py ${symbol^^}USDT"
+    
+    print_success "${symbol} container started with credentials from ${env_file}"
+    
+    # Wait for container to start and show logs
+    sleep 3
+    print_status "Checking ${symbol} bot logs..."
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "docker logs --tail 20 ${symbol}"
 }
 
-# Function to build and start containers
-start_containers() {
-    local target="$1"
-    print_vm_status "Building and starting $target container(s)..."
+# Stop containers function
+stop_containers() {
+    local symbol="$1"
+    print_status "Stopping $symbol container..."
     
-    cd "$VM_DIR"
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "docker stop ${symbol} 2>/dev/null && docker rm ${symbol} 2>/dev/null || true"
     
-    case "$target" in
-        "ada")
-            docker-compose -f docker-compose.multi.yml build --no-cache ada
-            docker-compose -f docker-compose.multi.yml up -d ada
-            print_vm_success "ADA bot started"
-            ;;
-        "eth")
-            docker-compose -f docker-compose.multi.yml build --no-cache eth
-            docker-compose -f docker-compose.multi.yml up -d eth
-            print_vm_success "ETH bot started"
-            ;;
-        "all")
-            docker-compose -f docker-compose.multi.yml build --no-cache
-            docker-compose -f docker-compose.multi.yml up -d
-            print_vm_success "All bots started"
-            ;;
-    esac
-    
-    # Wait for containers to start
-    sleep 5
+    print_success "$symbol container stopped"
 }
 
-# Function to check bot health
-check_health() {
-    local target="$1"
-    print_vm_status "Checking $target bot(s) health..."
-    
-    cd "$VM_DIR"
-    
-    case "$target" in
-        "ada"|"all")
-            if docker ps -q -f name=ada | grep -q .; then
-                print_vm_success "ADA bot is running"
-                docker logs --tail 5 ada
-            else
-                print_vm_error "ADA bot is not running!"
-            fi
-            ;;&
-        "eth"|"all")
-            if docker ps -q -f name=eth | grep -q .; then
-                print_vm_success "ETH bot is running"
-                docker logs --tail 5 eth
-            else
-                print_vm_error "ETH bot is not running!"
-            fi
-            ;;
-    esac
-    
-    # Show container status
-    print_vm_status "Container status:"
-    docker ps --format "table {{.Names}}\t{{.Status}}\t{{.RunningFor}}"
-}
-
-# Main execution flow
-main() {
-    print_vm_status "Starting VM deployment: $SYMBOL $ACTION"
-    
-    case "$ACTION" in
-        "stop")
-            stop_containers "$SYMBOL"
-            clean_docker
-            ;;
-        "update")
-            preserve_files
-            stop_containers "$SYMBOL"
-            clean_docker
-            update_code
-            start_containers "$SYMBOL"
-            check_health "$SYMBOL"
-            ;;
-        "restart")
-            stop_containers "$SYMBOL"
-            clean_docker
-            start_containers "$SYMBOL"
-            check_health "$SYMBOL"
-            ;;
-    esac
-    
-    print_vm_success "VM deployment completed: $SYMBOL $ACTION"
-}
-
-# Execute main function with parameters
-main "$@"
-EOF
-
-    echo "$script_name"
-}
-
-# Function to upload code and execute deployment
+# Main execution function
 execute_deployment() {
     local symbol="$1"
     local action="$2"
-    local timestamp=$(date '+%Y%m%d_%H%M%S')
     
     print_status "Starting deployment: $symbol $action"
     
-    # Create VM script
-    vm_script=$(create_vm_script "$symbol" "$action")
+    # Ensure Docker is running
+    ensure_docker_running
     
-    # Upload VM script
-    print_status "Uploading VM deployment script..."
-    scp -i "$SSH_KEY" -o StrictHostKeyChecking=no "$vm_script" "$VM_USER@$VM_HOST:$VM_DIR/"
+    # Clean up old builds before starting
+    cleanup_old_builds
     
-    # If action is update, upload code
-    if [[ "$action" == "update" ]]; then
-        print_status "Creating code archive..."
-        tar -czf "trader-bot-update-${timestamp}.tar.gz" \
-            --exclude-from=<(echo -e "${LOCAL_EXCLUDE//,/\\n}") \
-            --exclude="trader-bot-update-*.tar.gz" \
-            --exclude="vm-deploy-*.sh" \
-            .
-        
-        print_status "Uploading code archive..."
-        scp -i "$SSH_KEY" -o StrictHostKeyChecking=no "trader-bot-update-${timestamp}.tar.gz" "$VM_USER@$VM_HOST:$VM_DIR/"
-        
-        # Clean up local archive
-        rm -f "trader-bot-update-${timestamp}.tar.gz"
-    fi
+    case "$action" in
+        "stop")
+            stop_containers "$symbol"
+            ;;
+        "update")
+            print_success "Using local Docker buildx for cross-platform build"
+            if build_image_locally "$symbol"; then
+                restart_containers "$symbol"
+                print_success "Deployment completed successfully!"
+            else
+                print_error "Build failed"
+                exit 1
+            fi
+            ;;
+        "restart")
+            restart_containers "$symbol"
+            ;;
+    esac
     
-    # Execute deployment on VM
-    print_status "Executing deployment on VM..."
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
-        "cd $VM_DIR && chmod +x $vm_script && ./$vm_script $symbol $action $timestamp"
+    # Final cleanup
+    cleanup_old_builds
     
-    # Clean up VM script
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" "rm -f $VM_DIR/$vm_script"
-    rm -f "$vm_script"
-    
-    print_success "Deployment completed successfully!"
+    print_success "All operations completed. Temporary files cleaned."
 }
 
 # Main execution
@@ -390,7 +338,7 @@ main() {
     # Check prerequisites
     check_prerequisites
     
-    # Execute deployment
+    # Execute deployment with cleanup
     execute_deployment "$1" "$2"
 }
 

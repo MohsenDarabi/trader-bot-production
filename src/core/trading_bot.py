@@ -715,6 +715,21 @@ class DailyRangeBot:
             for market in self.trading_markets:
                 await self._check_and_cover_orphaned_positions(market)
             
+            # Display current trading strategy every cycle for observation (exact prices)
+            for market in self.trading_markets:
+                signal = self.strategy.get_current_signal(market)
+                if signal:
+                    # Calculate exact amount based on current position sizing
+                    account_balance = self.get_account_balance()
+                    position_size = self.position_sizer.calculate_position_size(
+                        market, signal.buy_price, account_balance
+                    )
+                    if position_size.is_valid:
+                        # Use INFO level but mark as observation only - exact prices for monitoring
+                        logger.info(f"📊 [STRATEGY] {market}: Buy=${signal.buy_price:.8f} | "
+                                   f"Sell=${signal.sell_price:.8f} | Amount={position_size.quantity:.8f} | "
+                                   f"Size=${position_size.size_usdt:.2f} USDT")
+            
             # Update account and positions periodically with enhanced frequencies for better state consistency
             # Account update every 2 minutes (reduced from 5 min) for better balance tracking
             if (not self._last_account_update or 
