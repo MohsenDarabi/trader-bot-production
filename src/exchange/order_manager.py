@@ -38,12 +38,6 @@ class OrderStatus(Enum):
     FAILED = "failed"
 
 
-class OrderSide(Enum):
-    """Order side enumeration"""
-    BUY = "buy"
-    SELL = "sell"
-
-
 @dataclass
 class Order:
     """Order data structure"""
@@ -412,6 +406,13 @@ class OrderManager:
         # CRITICAL: Over-selling protection - validate position balance before placing sell order
         if hasattr(self, '_trading_bot_ref') and self._trading_bot_ref:
             try:
+                # SYNC FIX: Ensure position data is fresh before over-selling check
+                # This prevents the timing issue where immediate fills create positions
+                # but the over-selling check still sees stale data (position_size = 0)
+                logger.debug(f"🔄 Syncing position data for {market} before over-selling check...")
+                synced_count = self._trading_bot_ref.position_manager.sync_with_exchange(market)
+                logger.debug(f"✅ Position sync completed: {synced_count} positions updated")
+                
                 balance = self._trading_bot_ref._calculate_position_sell_balance(market)
                 position_size_actual = balance['position_size']
                 total_sells_current = balance['total_sells']

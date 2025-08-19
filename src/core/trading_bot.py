@@ -710,10 +710,6 @@ class DailyRangeBot:
                 log_trading_event('new_day', f"New trading day detected: {current_day}")
                 logger.info(f"🌅 New trading day {current_day} - using fresh exchange data")
             
-            # CRITICAL: Check for orphaned positions FIRST (before any other trading logic)
-            # This runs independently on EVERY cycle to catch positions without sell orders
-            for market in self.trading_markets:
-                await self._check_and_cover_orphaned_positions(market)
             
             # Display current trading strategy every cycle for observation (exact prices)
             for market in self.trading_markets:
@@ -2391,58 +2387,79 @@ class DailyRangeBot:
             
             if not all_orders:
                 logger.info("✓ No pending orders found during startup cleanup")
-                return
-            
-            now = datetime.now(timezone.utc)
-            today = now.date()
-            
-            # Group orders by market and type
-            orders_by_market = {}
-            for order in all_orders:
-                market = order.market
-                if market not in orders_by_market:
-                    orders_by_market[market] = {'buy': [], 'sell': []}
-                orders_by_market[market][order.side.value].append(order)
-            
-            # Process each market
-            for market, orders in orders_by_market.items():
-                buy_orders = orders['buy']
-                sell_orders = orders['sell']
                 
-                market_cancelled = 0
+                # Check if we have any open positions that might need sell orders
+                positions = self.position_manager.get_all_positions()
+                if not positions:
+                    logger.info("✓ No positions found - startup cleanup complete")
+                    # Mark as completed and return since there's nothing to clean up
+                    self._startup_cleanup_completed = True
+                    return
+                else:
+                    logger.info(f"📍 Found {len(positions)} open positions - checking for orphaned positions...")
+                    # Continue to orphaned position check below
+            
+            # Only process orders if there are any
+            if all_orders:
+                now = datetime.now(timezone.utc)
+                today = now.date()
                 
-                # SIMPLIFIED CLEANUP: Cancel ALL buy orders (regardless of age)
-                if len(buy_orders) > 0:
-                    logger.warning(f"🧹 Found {len(buy_orders)} buy orders for {market} - cancelling ALL")
+                # Group orders by market and type
+                orders_by_market = {}
+                for order in all_orders:
+                    market = order.market
+                    if market not in orders_by_market:
+                        orders_by_market[market] = {'buy': [], 'sell': []}
+                    orders_by_market[market][order.side.value].append(order)
+                
+                # Process each market
+                for market, orders in orders_by_market.items():
+                    buy_orders = orders['buy']
+                    sell_orders = orders['sell']
                     
-                    # Cancel ALL buy orders unconditionally
-                    for order in buy_orders:
-                        try:
-                            age_info = f"from {order.created_at.date()}" if order.created_at.date() != today else "from today"
-                            logger.info(f"🗑️  Cancelling buy order: {order.client_id} {age_info} in {market}")
-                            self.order_manager.cancel_order(order.client_id)
-                            market_cancelled += 1
-                            total_cancelled += 1
-                        except Exception as e:
-                            logger.error(f"Failed to cancel buy order {order.client_id}: {e}")
+                    market_cancelled = 0
+                    
+                    # SIMPLIFIED CLEANUP: Cancel ALL buy orders (regardless of age)
+                    if len(buy_orders) > 0:
+                        logger.warning(f"🧹 Found {len(buy_orders)} buy orders for {market} - cancelling ALL")
+                        
+                        # Cancel ALL buy orders unconditionally
+                        for order in buy_orders:
+                            try:
+                                age_info = f"from {order.created_at.date()}" if order.created_at.date() != today else "from today"
+                                logger.info(f"🗑️  Cancelling buy order: {order.client_id} {age_info} in {market}")
+                                self.order_manager.cancel_order(order.client_id)
+                                market_cancelled += 1
+                                total_cancelled += 1
+                            except Exception as e:
+                                logger.error(f"Failed to cancel buy order {order.client_id}: {e}")
+                    
+                    # REMOVED: Sell order cleanup - preserve all existing sell orders
+                    # Daily Range Strategy: Sell orders remain until filled (no time limit)
+                    
+                    if market_cancelled > 0:
+                        cleanup_summary.append(f"{market}: {market_cancelled} orders")
                 
-                # REMOVED: Sell order cleanup - preserve all existing sell orders
-                # Daily Range Strategy: Sell orders remain until filled (no time limit)
-                
-                if market_cancelled > 0:
-                    cleanup_summary.append(f"{market}: {market_cancelled} orders")
-            
-            if total_cancelled > 0:
-                logger.info(f"✓ Startup cleanup completed: Cancelled {total_cancelled} stale orders")
-                logger.info(f"  Details: {', '.join(cleanup_summary)}")
-            else:
-                logger.info("✓ No stale orders found during startup cleanup")
+                if total_cancelled > 0:
+                    logger.info(f"✓ Startup cleanup completed: Cancelled {total_cancelled} stale orders")
+                    logger.info(f"  Details: {', '.join(cleanup_summary)}")
+                else:
+                    logger.info("✓ No stale orders found during startup cleanup")
             
             # CRITICAL: Check for orphaned positions after cancelling all buy orders
             # This ensures we have a clean base for trading
             logger.info("🔧 Checking for orphaned positions after buy order cleanup...")
             
-            for market in self.trading_markets:
+            # Get markets from actual positions that exist (instead of empty trading_markets list)
+            positions = self.position_manager.get_all_positions()
+            position_markets = {pos.market for pos in positions}
+            
+            if not position_markets:
+                logger.info("✅ No positions found - no orphaned position check needed")
+            else:
+                logger.info(f"🔍 Checking {len(position_markets)} markets with positions: {', '.join(sorted(position_markets))}")
+            
+            for market in position_markets:
                 try:
                     # Calculate position vs sell order balance
                     balance = self._calculate_position_sell_balance(market)
