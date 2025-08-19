@@ -14,6 +14,10 @@ VM_DIR="/home/ubuntu/trader-bot-production"
 # ENHANCED: Exclude build artifacts and temporary files
 LOCAL_EXCLUDE=".git,.gitignore,logs/*,*.tar.gz,*.tar,__pycache__,*.pyc,env-templates,vm-deploy-*.sh,*-bot-*.tar.gz,ada-bot-*,eth-bot-*"
 
+# Transfer timeout configuration (in seconds)
+TRANSFER_TIMEOUT=900  # 15 minutes for large files
+SMALL_FILE_TIMEOUT=120  # 2 minutes for small operations
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -155,6 +159,22 @@ cleanup_old_vm_images() {
     fi
 }
 
+# Function to safely clean up old compressed archives on VM (ONLY tar.gz files)
+cleanup_old_vm_archives() {
+    print_status "Cleaning up old compressed archives on VM..."
+    
+    # SAFE: Only remove specific compressed archive patterns
+    # This preserves .env files, source code, logs, and other important files
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "rm -f ~/ada-bot-*.tar.gz ~/eth-bot-*.tar.gz ~/trader-bot*.tar.gz ~/daily-range-bot*.tar* 2>/dev/null || true"
+    
+    # Check remaining disk space after cleanup
+    local disk_usage=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "df -h / | tail -1 | awk '{print \$5}'" 2>/dev/null || echo "unknown")
+    
+    print_success "VM archive cleanup completed (disk usage: ${disk_usage})"
+}
+
 # Function to check if buildx is available
 check_buildx_support() {
     if docker buildx version &>/dev/null; then
@@ -226,19 +246,62 @@ transfer_with_retry() {
         ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
             "rm -f ~/${remote_file}" 2>/dev/null || true
         
-        # Transfer with progress indication
-        if scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -v \
-            "${local_file}" "$VM_USER@$VM_HOST:~/${remote_file}"; then
-            
+        # Transfer with progress indication and configurable timeout
+        local transfer_exit_code=0
+        
+        # Cross-platform timeout handling
+        if command -v gtimeout >/dev/null 2>&1; then
+            # macOS with gnu coreutils (brew install coreutils)
+            local timeout_cmd="gtimeout"
+        elif command -v timeout >/dev/null 2>&1; then
+            # Linux/Unix systems
+            local timeout_cmd="timeout"
+        else
+            # Fallback: no timeout, let scp use its own timeout
+            local timeout_cmd=""
+        fi
+        
+        if [[ -n "$timeout_cmd" ]]; then
+            if $timeout_cmd "${TRANSFER_TIMEOUT}" scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -v \
+                -o ConnectTimeout=60 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+                "${local_file}" "$VM_USER@$VM_HOST:~/${remote_file}"; then
+                transfer_exit_code=0
+            else
+                transfer_exit_code=$?
+            fi
+        else
+            # Fallback without timeout wrapper
+            if scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -v \
+                -o ConnectTimeout=60 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+                "${local_file}" "$VM_USER@$VM_HOST:~/${remote_file}"; then
+                transfer_exit_code=0
+            else
+                transfer_exit_code=$?
+            fi
+        fi
+        
+        # Handle different failure modes
+        if [[ $transfer_exit_code -eq 0 ]]; then
             # Verify transfer integrity
             if verify_transfer "${local_file}" "${remote_file}"; then
                 print_success "Transfer completed successfully on attempt ${attempt}"
                 return 0
             else
                 print_warning "Transfer verification failed on attempt ${attempt}"
+                # Clean up corrupted partial file
+                ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+                    "rm -f ~/${remote_file}" 2>/dev/null || true
             fi
+        elif [[ $transfer_exit_code -eq 124 ]]; then
+            print_warning "Transfer timed out after ${TRANSFER_TIMEOUT} seconds on attempt ${attempt}"
+            # Clean up partial file after timeout
+            ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+                "rm -f ~/${remote_file}" 2>/dev/null || true
         else
-            print_warning "Transfer failed on attempt ${attempt}"
+            print_warning "Transfer failed with exit code ${transfer_exit_code} on attempt ${attempt}"
+            # Clean up any partial file
+            ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+                "rm -f ~/${remote_file}" 2>/dev/null || true
         fi
         
         if [[ $attempt -lt $max_attempts ]]; then
@@ -444,6 +507,9 @@ execute_deployment() {
     
     # Clean up old builds before starting
     cleanup_old_builds
+    
+    # Clean up old VM archives to free disk space
+    cleanup_old_vm_archives
     
     case "$action" in
         "stop")
