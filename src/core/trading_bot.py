@@ -1583,17 +1583,8 @@ class DailyRangeBot:
                     log_trading_event('first_buy_blocked', f"First buy blocked - {today_pending_sells} today's sell orders pending for {market}")
                 return False
             
-            # No pending sells from today - generate fresh signal for first buy of day
-            logger.info(f"🌅 First buy order of the day - generating fresh signal for {market}")
-            
-            # Force fresh signal generation to ensure current OHLC data 
-            fresh_signal = self.strategy.generate_daily_signal(market, force=True)
-            if fresh_signal:
-                logger.info(f"✅ Fresh signal generated for first buy: Buy=${fresh_signal.buy_price:.8f}")
-                log_trading_event('fresh_signal', f"Fresh signal generated for {market}: Buy=${fresh_signal.buy_price:.8f}")
-            else:
-                logger.warning(f"⚠️ Failed to generate fresh signal for {market} - using cached signal")
-            
+            # No pending sells from today - allow first buy of day
+            logger.info(f"🌅 First buy order of the day allowed for {market}")
             log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
             
         else:
@@ -2330,6 +2321,7 @@ class DailyRangeBot:
             # Full state sync with exchange
             await self._validate_order_manager_state()
             self.position_manager.sync_with_exchange()
+            await self._update_account_status()
             
             # Verify trading cycle is actually complete
             position = self.position_manager.get_position(market)
