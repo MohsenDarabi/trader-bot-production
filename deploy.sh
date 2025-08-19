@@ -163,7 +163,68 @@ check_prerequisites() {
     print_success "Prerequisites check passed"
 }
 
-# Enhanced local build function
+# Function to verify file transfer integrity
+verify_transfer() {
+    local local_file="$1"
+    local remote_file="$2"
+    
+    print_status "Verifying transfer integrity..."
+    
+    # Get local file size
+    local local_size=$(wc -c < "${local_file}")
+    
+    # Get remote file size
+    local remote_size=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "wc -c < ~/${remote_file}" 2>/dev/null || echo "0")
+    
+    if [[ "$local_size" -eq "$remote_size" && "$remote_size" -gt 0 ]]; then
+        print_success "Transfer verified: ${local_size} bytes"
+        return 0
+    else
+        print_error "Transfer verification failed: local=${local_size}, remote=${remote_size}"
+        return 1
+    fi
+}
+
+# Enhanced transfer function with retry and verification
+transfer_with_retry() {
+    local local_file="$1"
+    local remote_file="$2"
+    local max_attempts=3
+    
+    for attempt in $(seq 1 $max_attempts); do
+        print_status "Transfer attempt ${attempt}/${max_attempts}..."
+        
+        # Remove any partial file from previous attempts
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+            "rm -f ~/${remote_file}" 2>/dev/null || true
+        
+        # Transfer with progress indication
+        if scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -v \
+            "${local_file}" "$VM_USER@$VM_HOST:~/${remote_file}"; then
+            
+            # Verify transfer integrity
+            if verify_transfer "${local_file}" "${remote_file}"; then
+                print_success "Transfer completed successfully on attempt ${attempt}"
+                return 0
+            else
+                print_warning "Transfer verification failed on attempt ${attempt}"
+            fi
+        else
+            print_warning "Transfer failed on attempt ${attempt}"
+        fi
+        
+        if [[ $attempt -lt $max_attempts ]]; then
+            print_status "Retrying in 3 seconds..."
+            sleep 3
+        fi
+    done
+    
+    print_error "Transfer failed after ${max_attempts} attempts"
+    return 1
+}
+
+# Enhanced local build function with robust transfer
 build_image_locally() {
     local symbol="$1"
     local timestamp=$(date '+%Y%m%d_%H%M%S')
@@ -192,43 +253,53 @@ build_image_locally() {
     docker save "${image_name}:latest" | gzip > "${tar_file}"
     
     local size=$(ls -lh "${tar_file}" | awk '{print $5}')
+    local size_bytes=$(wc -c < "${tar_file}")
     print_success "Image compressed: ${tar_file} (${size})"
     
-    # Transfer to VM
-    print_status "Transferring image to VM..."
-    if ! scp -i "$SSH_KEY" -o StrictHostKeyChecking=no \
-        "${tar_file}" \
-        "$VM_USER@$VM_HOST:~/"; then
-        print_error "Failed to transfer image"
+    # Enhanced transfer with retry and verification
+    print_status "Transferring image to VM (${size}, may take several minutes)..."
+    if ! transfer_with_retry "${tar_file}" "${tar_file}"; then
+        print_error "Failed to transfer image after all attempts"
         rm -f "${tar_file}"
         return 1
     fi
     
-    print_success "Image transferred successfully"
-    
-    # Load on VM
+    # Load on VM with verification
     print_status "Loading image on VM (this may take a minute)..."
     if ! ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
-        "gunzip -c ~/${tar_file} | docker load && rm -f ~/${tar_file}"; then
+        "gunzip -c ~/${tar_file} | docker load"; then
         print_error "Failed to load image on VM"
         rm -f "${tar_file}"
+        # Clean up corrupted file on VM
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+            "rm -f ~/${tar_file}" 2>/dev/null || true
         return 1
     fi
     
-    print_success "Image loaded on VM"
+    # Verify image was loaded correctly
+    print_status "Verifying image loaded correctly..."
+    if ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "docker images | grep -q '${image_name}'"; then
+        print_success "Image verified on VM: ${image_name}:latest"
+    else
+        print_error "Image verification failed - image not found on VM"
+        return 1
+    fi
     
-    # Clean up local files
-    print_status "Cleaning up local temporary files..."
+    # Clean up files
+    print_status "Cleaning up temporary files..."
     rm -f "${tar_file}"
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "rm -f ~/${tar_file}" 2>/dev/null || true
     docker rmi "${image_name}:latest" 2>/dev/null || true
     
-    print_success "Local cleanup completed"
+    print_success "Build and transfer completed successfully"
     
     # Store image name for container restart
     echo "${image_name}:latest" > ".last_built_${symbol}"
 }
 
-# Enhanced restart function with proper credential handling
+# Enhanced restart function with proper credential handling and verification
 restart_containers() {
     local symbol="$1"
     local image_name="ada-bot-fixed:latest"  # Default fallback
@@ -252,27 +323,74 @@ restart_containers() {
     
     print_success "Found ${env_file} - will use these credentials"
     
-    print_status "Stopping old ${symbol} container..."
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
-        "docker stop ${symbol} 2>/dev/null || true; docker rm ${symbol} 2>/dev/null || true"
+    # Verify image exists on VM before attempting to use it
+    print_status "Verifying image ${image_name} exists on VM..."
+    if ! ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "docker images | grep -q '$(echo ${image_name} | cut -d: -f1)'"; then
+        print_error "Image ${image_name} not found on VM!"
+        print_error "Please run 'update' action first to build and transfer the image"
+        exit 1
+    fi
+    
+    print_success "Image ${image_name} verified on VM"
+    
+    # Check if container is already running
+    local container_running=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "docker ps -q -f name=^${symbol}$" 2>/dev/null || echo "")
+    
+    if [[ -n "$container_running" ]]; then
+        print_status "Stopping running ${symbol} container..."
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+            "docker stop ${symbol}"
+    fi
+    
+    # Remove any existing container (running or stopped)
+    local container_exists=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "docker ps -aq -f name=^${symbol}$" 2>/dev/null || echo "")
+    
+    if [[ -n "$container_exists" ]]; then
+        print_status "Removing existing ${symbol} container..."
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+            "docker rm ${symbol}"
+    fi
     
     print_status "Starting ${symbol} container with ${env_file}..."
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+    local container_id=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
         "cd $VM_DIR && docker run -d --name ${symbol} \
          --env-file ${env_file} \
          --restart always \
          --memory=128m \
          --cpus=0.25 \
          ${image_name} \
-         python main.py ${symbol^^}USDT"
+         python main.py ${symbol^^}USDT")
     
-    print_success "${symbol} container started with credentials from ${env_file}"
+    if [[ -n "$container_id" ]]; then
+        print_success "${symbol} container started with credentials from ${env_file}"
+        print_success "Container ID: ${container_id:0:12}"
+    else
+        print_error "Failed to start ${symbol} container"
+        return 1
+    fi
     
-    # Wait for container to start and show logs
-    sleep 3
-    print_status "Checking ${symbol} bot logs..."
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
-        "docker logs --tail 20 ${symbol}"
+    # Wait for container to start and verify it's running
+    sleep 5
+    local running_check=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "docker ps -q -f name=^${symbol}$" 2>/dev/null || echo "")
+    
+    if [[ -n "$running_check" ]]; then
+        print_success "${symbol} container is running successfully"
+        
+        # Show recent logs
+        print_status "Checking ${symbol} bot logs..."
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+            "docker logs --tail 20 ${symbol}"
+    else
+        print_error "${symbol} container failed to start or exited"
+        print_status "Showing container logs for debugging..."
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+            "docker logs ${symbol}" 2>/dev/null || true
+        return 1
+    fi
 }
 
 # Stop containers function
