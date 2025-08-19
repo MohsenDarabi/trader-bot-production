@@ -1558,8 +1558,17 @@ class DailyRangeBot:
         
         # Simplified decision logic as requested by user
         if cycle_complete_flag:
-            # Cycle just completed - allow immediate new buy order
-            logger.info(f"🔄 Cycle completion detected for {market} - allowing new buy order")
+            # Cycle just completed - generate fresh signal for new cycle
+            logger.info(f"🔄 Cycle completion detected for {market} - generating fresh signal for new buy order")
+            
+            # Force fresh signal generation to ensure current OHLC data and avoid stale prices
+            fresh_signal = self.strategy.generate_daily_signal(market, force=True)
+            if fresh_signal:
+                logger.info(f"✅ Fresh signal generated for new cycle: Buy=${fresh_signal.buy_price:.8f}")
+                log_trading_event('fresh_signal', f"Fresh signal generated for {market}: Buy=${fresh_signal.buy_price:.8f}")
+            else:
+                logger.warning(f"⚠️ Failed to generate fresh signal for {market} - using cached signal")
+            
             log_trading_event('cycle_buy', f"🔄 Placing new buy order after cycle completion for {market}")
             
             # Clear the flag once we use it
@@ -1574,8 +1583,17 @@ class DailyRangeBot:
                     log_trading_event('first_buy_blocked', f"First buy blocked - {today_pending_sells} today's sell orders pending for {market}")
                 return False
             
-            # No pending sells from today - allow first buy of day
-            logger.info(f"🌅 First buy order of the day allowed for {market}")
+            # No pending sells from today - generate fresh signal for first buy of day
+            logger.info(f"🌅 First buy order of the day - generating fresh signal for {market}")
+            
+            # Force fresh signal generation to ensure current OHLC data 
+            fresh_signal = self.strategy.generate_daily_signal(market, force=True)
+            if fresh_signal:
+                logger.info(f"✅ Fresh signal generated for first buy: Buy=${fresh_signal.buy_price:.8f}")
+                log_trading_event('fresh_signal', f"Fresh signal generated for {market}: Buy=${fresh_signal.buy_price:.8f}")
+            else:
+                logger.warning(f"⚠️ Failed to generate fresh signal for {market} - using cached signal")
+            
             log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
             
         else:
