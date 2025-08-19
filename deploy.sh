@@ -128,6 +128,33 @@ cleanup_old_builds() {
     print_success "Old build artifacts cleaned"
 }
 
+# Function to clean up old Docker images on VM
+cleanup_old_vm_images() {
+    local symbol="$1"
+    print_status "Cleaning up old ${symbol} Docker images on VM..."
+    
+    # Get list of old images (keep newest 2 for safety)
+    local old_images=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}' | \
+         grep '${symbol}-bot' | tail -n +3 | awk '{print \$3}'" 2>/dev/null || echo "")
+    
+    if [[ -n "$old_images" ]]; then
+        local count=$(echo "$old_images" | wc -l)
+        print_status "Found $count old ${symbol} images to remove..."
+        
+        echo "$old_images" | while read image_id; do
+            if [[ -n "$image_id" ]]; then
+                ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+                    "docker rmi $image_id 2>/dev/null || true"
+            fi
+        done
+        
+        print_success "Cleaned up old ${symbol} images"
+    else
+        print_status "No old ${symbol} images to clean"
+    fi
+}
+
 # Function to check if buildx is available
 check_buildx_support() {
     if docker buildx version &>/dev/null; then
@@ -355,6 +382,7 @@ restart_containers() {
     fi
     
     print_status "Starting ${symbol} container with ${env_file}..."
+    local market=$(echo "${symbol}" | tr '[:lower:]' '[:upper:]')USDT
     local container_id=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
         "cd $VM_DIR && docker run -d --name ${symbol} \
          --env-file ${env_file} \
@@ -362,7 +390,7 @@ restart_containers() {
          --memory=128m \
          --cpus=0.25 \
          ${image_name} \
-         python main.py ${symbol^^}USDT")
+         python main.py ${market}")
     
     if [[ -n "$container_id" ]]; then
         print_success "${symbol} container started with credentials from ${env_file}"
@@ -425,6 +453,7 @@ execute_deployment() {
             print_success "Using local Docker buildx for cross-platform build"
             if build_image_locally "$symbol"; then
                 restart_containers "$symbol"
+                cleanup_old_vm_images "$symbol"
                 print_success "Deployment completed successfully!"
             else
                 print_error "Build failed"
