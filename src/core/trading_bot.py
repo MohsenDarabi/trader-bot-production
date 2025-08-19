@@ -721,10 +721,11 @@ class DailyRangeBot:
                         market, signal.buy_price, account_balance
                     )
                     if position_size.is_valid:
-                        # Use INFO level but mark as observation only - exact prices for monitoring
-                        logger.info(f"📊 [STRATEGY] {market}: Buy=${signal.buy_price:.8f} | "
+                        # Enhanced fixed-position daily signal summary for easy monitoring
+                        current_time = now.strftime("%H:%M:%S")
+                        logger.info(f"📊 DAILY SIGNAL | {market} | Buy=${signal.buy_price:.8f} | "
                                    f"Sell=${signal.sell_price:.8f} | Amount={position_size.quantity:.8f} | "
-                                   f"Size=${position_size.size_usdt:.2f} USDT")
+                                   f"Size=${position_size.size_usdt:.2f} USDT | Updated: {current_time}")
             
             # Update account and positions periodically with enhanced frequencies for better state consistency
             # Account update every 2 minutes (reduced from 5 min) for better balance tracking
@@ -1763,9 +1764,9 @@ class DailyRangeBot:
                 current_price = self.market_data.get_current_price(market)
                 if current_price and current_price < price:
                     adjusted_price = current_price
-                    log_trading_event('price_adjustment', f"💰 Buy price adjusted: ${price:.2f} → ${adjusted_price:.2f} (cheaper entry) for {market}")
+                    log_trading_event('price_adjustment', f"💰 PRICE ADJUST | Signal=${price:.8f} → Market=${adjusted_price:.8f} (cheaper entry) | {market}")
                 else:
-                    log_trading_event('price_no_adjustment', f"📊 Buy price unchanged: ${price:.2f} (signal price optimal) for {market}")
+                    log_trading_event('price_no_adjustment', f"📊 PRICE OPTIMAL | Signal=${price:.8f} | Market=${current_price:.8f if current_price else 'N/A'} | Using signal price | {market}")
             
             # Place the order
             if side == 'buy':
