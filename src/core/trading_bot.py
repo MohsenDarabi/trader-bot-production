@@ -13,7 +13,7 @@ from src.exchange.order_manager import OrderManager, OrderStatus
 from src.exchange.websocket_client import CoinExWebSocketClient
 from src.exchange.order_tracker import OrderTracker, OrderSide
 from src.core.order_pairing_manager import OrderPairingManager
-from src.core.position_manager import PositionManager
+from src.core.position_manager import PositionManager, PositionSide
 from src.core.profitability import ProfitabilityValidator
 from src.data.market_data import MarketDataManager
 from src.data.websocket_market_data import WebSocketMarketDataProvider
@@ -1841,7 +1841,7 @@ class DailyRangeBot:
                 logger.info(f"🚧 Exit order placement blocked by circuit breaker - {remaining:.1f}s remaining cooldown")
                 return
             
-            side = 'sell' if position.side.value == 'buy' else 'buy'
+            side = 'sell' if position.side == PositionSide.LONG else 'buy'
             
             # Check if we have automatic sell orders already in place for this position
             if side == 'sell':
