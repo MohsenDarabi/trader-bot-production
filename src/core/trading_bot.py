@@ -1571,8 +1571,7 @@ class DailyRangeBot:
             
             log_trading_event('cycle_buy', f"🔄 Placing new buy order after cycle completion for {market}")
             
-            # Clear the flag once we use it
-            self._cycle_completion_flags[market] = False
+            # Flag will be cleared after successful buy order placement
             
         elif not has_today_buy:
             # No buy order placed today - but check for pending sells first
@@ -1791,6 +1790,11 @@ class DailyRangeBot:
                 # Order tracking is now handled by the unified system in OrderManager
                 if order:
                     log_trading_event('order_placed', f"Buy order placed {order.exchange_order_id} - unified tracking active in {market}")
+                    
+                    # Clear cycle completion flag only after successful buy order placement
+                    if market in self._cycle_completion_flags and self._cycle_completion_flags[market]:
+                        self._cycle_completion_flags[market] = False
+                        logger.info(f"✅ Cycle completion flag cleared after successful buy order placement for {market}")
             else:
                 # For sell orders, use the traditional approach since this is for closing positions
                 # Note: Normal sell orders don't get price adjustment (as discussed)
