@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
 from src.exchange.coinex_client import CoinExClient
+from src.exchange.exchange_factory import ExchangeFactory
 from src.exchange.order_manager import OrderManager, OrderStatus
 from src.exchange.websocket_client import CoinExWebSocketClient
 from src.exchange.order_tracker import OrderTracker, OrderSide
@@ -289,7 +290,7 @@ class DailyRangeBot:
     """
     
     def __init__(self):
-        self.client: Optional[CoinExClient] = None
+        self.client: Optional[Any] = None  # Can be CoinExClient or SafeModeClient
         self.market_data: Optional[MarketDataManager] = None
         self.strategy: Optional[DailyRangeStrategy] = None
         self.position_manager: Optional[PositionManager] = None
@@ -333,8 +334,18 @@ class DailyRangeBot:
         logger.info("Initializing Daily Range Accumulation Bot...")
         
         try:
-            # Initialize core components
-            self.client = CoinExClient()
+            # Initialize core components - Exchange Factory handles testing vs production
+            self.client = ExchangeFactory.create_exchange()
+            
+            # Log the mode being used
+            if ExchangeFactory.is_testing_mode():
+                logger.info("🧪 Bot initialized in TESTING mode (SafeModeClient)")
+                logger.info("   • Real market data will be used")
+                logger.info("   • Orders will be SIMULATED (safe)")
+            else:
+                logger.warning("⚠️ Bot initialized in PRODUCTION mode (real trading)")
+                logger.warning("   • Real orders will be placed!")
+                logger.warning("   • Real money will be used!")
             
             # Initialize WebSocket market data provider
             self.websocket_market_data = WebSocketMarketDataProvider()
@@ -1573,7 +1584,7 @@ class DailyRangeBot:
             
             # Flag will be cleared after successful buy order placement
             
-        elif not has_today_buy:
+        elif not self._startup_cleanup_completed and not has_today_buy:
             # No buy order placed today - but check for pending sells first
             # This ensures we don't place buy if today's sell orders are still pending
             if today_pending_sells > 0:
@@ -1582,9 +1593,16 @@ class DailyRangeBot:
                     log_trading_event('first_buy_blocked', f"First buy blocked - {today_pending_sells} today's sell orders pending for {market}")
                 return False
             
-            # No pending sells from today - allow first buy of day
+            # No pending sells from today - allow first buy of day (STARTUP ONLY)
             logger.info(f"🌅 First buy order of the day allowed for {market}")
             log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
+            
+        elif self._startup_cleanup_completed:
+            # Normal operation: ONLY cycle completion allows new buys
+            if self._should_log_state_change(market, 'normal_operation_cycle_wait', True):
+                logger.debug(f"❌ Normal operation - waiting for cycle completion for {market}")
+                log_trading_event('buy_decision', f"❌ Normal operation - waiting for cycle completion for {market}")
+            return False
             
         else:
             # Already placed buy today and no cycle completion - block additional buys
@@ -2247,11 +2265,14 @@ class DailyRangeBot:
                         else:
                             logger.debug(f"Could not find creation date for sell order {order_id}")
                     
-                    # Set cycle completion flag if sell was from today
-                    if was_today_order:
+                    # Set cycle completion flag if sell was from today AND not orphaned
+                    if was_today_order and not ("_OS_" in client_id):
                         self._cycle_completion_flags[market] = True
-                        logger.info(f"🔄 Cycle completion flag set for {market} - sell from today completed")
-                        log_trading_event('cycle_complete', f"Cycle completion detected for {market} - sell order from today filled")
+                        logger.info(f"🔄 Cycle completion flag set for {market} - NORMAL sell from today completed")
+                        log_trading_event('cycle_complete', f"Cycle completion detected for {market} - normal sell order from today filled")
+                    elif was_today_order and "_OS_" in client_id:
+                        logger.info(f"📌 Orphaned sell filled for {market} - no cycle completion triggered")
+                        log_trading_event('orphaned_sell_fill', f"Orphaned sell order filled for {market} - no cycle completion")
                     
                     # CRITICAL: Check if this completes a trading cycle (original logic)
                     position = self.position_manager.get_position(market)
