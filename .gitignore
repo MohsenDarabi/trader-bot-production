@@ -29,7 +29,13 @@ wheels/
 venv/
 ENV/
 env/
-.venv
+.venv/
+bin/
+lib/
+lib64/
+include/
+pyvenv.cfg
+share/
 
 # IDE
 .idea/
@@ -70,7 +76,36 @@ order_history/
 # Environment templates with credentials (local use only)
 env-templates/
 
-# Deployment artifacts
+# Deployment artifacts and archives
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tgz
+*.zip
+*.rar
+*.7z
 trader-bot-*.tar.gz
+daily-range-bot.tar
+eth-bot-*.tar.gz
 vm-deploy-*.sh
 backup_*/
+
+# Large binary files
+*.bin
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Media files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
+*.pdf
