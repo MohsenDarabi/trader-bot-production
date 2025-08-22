@@ -9,11 +9,18 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
+# Trading Environment Configuration
+TRADING_ENV = os.getenv('TRADING_ENV', 'testing').lower()
+
 # CoinEx API Configuration
 COINEX_ACCESS_ID = os.getenv('COINEX_API_KEY')
 COINEX_SECRET_KEY = os.getenv('COINEX_API_SECRET')
-COINEX_BASE_URL = 'https://api.coinex.com'
-COINEX_WS_URL = 'wss://socket.coinex.com/v2/futures'
+COINEX_BASE_URL = os.getenv('COINEX_API_URL', 'https://api.coinex.com')
+COINEX_WS_URL = os.getenv('COINEX_WS_URL', 'wss://socket.coinex.com/v2/futures')
+
+# Virtual Trading Configuration (for testing mode)
+VIRTUAL_BALANCE = float(os.getenv('VIRTUAL_BALANCE', '1000.0'))
+SIMULATE_ORDERS = os.getenv('SIMULATE_ORDERS', 'true').lower() == 'true'
 
 # Trading Strategy Parameters
 RANGE_DIVISOR = 4  # (High - Low) / 4 formula
@@ -91,6 +98,10 @@ def validate_config():
     if not COINEX_SECRET_KEY:
         errors.append("COINEX_API_SECRET is not set")
     
+    # Validate trading environment
+    if TRADING_ENV not in ['testing', 'production']:
+        errors.append(f"Invalid TRADING_ENV: {TRADING_ENV}. Must be 'testing' or 'production'")
+    
     if TELEGRAM_ENABLED:
         if not TELEGRAM_BOT_TOKEN:
             errors.append("TELEGRAM_BOT_TOKEN is required when TELEGRAM_ENABLED is True")
@@ -111,3 +122,20 @@ def is_test_mode() -> bool:
 def get_position_size_mode() -> str:
     """Get current position sizing mode"""
     return "MINIMUM" if is_test_mode() else "NORMAL"
+
+def is_testing_mode() -> bool:
+    """Check if running in testing environment (SafeMode)"""
+    return TRADING_ENV == 'testing'
+
+def is_production_mode() -> bool:
+    """Check if running in production environment (real trading)"""
+    return TRADING_ENV == 'production'
+
+def get_trading_mode_description() -> str:
+    """Get human-readable description of current trading mode"""
+    if is_testing_mode():
+        return "🧪 SAFE MODE - Orders simulated locally, no real trading"
+    elif is_production_mode():
+        return "🚀 PRODUCTION MODE - Real orders placed on exchange"
+    else:
+        return f"❓ UNKNOWN MODE - {TRADING_ENV}"
