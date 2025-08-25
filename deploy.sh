@@ -326,8 +326,8 @@ build_image_locally() {
     # Clean up any existing builds first
     cleanup_old_builds
     
-    # Build with buildx for linux/amd64
-    if ! docker buildx build --platform linux/amd64 \
+    # Build with buildx for linux/amd64 (--no-cache ensures fresh builds)
+    if ! docker buildx build --platform linux/amd64 --no-cache \
         -t "${image_name}:latest" \
         -f Dockerfile \
         --load \
