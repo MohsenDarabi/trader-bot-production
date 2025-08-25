@@ -48,28 +48,31 @@ show_usage() {
     echo "Usage: $0 [SYMBOL] [ACTION]"
     echo ""
     echo "SYMBOL:"
-    echo "  ada     - Deploy ADA bot only"
-    echo "  eth     - Deploy ETH bot only" 
+    echo "  Any 3-8 letter crypto symbol (e.g. ada, eth, btc, aave, doge)"
+    echo "  Automatically uses available credentials or creates .env file"
     echo ""
     echo "ACTION:"
     echo "  stop    - Stop specified bot(s)"
     echo "  update  - Update code and restart bot(s)"
     echo "  restart - Restart bot(s) without code update"
     echo ""
-    echo "Credentials:"
-    echo "  ADA bot uses: .env.ada (API key: 0744B5...)"
-    echo "  ETH bot uses: .env.eth (API key: 377EB9...)"
+    echo "Credential Management:"
+    echo "  • Script automatically finds unused credentials from VM"
+    echo "  • Creates .env files by borrowing from non-running bots"
+    echo "  • Updates trading market automatically (e.g. AAVE → AAVEUSDT)"
     echo ""
     echo "Examples:"
-    echo "  $0 ada update     # Update ADA bot with latest code"
-    echo "  $0 eth restart    # Restart ETH bot"
-    echo "  $0 ada stop       # Stop ADA bot only"
+    echo "  $0 ada update     # Update ADA bot"
+    echo "  $0 aave restart   # Restart AAVE bot (auto-creates .env.aave if missing)"
+    echo "  $0 btc stop       # Stop BTC bot"
+    echo "  $0 doge update    # Deploy DOGE bot (borrows unused credentials)"
 }
 
 # Function to validate inputs
 validate_inputs() {
-    if [[ ! "$1" =~ ^(ada|eth)$ ]]; then
-        print_error "Invalid symbol: $1"
+    # Accept any 3-8 character lowercase asset name (typical crypto symbols)
+    if [[ ! "$1" =~ ^[a-z]{3,8}$ ]]; then
+        print_error "Invalid symbol: $1 (must be 3-8 lowercase letters, e.g. ada, eth, btc, aave)"
         show_usage
         exit 1
     fi
@@ -156,6 +159,79 @@ cleanup_old_vm_images() {
         print_success "Cleaned up old ${symbol} images"
     else
         print_status "No old ${symbol} images to clean"
+    fi
+}
+
+# Function to create missing .env file using available VM credentials
+create_missing_env_from_vm() {
+    local symbol="$1"
+    local env_file=".env.${symbol}"
+    local market="${symbol^^}USDT"  # Convert to uppercase + USDT
+    
+    print_status "Missing ${env_file} - checking for available credentials on VM..."
+    
+    # Get list of running containers on VM
+    local running_bots=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "docker ps --format '{{.Names}}' 2>/dev/null" || echo "")
+    
+    if [[ -n "$running_bots" ]]; then
+        print_status "Currently running bots on VM: $running_bots"
+    else
+        print_status "No bots currently running on VM"
+    fi
+    
+    # Get available .env files on VM
+    local available_envs=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "cd '$VM_DIR' 2>/dev/null && find . -name '.env.*' -maxdepth 1 2>/dev/null | sed 's|./||' | sort" || echo "")
+    
+    if [[ -z "$available_envs" ]]; then
+        print_error "No .env files found on VM at $VM_DIR"
+        print_error "Please create at least one .env file (e.g. .env.ada) with valid credentials"
+        exit 1
+    fi
+    
+    print_status "Available .env files on VM: $available_envs"
+    
+    # Find unused credential set (where corresponding bot is not running)
+    local source_env=""
+    while IFS= read -r env_file_vm; do
+        if [[ "$env_file_vm" =~ ^\.env\.(.+)$ ]]; then
+            local bot_name="${BASH_REMATCH[1]}"
+            # Skip if this is the target env we're trying to create
+            if [[ "$bot_name" == "$symbol" ]]; then
+                continue
+            fi
+            # Check if this bot is not currently running
+            if [[ ! "$running_bots" =~ (^|[[:space:]])${bot_name}([[:space:]]|$) ]]; then
+                source_env="$env_file_vm"
+                print_success "Found unused credentials: $source_env (bot '$bot_name' not running)"
+                break
+            fi
+        fi
+    done <<< "$available_envs"
+    
+    if [[ -n "$source_env" ]]; then
+        print_status "Creating ${env_file} on VM using credentials from $source_env..."
+        
+        # Copy and modify on VM
+        if ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+            "cd '$VM_DIR' && cp '$source_env' '$env_file' && \
+             sed -i 's/^DEFAULT_TRADING_MARKET=.*/DEFAULT_TRADING_MARKET=$market/' '$env_file'"; then
+            print_success "Created $env_file on VM with trading market: $market"
+            return 0
+        else
+            print_error "Failed to create $env_file on VM"
+            return 1
+        fi
+    else
+        print_error "No unused credentials available on VM."
+        print_error "All available credential sets are currently in use by running bots:"
+        echo "$running_bots"
+        print_error ""
+        print_error "To fix this, either:"
+        print_error "1. Stop an unused bot: ./deploy.sh SYMBOL stop"
+        print_error "2. Create new .env file manually with different API credentials"
+        exit 1
     fi
 }
 
@@ -406,9 +482,16 @@ restart_containers() {
     print_status "Verifying ${env_file} exists on VM..."
     if ! ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
         "test -f $VM_DIR/${env_file}"; then
-        print_error "Environment file ${env_file} not found on VM!"
-        print_error "Please ensure ${env_file} exists with correct API credentials"
-        exit 1
+        print_warning "Environment file ${env_file} not found on VM!"
+        
+        # Try to create it using available credentials
+        if create_missing_env_from_vm "$symbol"; then
+            print_success "Successfully created ${env_file} using available credentials"
+        else
+            print_error "Failed to create ${env_file} automatically"
+            print_error "Please create ${env_file} manually with correct API credentials"
+            exit 1
+        fi
     fi
     
     print_success "Found ${env_file} - will use these credentials"
