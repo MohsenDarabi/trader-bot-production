@@ -1584,7 +1584,7 @@ class DailyRangeBot:
             
             # Flag will be cleared after successful buy order placement
             
-        elif not self._startup_cleanup_completed and not has_today_buy:
+        elif not has_today_buy:
             # No buy order placed today - but check for pending sells first
             # This ensures we don't place buy if today's sell orders are still pending
             if today_pending_sells > 0:
@@ -1593,7 +1593,7 @@ class DailyRangeBot:
                     log_trading_event('first_buy_blocked', f"First buy blocked - {today_pending_sells} today's sell orders pending for {market}")
                 return False
             
-            # No pending sells from today - allow first buy of day (STARTUP ONLY)
+            # No pending sells from today - allow first buy of day
             logger.info(f"🌅 First buy order of the day allowed for {market}")
             log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
             
