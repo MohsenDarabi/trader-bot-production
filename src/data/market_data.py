@@ -244,8 +244,9 @@ class MarketDataManager:
         current_hour = current_time.hour
         current_minute = current_time.minute
         
-        # Scenario 1: Regular daily reset window (after settlement period)
-        is_daily_reset_window = current_hour == 0 and 4 <= current_minute <= 59
+        # Scenario 1: Check if it's a new trading day (after settlement period)
+        # The actual reset logic is handled as a one-time event in the trading bot
+        is_daily_reset_window = current_hour == 0 and current_minute >= 4
         
         # TODO: Scenario 2 will be implemented in the trading bot logic
         # to check for bot startup without valid buy orders

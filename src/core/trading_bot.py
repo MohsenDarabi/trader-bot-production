@@ -329,6 +329,10 @@ class DailyRangeBot:
         # Cycle completion tracking for continuous trading
         self._cycle_completion_flags = {}  # market -> bool (allows immediate new buy after cycle complete)
         
+        # Daily reset tracking to ensure it's only done once per day
+        self._daily_reset_completed = {}  # market -> date of last reset
+        self._last_reset_date = {}  # market -> date when reset was done
+        
     async def initialize(self):
         """Initialize all bot components"""
         logger.info("Initializing Daily Range Accumulation Bot...")
@@ -1444,45 +1448,57 @@ class DailyRangeBot:
                 log_trading_event('settlement_approach', f"Buy order blocked - approaching settlement for {market}")
             return False
         
-        # Phase 1: Daily reset check (simplified - startup cleanup handled in _perform_startup_order_cleanup)
-        is_daily_reset = self.market_data.is_new_trading_day(market)
+        # Phase 1: One-time daily reset check
+        now = datetime.now(timezone.utc)
+        today = now.date()
+        current_hour = now.hour
+        current_minute = now.minute
         
-        # Note: Startup buy order cleanup is now handled unconditionally in _perform_startup_order_cleanup()
-        # This eliminates the complex conditions that could cause cleanup to be skipped
+        # Check if we need to do daily reset (once per day after 00:04 UTC)
+        last_reset_date = self._last_reset_date.get(market)
+        needs_daily_reset = (last_reset_date != today and current_hour == 0 and current_minute >= 4)
         
-        if is_daily_reset:
-            logger.info(f"🌅 Daily reset window detected for {market} - checking for old buy orders to cancel")
+        if needs_daily_reset:
+            logger.info(f"🌅 Performing one-time daily reset for {market} (last reset: {last_reset_date}, today: {today})")
             
             # Don't cancel orders during settlement periods
             if is_settlement_period() or is_approaching_settlement():
-                logger.info(f"⏳ Order cleanup delayed - waiting for settlement period to end for {market}")
-                log_trading_event('settlement_delay', f"Order cleanup delayed due to settlement period for {market}")
+                logger.info(f"⏳ Daily reset delayed - waiting for settlement period to end for {market}")
+                log_trading_event('settlement_delay', f"Daily reset delayed due to settlement period for {market}")
+                # Don't mark as complete, try again next cycle
                 return False
             
-            # Get current buy orders for daily reset cleanup only
+            # Get current buy orders for daily reset cleanup only (NOT SELL ORDERS)
             current_buy_status = self._get_exchange_buy_status(market)
             all_buy_orders = current_buy_status.get('all_buy_orders', [])
-            today = datetime.now(timezone.utc).date()
             
+            cancelled_count = 0
             if len(all_buy_orders) > 0:
-                cancelled_count = 0
-                
                 for order in all_buy_orders:
-                    # Only cancel orders from previous days during daily reset
-                    if order.created_at.date() < today:
-                        try:
-                            logger.info(f"🗑️ Cancelling old buy order: {order.client_id} from {order.created_at.date()}")
-                            if self.order_manager.cancel_order(order.client_id):
-                                cancelled_count += 1
-                                log_trading_event('order_cleanup', f"Cancelled old buy order {order.client_id} from {order.created_at.date()}")
-                        except Exception as e:
-                            logger.error(f"Failed to cancel buy order {order.client_id}: {e}")
-                
-                if cancelled_count > 0:
-                    logger.info(f"✅ Daily reset cleanup: Cancelled {cancelled_count} old buy orders for {market}")
-                    # Small delay to let cancellations process
-                    import time
-                    time.sleep(0.5)
+                    # Cancel ALL buy orders during daily reset (cleanup any buggy duplicates)
+                    try:
+                        order_age = (now - order.created_at).total_seconds() / 3600
+                        logger.info(f"🗑️ Daily reset - cancelling buy order: {order.client_id} from {order.created_at.date()} (age: {order_age:.1f}h)")
+                        if self.order_manager.cancel_order(order.client_id):
+                            cancelled_count += 1
+                            log_trading_event('daily_reset_cleanup', f"Cancelled buy order {order.client_id} during daily reset")
+                    except Exception as e:
+                        logger.error(f"Failed to cancel buy order {order.client_id}: {e}")
+            
+            if cancelled_count > 0:
+                logger.info(f"✅ Daily reset complete: Cancelled {cancelled_count} buy orders for {market}")
+                # Small delay to let cancellations process
+                import time
+                time.sleep(0.5)
+            else:
+                logger.info(f"✅ Daily reset complete: No buy orders to cancel for {market}")
+            
+            # Mark daily reset as completed for today
+            self._last_reset_date[market] = today
+            logger.info(f"✅ Daily reset marked complete for {market} on {today}")
+            
+            # IMPORTANT: Continue to buy decision logic after reset
+            # Don't return here - allow first buy of the day to proceed
         
         # Use direct exchange queries for single source of truth
         buy_status = self._get_exchange_buy_status(market)
@@ -1566,6 +1582,9 @@ class DailyRangeBot:
         cycle_complete_flag = self._cycle_completion_flags.get(market, False)
         today_orders = buy_status.get('today_orders', [])
         has_today_buy = len(today_orders) > 0
+        
+        # Log buy decision details
+        logger.debug(f"Buy decision for {market}: cycle_complete={cycle_complete_flag}, has_today_buy={has_today_buy}, today_orders_count={len(today_orders)}")
         
         # Simplified decision logic as requested by user
         if cycle_complete_flag:
