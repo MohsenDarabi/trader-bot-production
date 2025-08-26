@@ -1629,12 +1629,16 @@ class DailyRangeBot:
                 log_trading_event('buy_decision', f"❌ Cannot place buy - daily buy already placed for {market}")
             return False
         
-        # Phase 5: Price validation
-        price_diff_percent = abs(current_price - signal.buy_price) / signal.buy_price * 100
-        if price_diff_percent > MAX_RANGE_DEVIATION:
-            if self._should_log_state_change(market, 'price_out_of_range', True):
-                log_trading_event('price_validation', f"❌ Cannot place buy - price too far from signal: {price_diff_percent:.2f}% deviation (max: {MAX_RANGE_DEVIATION}%) for {market}")
-            return False
+        # Phase 5: Price validation  
+        # For buy orders: Only block if trying to buy at significantly higher prices
+        # Always allow buying at lower prices (better entries)
+        if current_price > signal.buy_price:
+            price_diff_percent = (current_price - signal.buy_price) / signal.buy_price * 100
+            if price_diff_percent > MAX_RANGE_DEVIATION:
+                if self._should_log_state_change(market, 'price_out_of_range', True):
+                    log_trading_event('price_validation', f"❌ Cannot place buy - price too high: {price_diff_percent:.2f}% above signal (max: {MAX_RANGE_DEVIATION}%) for {market}")
+                return False
+        # If current_price <= signal.buy_price: Allow (favorable condition)
         
         # Phase 6: Account balance and position sizing
         account_balance = self.get_account_balance()
