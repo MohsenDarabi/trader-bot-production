@@ -248,8 +248,8 @@ class MarketDataManager:
         # The actual reset logic is handled as a one-time event in the trading bot
         is_daily_reset_window = current_hour == 0 and current_minute >= 4
         
-        # TODO: Scenario 2 will be implemented in the trading bot logic
-        # to check for bot startup without valid buy orders
+        # Scenario 2: Bot startup condition checking is handled directly in trading bot
+        # via startup cleanup and position validation logic
         
         logger.info(f"Trading day check for {market}: current_time={current_time.strftime('%H:%M:%S UTC')}, is_daily_reset_window={is_daily_reset_window}")
         

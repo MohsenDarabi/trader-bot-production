@@ -31,6 +31,49 @@ from config.settings import (
 logger = get_logger(__name__)
 
 
+def safe_float(value, default=0.0):
+    """
+    Safely convert value to float, handling both string and numeric types
+    
+    Args:
+        value: Value to convert (can be string, int, float, or None)
+        default: Default value if conversion fails
+        
+    Returns:
+        Float value or default
+    """
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_str_format(value, format_spec=".2f"):
+    """
+    Safely format a value as string, handling both string and numeric types
+    
+    Args:
+        value: Value to format
+        format_spec: Format specification (e.g., ".2f", ".8f")
+        
+    Returns:
+        Formatted string
+    """
+    if value is None:
+        return "N/A"
+    try:
+        # If it's already a string that looks like a number, convert to float first
+        if isinstance(value, str):
+            numeric_value = float(value)
+            return f"{numeric_value:{format_spec}}"
+        else:
+            return f"{value:{format_spec}}"
+    except (ValueError, TypeError):
+        return str(value) if value is not None else "N/A"
+
+
 class TradingCircuitBreaker:
     """Enhanced circuit breaker with priority levels, dynamic cooldowns, and position coverage checks"""
     
@@ -2476,7 +2519,7 @@ class DailyRangeBot:
     
     def _classify_orders_by_date(self, orders: List[Dict], today_utc) -> tuple:
         """
-        Classify orders into today's vs old orders based on create_time timestamp
+        Classify orders into today's vs old orders based on created_at timestamp
         
         Args:
             orders: List of order dictionaries from exchange
@@ -2492,13 +2535,13 @@ class DailyRangeBot:
         
         for order in orders:
             try:
-                create_time = order.get('create_time', 0)
-                if create_time:
+                created_at = order.get('created_at', 0)
+                if created_at:
                     # Handle both millisecond and second timestamps
-                    if create_time > 1e10:  # Millisecond timestamp
-                        order_date = datetime.fromtimestamp(create_time/1000, timezone.utc).date()
+                    if created_at > 1e10:  # Millisecond timestamp
+                        order_date = datetime.fromtimestamp(created_at/1000, timezone.utc).date()
                     else:  # Second timestamp
-                        order_date = datetime.fromtimestamp(create_time, timezone.utc).date()
+                        order_date = datetime.fromtimestamp(created_at, timezone.utc).date()
                     
                     if order_date == today_utc:
                         today_orders.append(order)
@@ -2648,11 +2691,11 @@ class DailyRangeBot:
                 if isinstance(positions_data, list):
                     for pos in positions_data:
                         if pos.get('market') == market:
-                            position_size = float(pos.get('amount', 0))
+                            position_size = safe_float(pos.get('amount', 0))
                             break
                 elif isinstance(positions_data, dict):
                     if market in positions_data:
-                        position_size = float(positions_data[market].get('amount', 0))
+                        position_size = safe_float(positions_data[market].get('amount', 0))
             
             # Direct query to exchange for orders
             orders_response = self.client.get_pending_orders(market)
@@ -2715,58 +2758,78 @@ class DailyRangeBot:
     
     async def _get_todays_uncovered_buy_fill(self, market: str, uncovered_amount: float) -> Optional[Dict]:
         """
-        Find today's buy fill that matches the uncovered amount
+        Find today's buy fill that matches the uncovered amount using order tracker and WebSocket data
         Returns fill details or None
         """
         try:
             today = datetime.now(timezone.utc).date()
+            logger.debug(f"Looking for buy fill matching {uncovered_amount:.6f} {market} from today ({today})")
             
-            # Query recent trades/fills from exchange
-            # IMPROVED WORKAROUND: Try multiple methods to get fill data
-            fills_data = None
+            # Method 1: Check order tracker for recent buy fills from today
+            if hasattr(self, 'order_tracker') and self.order_tracker:
+                try:
+                    # Get all tracked orders and filter by market
+                    tracked_orders = self.order_tracker.tracked_orders.values()
+                    market_orders = [order for order in tracked_orders if order.market == market]
+                    
+                    for order in market_orders:
+                        # Only consider buy orders from today that have fills
+                        if (order.side == OrderSide.BUY and 
+                            order.created_at.date() == today and 
+                            hasattr(order, 'fills') and order.fills):
+                            
+                            # Check if any fill matches the uncovered amount
+                            for fill in order.fills:
+                                fill_amount = safe_float(fill.amount)
+                                if abs(fill_amount - uncovered_amount) < 0.000001:  # Precise match
+                                    logger.info(f"✓ Found matching buy fill: {fill_amount:.6f} @ ${fill.price:.4f}")
+                                    return {
+                                        'order_id': order.order_id,
+                                        'client_id': order.client_id,
+                                        'amount': fill_amount,
+                                        'price': safe_float(fill.price),
+                                        'timestamp': fill.timestamp,
+                                        'market': market
+                                    }
+                    
+                    logger.debug(f"No matching fills found in order tracker for amount {uncovered_amount:.6f}")
+                    
+                except Exception as e:
+                    logger.debug(f"Order tracker fill lookup failed: {e}")
             
-            # Method 1: Try to get user deals/trades if available
+            # Method 2: Use order status queries to check recent filled orders
             try:
-                if hasattr(self.client, 'get_user_deals'):
-                    fills_data = self.client.get_user_deals(market)
-                    logger.debug("Successfully retrieved fills using get_user_deals")
-                elif hasattr(self.client, 'get_user_trades'):
-                    fills_data = self.client.get_user_trades(market)
-                    logger.debug("Successfully retrieved fills using get_user_trades")
-                else:
-                    logger.debug("No direct fills endpoint available")
+                # Get recent order history through order status queries
+                # This is less efficient but works when WebSocket data is incomplete
+                
+                pending_orders_response = self.client.get_pending_orders(market)
+                if pending_orders_response and pending_orders_response.get('data'):
+                    orders_data = pending_orders_response['data']
+                    
+                    # Look for partially filled orders that might contain the missing fill
+                    for order_data in orders_data:
+                        if (order_data.get('side') == 'buy' and 
+                            safe_float(order_data.get('filled_amount', 0)) > 0):
+                            
+                            filled_amount = safe_float(order_data.get('filled_amount', 0))
+                            if abs(filled_amount - uncovered_amount) < 0.000001:
+                                logger.info(f"✓ Found matching filled buy order via API: {filled_amount:.6f}")
+                                return {
+                                    'order_id': order_data.get('order_id'),
+                                    'client_id': order_data.get('client_id'),
+                                    'amount': filled_amount,
+                                    'price': safe_float(order_data.get('price', 0)),
+                                    'market': market
+                                }
+                
+                logger.debug("No matching fills found via order status queries")
+                
             except Exception as e:
-                logger.debug(f"Direct fills query failed: {e}")
+                logger.debug(f"Order status fill lookup failed: {e}")
             
-            # Method 2: Fallback to order status tracking (original workaround improved)
-            if not fills_data:
-                try:
-                    # This is still a workaround but more robust
-                    logger.debug("Using order tracking as proxy for fills detection")
-                    
-                    # Look for recently filled orders that match the uncovered amount
-                    pending_orders = self.client.get_pending_orders(market)
-                    if pending_orders and pending_orders.get('data'):
-                        # This method doesn't give us fills directly, but we can track order states
-                        logger.debug(f"Monitoring {len(pending_orders['data'])} orders for fill detection")
-                    
-                    # For now, return None and let the WebSocket system handle fill detection
-                    return None
-                    
-                except Exception as e:
-                    logger.debug(f"Order tracking fallback failed: {e}")
-                    return None
-            
-            # Method 3: Parse fills data if we got it from Method 1
-            if fills_data:
-                # Parse the fills data to find matching fill
-                try:
-                    # This would need to be implemented based on the actual API response format
-                    logger.debug("TODO: Parse fills data to find matching uncovered amount")
-                    return None
-                except Exception as e:
-                    logger.error(f"Error parsing fills data: {e}")
-                    return None
+            # Method 3: Return None if no match found - let WebSocket handle future fills
+            logger.debug(f"No buy fill found matching {uncovered_amount:.6f} - WebSocket will handle future fills")
+            return None
                 
         except Exception as e:
             logger.error(f"Error finding today's buy fill: {e}")

@@ -294,7 +294,9 @@ class OrderPairingManager:
             
             current_position = 0.0
             if positions:
-                current_position = float(positions[0].get("amount", 0))
+                # Import safe_float from trading_bot module
+                from src.core.trading_bot import safe_float
+                current_position = safe_float(positions[0].get("amount", 0))
             
             # Calculate total buy and sell amounts from tracked orders
             total_buy_filled = 0.0
