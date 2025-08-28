@@ -1634,8 +1634,6 @@ class DailyRangeBot:
         fresh_today_sell_orders = fresh_data['today_sell_orders']
         fresh_old_sell_orders = fresh_data['old_sell_orders']
         is_consistent = fresh_data['is_consistent']
-        fresh_pending_sells_today = len([o for o in fresh_today_sell_orders if o.get('status', 'pending') in ['pending', 'partially_filled']])
-        
         # CRITICAL: Block trading if position-order state is inconsistent
         if not is_consistent:
             if self._should_log_state_change(market, 'inconsistent_state', True):
@@ -1643,24 +1641,21 @@ class DailyRangeBot:
                 log_trading_event('consistency_block', f"Buy blocked - dangerous position-order state for {market}")
             return False
         
-        # 🚨 CRITICAL EMERGENCY CHECK: Block if ANY pending sells from today exist (using fresh data)
+        # 🚨 CRITICAL EMERGENCY CHECK: Block if ANY pending sells from today exist (excluding orphaned)
         # This prevents duplicate buy orders during bot restarts when sells already exist from today
-        emergency_pending_sells = self._get_today_pending_sell_orders(market)
-        total_pending_sells_today = max(emergency_pending_sells, fresh_pending_sells_today)
+        pending_sells_today = self._get_today_pending_sell_orders(market)
         
-        if total_pending_sells_today > 0:
-            logger.error(f"🚨 EMERGENCY BLOCK: {total_pending_sells_today} pending sell orders from today - CANNOT PLACE BUY for {market}")
-            logger.error(f"   Emergency method detected: {emergency_pending_sells}")
-            logger.error(f"   Fresh data detected: {fresh_pending_sells_today}")
+        if pending_sells_today > 0:
+            logger.error(f"🚨 EMERGENCY BLOCK: {pending_sells_today} pending sell orders from today - CANNOT PLACE BUY for {market}")
             logger.error(f"   This prevents duplicate buy orders when bot restarts mid-day with existing sells")
-            log_trading_event('emergency_block', f"🚨 Critical safety check blocked buy - {total_pending_sells_today} today's pending sells for {market}")
+            log_trading_event('emergency_block', f"🚨 Critical safety check blocked buy - {pending_sells_today} today's pending sells for {market}")
             return False
         
         has_today_buy = len(fresh_today_buy_orders) > 0
         
-        # Log fresh data decision details
+        # Log fresh data decision details  
         logger.info(f"🔄 Fresh exchange data for {market}: today_buys={len(fresh_today_buy_orders)}, "
-                   f"today_sells={len(fresh_today_sell_orders)} (pending={fresh_pending_sells_today}), "
+                   f"today_sells={len(fresh_today_sell_orders)} (pending_regular={pending_sells_today}), "
                    f"old_sells={len(fresh_old_sell_orders)}, cycle_complete={cycle_complete_flag}, "
                    f"consistency={'✅' if is_consistent else '🚨'}")
         
