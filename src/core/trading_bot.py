@@ -1429,12 +1429,7 @@ class DailyRangeBot:
         except Exception as e:
             logger.warning(f"⚠️ Could not force validation before buy decision: {e}")
         
-        # EMERGENCY SAFETY CHECK: Block if ANY pending sells from today exist (after validation)
-        emergency_pending_sells = self._get_today_pending_sell_orders(market)
-        if emergency_pending_sells > 0:
-            logger.error(f"🚨 EMERGENCY BLOCK: {emergency_pending_sells} pending sell orders from today - CANNOT PLACE BUY for {market}")
-            log_trading_event('emergency_block', f"🚨 Emergency safety check blocked buy - {emergency_pending_sells} today's pending sells for {market}")
-            return False
+        # EMERGENCY SAFETY CHECK moved after fresh data loading for consistency
         
         # Phase 0: Funding fee protection check
         from src.utils.settlement_handler import is_settlement_period, is_approaching_settlement
@@ -1567,15 +1562,7 @@ class DailyRangeBot:
                 log_trading_event('uncovered_detected', 
                                 f"Uncovered position: {uncovered_amount:.6f} for {market}")
         
-        # Phase 3: Check for pending sell orders from today
-        today_pending_sells = self._get_today_pending_sell_orders(market)
-        if today_pending_sells > 0:
-            if self._should_log_state_change(market, f'pending_sells_{today_pending_sells}', True):
-                logger.info(f"❌ Cannot place buy - {today_pending_sells} pending sell orders from today for {market}")
-                log_trading_event('pending_sells_block', f"Buy blocked - {today_pending_sells} today's sell orders pending for {market}")
-            return False
-        
-        # Phase 4: Check for pending buy orders (after day-start cancellation and sell check)
+        # Phase 3: Check for pending buy orders (redundant sell check removed - handled by emergency check above)
         total_buy_orders = buy_status.get('total_buy_orders', 0)
         
         # CRITICAL SAFETY CHECK: Multiple buy orders indicate a serious bug
@@ -1642,6 +1629,19 @@ class DailyRangeBot:
                 log_trading_event('consistency_block', f"Buy blocked - dangerous position-order state for {market}")
             return False
         
+        # 🚨 CRITICAL EMERGENCY CHECK: Block if ANY pending sells from today exist (using fresh data)
+        # This prevents duplicate buy orders during bot restarts when sells already exist from today
+        emergency_pending_sells = self._get_today_pending_sell_orders(market)
+        total_pending_sells_today = max(emergency_pending_sells, fresh_pending_sells_today)
+        
+        if total_pending_sells_today > 0:
+            logger.error(f"🚨 EMERGENCY BLOCK: {total_pending_sells_today} pending sell orders from today - CANNOT PLACE BUY for {market}")
+            logger.error(f"   Emergency method detected: {emergency_pending_sells}")
+            logger.error(f"   Fresh data detected: {fresh_pending_sells_today}")
+            logger.error(f"   This prevents duplicate buy orders when bot restarts mid-day with existing sells")
+            log_trading_event('emergency_block', f"🚨 Critical safety check blocked buy - {total_pending_sells_today} today's pending sells for {market}")
+            return False
+        
         has_today_buy = len(fresh_today_buy_orders) > 0
         
         # Log fresh data decision details
@@ -1668,16 +1668,21 @@ class DailyRangeBot:
             # Flag will be cleared after successful buy order placement
             
         elif not has_today_buy:
-            # No buy order placed today - check fresh pending sells from today
+            # STARTUP SCENARIO: No buy order placed today
+            # Note: Emergency check above already prevents this scenario if pending sells exist
+            # This logic is now primarily for logging clarity and double-verification
+            
+            # Redundant safety check (already handled by emergency check above, but kept for explicit clarity)
             if fresh_pending_sells_today > 0:
-                if self._should_log_state_change(market, f'first_buy_blocked_fresh_sells_{fresh_pending_sells_today}', True):
-                    logger.info(f"❌ Cannot place first buy - {fresh_pending_sells_today} pending sell orders from today for {market} (fresh data)")
-                    log_trading_event('first_buy_blocked', f"First buy blocked - {fresh_pending_sells_today} today's sell orders pending for {market} (fresh data)")
+                # This should never be reached due to emergency check above, but keeping for safety
+                logger.error(f"🚨 CRITICAL: Startup safety check triggered - this should have been caught by emergency check!")
+                logger.error(f"❌ Cannot place first buy - {fresh_pending_sells_today} pending sell orders from today for {market}")
+                log_trading_event('startup_safety_block', f"🚨 Startup safety check blocked buy - {fresh_pending_sells_today} today's sells for {market}")
                 return False
             
-            # No pending sells from today - allow first buy of day
-            logger.info(f"🌅 First buy order of the day allowed for {market} (confirmed with fresh data)")
-            log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
+            # Startup scenario: No pending sells from today - allow first buy of day
+            logger.info(f"🌅 STARTUP: First buy order of the day allowed for {market} - no pending sells detected")
+            log_trading_event('startup_buy', f"🌅 STARTUP: Placing first buy order of the day for {market}")
             
         else:
             # Normal operation: ONLY cycle completion allows new buys
