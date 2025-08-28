@@ -173,15 +173,11 @@ class OrderPairingManager:
             sell_orders_created = []
             
             for sell_price_level in rule.sell_price_levels:
-                # Detect if this is an absolute price or a multiplier
-                if sell_price_level > 2.0:
-                    # This is an absolute price from strategy (e.g., $0.76, $3500)
-                    sell_price = sell_price_level
-                    logger.info(f"Using absolute strategy price: ${sell_price:.2f}")
-                else:
-                    # This is a multiplier (e.g., 1.015, 1.02)  
-                    sell_price = fill.price * sell_price_level
-                    logger.info(f"Using multiplier: {sell_price_level} → ${sell_price:.2f}")
+                # FIXED: Always treat as absolute price since we only pass strategy sell prices
+                # The arbitrary 2.0 threshold was causing strategy prices to be misinterpreted 
+                # as multipliers for lower-priced assets like ADA
+                sell_price = sell_price_level
+                logger.info(f"Using absolute strategy price: ${sell_price:.8f}")
                 
                 logger.info(f"Sell price calculation: fill=${fill.price:.2f}, level={sell_price_level}, result=${sell_price:.2f}")
                 

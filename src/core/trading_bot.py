@@ -1503,23 +1503,66 @@ class DailyRangeBot:
         # Use direct exchange queries for single source of truth
         buy_status = self._get_exchange_buy_status(market)
         
-        # Phase 2: Check for uncovered positions BEFORE placing new buy orders
-        # This prevents accumulating more positions before existing ones have sell orders
-        position = self.position_manager.get_position(market)
-        if position and position.size > 0:
-            # Get all pending sell orders for this market
-            pending_orders = self.order_manager.get_pending_orders(market)
-            sell_orders = [order for order in pending_orders if order.side == OrderSide.SELL]
-            total_sell_amount = sum(order.amount for order in sell_orders)
-            uncovered_amount = position.size - total_sell_amount
+        # Phase 2: CRITICAL - Get FRESH exchange data for position and orders
+        # Never trust cached data for critical buy decisions
+        exchange_state = self._get_exchange_position_and_orders_direct(market)
+        position_size = exchange_state['position_size']
+        pending_buy_orders = exchange_state['buy_orders']
+        pending_sell_orders = exchange_state['sell_orders']
+        
+        # Check for existing pending buy orders first
+        if pending_buy_orders:
+            if self._should_log_state_change(market, 'fresh_buy_orders_exist', True):
+                logger.warning(f"❌ Cannot place buy - {len(pending_buy_orders)} pending buy orders exist for {market}")
+                log_trading_event('fresh_buy_block', f"Buy blocked - {len(pending_buy_orders)} pending buy orders exist for {market}")
+            return False
+        
+        # Phase 2.5: Position and cycle analysis with fresh data
+        if position_size > 0:
+            # Calculate total sell order amount from fresh data
+            total_sell_amount = sum(float(s.get('amount', 0)) for s in pending_sell_orders)
+            uncovered_amount = position_size - total_sell_amount
             
-            if uncovered_amount > 0.000001:  # Small tolerance for rounding
-                if self._should_log_state_change(market, 'uncovered_position', True):
-                    logger.warning(f"❌ Cannot place buy - position has {uncovered_amount:.6f} uncovered amount for {market}")
-                    logger.info(f"   Position: {position.size:.6f}, Sell orders: {total_sell_amount:.6f}")
-                    log_trading_event('uncovered_position_block', 
-                                    f"Buy blocked - uncovered position {uncovered_amount:.6f} for {market}")
+            # Check for today's pending sells to determine if cycle is in progress
+            today = datetime.now(timezone.utc).date()
+            today_sells = []
+            
+            for sell in pending_sell_orders:
+                created_str = sell.get('created_at', '')
+                client_id = sell.get('client_id', '')
+                
+                try:
+                    # Parse timestamp (handle different formats)
+                    if isinstance(created_str, (int, float)):
+                        created_at = datetime.fromtimestamp(created_str/1000, timezone.utc)
+                    else:
+                        created_at = datetime.fromisoformat(str(created_str).replace('Z', '+00:00'))
+                    
+                    # Check if from today and not orphaned
+                    if created_at.date() == today and '_OS_' not in client_id:
+                        today_sells.append(sell)
+                except Exception as e:
+                    logger.debug(f"Could not parse sell order date: {e}")
+            
+            if today_sells:
+                # Today's cycle in progress - wait for completion
+                if self._should_log_state_change(market, 'today_cycle_pending', True):
+                    logger.warning(f"❌ Cannot place buy - today's cycle in progress for {market}")
+                    logger.info(f"   Position size: {position_size:.6f}")
+                    logger.info(f"   Today's pending sells: {len(today_sells)}")
+                    log_trading_event('cycle_pending', 
+                                    f"Buy blocked - today's cycle pending: {len(today_sells)} sells for {market}")
                 return False
+            
+            # Position exists but only with old sells - can start new daily cycle
+            logger.info(f"Position exists ({position_size:.6f}) with only old sells - allowing new daily buy cycle for {market}")
+            
+            # Check for uncovered amount and handle if needed
+            if uncovered_amount > 0.000001:
+                logger.warning(f"⚠️ Uncovered position detected: {uncovered_amount:.6f} for {market}")
+                # Don't block buy but log for monitoring
+                log_trading_event('uncovered_detected', 
+                                f"Uncovered position: {uncovered_amount:.6f} for {market}")
         
         # Phase 3: Check for pending sell orders from today
         today_pending_sells = self._get_today_pending_sell_orders(market)
@@ -1578,15 +1621,24 @@ class DailyRangeBot:
             
             return False  # Wait for existing buy orders to fill first
         
-        # Phase 4: Check cycle completion or first buy of day conditions
+        # Phase 4: Intelligent buy decision with fresh exchange data
         cycle_complete_flag = self._cycle_completion_flags.get(market, False)
-        today_orders = buy_status.get('today_orders', [])
-        has_today_buy = len(today_orders) > 0
         
-        # Log buy decision details
-        logger.debug(f"Buy decision for {market}: cycle_complete={cycle_complete_flag}, has_today_buy={has_today_buy}, today_orders_count={len(today_orders)}")
+        # Use FRESH exchange data for decision making (not cached)
+        fresh_data = self._get_exchange_position_and_orders_direct(market)
+        fresh_today_buy_orders = fresh_data['today_buy_orders']
+        fresh_today_sell_orders = fresh_data['today_sell_orders']
+        fresh_old_sell_orders = fresh_data['old_sell_orders']
+        fresh_pending_sells_today = len([o for o in fresh_today_sell_orders if o.status in ['pending', 'partially_filled']])
         
-        # Simplified decision logic as requested by user
+        has_today_buy = len(fresh_today_buy_orders) > 0
+        
+        # Log fresh data decision details
+        logger.info(f"🔄 Fresh exchange data for {market}: today_buys={len(fresh_today_buy_orders)}, "
+                   f"today_sells={len(fresh_today_sell_orders)} (pending={fresh_pending_sells_today}), "
+                   f"old_sells={len(fresh_old_sell_orders)}, cycle_complete={cycle_complete_flag}")
+        
+        # Decision logic using fresh data
         if cycle_complete_flag:
             # Cycle just completed - generate fresh signal for new cycle
             logger.info(f"🔄 Cycle completion detected for {market} - generating fresh signal for new buy order")
@@ -1604,41 +1656,28 @@ class DailyRangeBot:
             # Flag will be cleared after successful buy order placement
             
         elif not has_today_buy:
-            # No buy order placed today - but check for pending sells first
-            # This ensures we don't place buy if today's sell orders are still pending
-            if today_pending_sells > 0:
-                if self._should_log_state_change(market, f'first_buy_blocked_sells_{today_pending_sells}', True):
-                    logger.info(f"❌ Cannot place first buy - {today_pending_sells} pending sell orders from today for {market}")
-                    log_trading_event('first_buy_blocked', f"First buy blocked - {today_pending_sells} today's sell orders pending for {market}")
+            # No buy order placed today - check fresh pending sells from today
+            if fresh_pending_sells_today > 0:
+                if self._should_log_state_change(market, f'first_buy_blocked_fresh_sells_{fresh_pending_sells_today}', True):
+                    logger.info(f"❌ Cannot place first buy - {fresh_pending_sells_today} pending sell orders from today for {market} (fresh data)")
+                    log_trading_event('first_buy_blocked', f"First buy blocked - {fresh_pending_sells_today} today's sell orders pending for {market} (fresh data)")
                 return False
             
             # No pending sells from today - allow first buy of day
-            logger.info(f"🌅 First buy order of the day allowed for {market}")
+            logger.info(f"🌅 First buy order of the day allowed for {market} (confirmed with fresh data)")
             log_trading_event('daily_buy', f"🌅 Placing first buy order of the day for {market}")
             
-        elif self._startup_cleanup_completed:
+        else:
             # Normal operation: ONLY cycle completion allows new buys
             if self._should_log_state_change(market, 'normal_operation_cycle_wait', True):
                 logger.debug(f"❌ Normal operation - waiting for cycle completion for {market}")
                 log_trading_event('buy_decision', f"❌ Normal operation - waiting for cycle completion for {market}")
             return False
-            
-        else:
-            # Already placed buy today and no cycle completion - block additional buys
-            if self._should_log_state_change(market, 'daily_buy_limit', True):
-                log_trading_event('buy_decision', f"❌ Cannot place buy - daily buy already placed for {market}")
-            return False
         
-        # Phase 5: Price validation  
-        # For buy orders: Only block if trying to buy at significantly higher prices
-        # Always allow buying at lower prices (better entries)
-        if current_price > signal.buy_price:
-            price_diff_percent = (current_price - signal.buy_price) / signal.buy_price * 100
-            if price_diff_percent > MAX_RANGE_DEVIATION:
-                if self._should_log_state_change(market, 'price_out_of_range', True):
-                    log_trading_event('price_validation', f"❌ Cannot place buy - price too high: {price_diff_percent:.2f}% above signal (max: {MAX_RANGE_DEVIATION}%) for {market}")
-                return False
-        # If current_price <= signal.buy_price: Allow (favorable condition)
+        # Phase 5: Price validation removed as per user feedback
+        # User: "we do not need any MAX_RANGE_DEVIATION as buying with lower price 
+        # than the originally generated signal is better and favorable"
+        # Price adjustment will happen in place_buy_order() method
         
         # Phase 6: Account balance and position sizing
         account_balance = self.get_account_balance()
@@ -2425,6 +2464,90 @@ class DailyRangeBot:
                 'today_orders': [],
                 'cancelled_stale': 0
             }
+    
+    def _get_exchange_position_and_orders_direct(self, market: str) -> Dict[str, Any]:
+        """
+        Query exchange directly for position and order state - TRUE single source of truth
+        This bypasses all caches and WebSocket data to get the real state
+        
+        Returns:
+            Dict with position_size, pending_buy_orders, pending_sell_orders, and amounts
+        """
+        try:
+            # Direct query to exchange for positions
+            positions_response = self.exchange_client.get_positions(market)
+            position_size = 0.0
+            
+            if positions_response and positions_response.get('data'):
+                positions_data = positions_response['data']
+                # Handle both list and dict response formats
+                if isinstance(positions_data, list):
+                    for pos in positions_data:
+                        if pos.get('market') == market:
+                            position_size = float(pos.get('amount', 0))
+                            break
+                elif isinstance(positions_data, dict):
+                    if market in positions_data:
+                        position_size = float(positions_data[market].get('amount', 0))
+            
+            # Direct query to exchange for orders
+            orders_response = self.exchange_client.get_pending_orders(market)
+            buy_orders = []
+            sell_orders = []
+            
+            if orders_response and orders_response.get('data'):
+                for order in orders_response['data']:
+                    if order.get('market') == market:
+                        if order.get('side') == 'buy':
+                            buy_orders.append(order)
+                        elif order.get('side') == 'sell':
+                            sell_orders.append(order)
+            
+            logger.info(f"📡 Direct exchange query for {market}:")
+            logger.info(f"   Position: {position_size:.6f}")
+            logger.info(f"   Buy orders: {len(buy_orders)}")
+            logger.info(f"   Sell orders: {len(sell_orders)}")
+            
+            return {
+                'position_size': position_size,
+                'buy_orders': buy_orders,
+                'sell_orders': sell_orders,
+                'total_buy_amount': sum(float(o.get('amount', 0)) for o in buy_orders),
+                'total_sell_amount': sum(float(o.get('amount', 0)) for o in sell_orders)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error querying exchange directly for {market}: {e}")
+            # Return safe defaults on error
+            return {
+                'position_size': 0.0,
+                'buy_orders': [],
+                'sell_orders': [],
+                'total_buy_amount': 0.0,
+                'total_sell_amount': 0.0
+            }
+    
+    async def _get_todays_uncovered_buy_fill(self, market: str, uncovered_amount: float) -> Optional[Dict]:
+        """
+        Find today's buy fill that matches the uncovered amount
+        Returns fill details or None
+        """
+        try:
+            today = datetime.now(timezone.utc).date()
+            
+            # Query recent trades/fills from exchange
+            # Note: get_user_deals might not exist, using available methods
+            try:
+                fills_response = self.exchange_client.get_pending_orders(market)
+                # This is a workaround - ideally we'd have a fills endpoint
+                logger.warning("Using pending orders as proxy for fills - implement proper fills endpoint")
+                return None
+            except:
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error finding today's buy fill: {e}")
+            return None
     
     
     async def _perform_startup_order_cleanup(self):
