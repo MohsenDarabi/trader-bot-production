@@ -1038,7 +1038,7 @@ class DailyRangeBot:
             
             # Validation: Cross-check with exchange API to detect discrepancies
             try:
-                direct_exchange_orders = self.exchange_client.get_pending_orders(market=market)
+                direct_exchange_orders = self.client.get_pending_orders(market=market)
                 exchange_buy_orders = []
                 if isinstance(direct_exchange_orders, dict):
                     exchange_data = direct_exchange_orders.get('data', [])
@@ -2475,7 +2475,7 @@ class DailyRangeBot:
         """
         try:
             # Direct query to exchange for positions
-            positions_response = self.exchange_client.get_positions(market)
+            positions_response = self.client.get_positions(market)
             position_size = 0.0
             
             if positions_response and positions_response.get('data'):
@@ -2491,7 +2491,7 @@ class DailyRangeBot:
                         position_size = float(positions_data[market].get('amount', 0))
             
             # Direct query to exchange for orders
-            orders_response = self.exchange_client.get_pending_orders(market)
+            orders_response = self.client.get_pending_orders(market)
             buy_orders = []
             sell_orders = []
             
@@ -2538,7 +2538,7 @@ class DailyRangeBot:
             # Query recent trades/fills from exchange
             # Note: get_user_deals might not exist, using available methods
             try:
-                fills_response = self.exchange_client.get_pending_orders(market)
+                fills_response = self.client.get_pending_orders(market)
                 # This is a workaround - ideally we'd have a fills endpoint
                 logger.warning("Using pending orders as proxy for fills - implement proper fills endpoint")
                 return None
