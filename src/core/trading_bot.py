@@ -26,74 +26,12 @@ from config.settings import (
     SIGNAL_GENERATION_TIME, TIMEZONE, is_test_mode, 
     MIN_PROFIT_PERCENT, MAX_RANGE_DEVIATION
 )
+from src.utils.safe_conversions import safe_float, safe_int, safe_str_format
 
 
 logger = get_logger(__name__)
 
 
-def safe_float(value, default=0.0):
-    """
-    Safely convert value to float, handling both string and numeric types
-    
-    Args:
-        value: Value to convert (can be string, int, float, or None)
-        default: Default value if conversion fails
-        
-    Returns:
-        Float value or default
-    """
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return default
-
-
-def safe_str_format(value, format_spec=".2f"):
-    """
-    Safely format a value as string, handling both string and numeric types
-    
-    Args:
-        value: Value to format
-        format_spec: Format specification (e.g., ".2f", ".8f")
-        
-    Returns:
-        Formatted string
-    """
-    if value is None:
-        return "N/A"
-    try:
-        # If it's already a string that looks like a number, convert to float first
-        if isinstance(value, str):
-            numeric_value = float(value)
-            return f"{numeric_value:{format_spec}}"
-        else:
-            return f"{value:{format_spec}}"
-    except (ValueError, TypeError):
-        return str(value) if value is not None else "N/A"
-
-
-def safe_int(value, default=0):
-    """
-    Safely convert value to int, handling both string and numeric types
-    
-    Args:
-        value: Value to convert (can be string with decimals, int, float, or None)
-        default: Default value if conversion fails
-        
-    Returns:
-        Integer value or default
-    """
-    if value is None:
-        return default
-    try:
-        # Handle strings that might contain decimals (e.g., "123.0")
-        if isinstance(value, str) and '.' in value:
-            return int(float(value))
-        return int(value)
-    except (ValueError, TypeError):
-        return default
 
 
 class TradingCircuitBreaker:
@@ -2252,7 +2190,7 @@ class DailyRangeBot:
                 # Extract position information
                 position_id = safe_int(position_data.get("position_id", 0))
                 side = position_data.get("side", "long")  # 'long' or 'short'
-                open_interest = safe_float(position_data.get("open_interest", 0))
+                position_amount = safe_float(position_data.get("open_interest", 0))
                 avg_entry_price = safe_float(position_data.get("avg_entry_price", 0))
                 unrealized_pnl = safe_float(position_data.get("unrealized_pnl", 0))
                 liq_price = safe_float(position_data.get("liq_price", 0))
@@ -2260,7 +2198,7 @@ class DailyRangeBot:
                 # Update position in position manager
                 from src.core.position_manager import PositionSide, Position
                 
-                if open_interest > 0:
+                if position_amount > 0:
                     # Position exists or was updated
                     pos_side = PositionSide.LONG if side == "long" else PositionSide.SHORT
                     
@@ -2269,9 +2207,9 @@ class DailyRangeBot:
                         position_id=position_id,
                         market=market,
                         side=pos_side,
-                        size=open_interest,
+                        size=position_amount,
                         avg_entry_price=avg_entry_price,
-                        total_cost=open_interest * avg_entry_price,  # Approximation
+                        total_cost=position_amount * avg_entry_price,  # Approximation
                         unrealized_pnl=unrealized_pnl,
                         liquidation_price=liq_price,
                         created_at=datetime.now(timezone.utc),
@@ -2284,17 +2222,17 @@ class DailyRangeBot:
                     
                     # Log position changes
                     if old_position:
-                        size_change = open_interest - old_position.size
+                        size_change = position_amount - old_position.size
                         pnl_change = unrealized_pnl - old_position.unrealized_pnl
                         if abs(size_change) > 0.000001 or abs(pnl_change) > 0.01:
                             logger.info(
-                                f"📊 Position updated {market}: Size {old_position.size:.6f} → {open_interest:.6f} "
+                                f"📊 Position updated {market}: Size {old_position.size:.6f} → {position_amount:.6f} "
                                 f"({size_change:+.6f}), PnL {old_position.unrealized_pnl:+.2f} → {unrealized_pnl:+.2f} "
                                 f"({pnl_change:+.2f}), Entry: ${avg_entry_price:.2f}"
                             )
                     else:
                         logger.info(
-                            f"📊 New position {market}: {side.upper()} {open_interest:.6f} @ ${avg_entry_price:.2f}, "
+                            f"📊 New position {market}: {side.upper()} {position_amount:.6f} @ ${avg_entry_price:.2f}, "
                             f"PnL: {unrealized_pnl:+.2f}, Liq: ${liq_price:.2f}"
                         )
                         
@@ -2314,7 +2252,7 @@ class DailyRangeBot:
                 # Update bot status
                 self.status.total_positions = len(self.position_manager.get_all_positions())
                 
-                logger.debug(f"Processed position update for {market}: event={event}, size={open_interest:.6f}")
+                logger.debug(f"Processed position update for {market}: event={event}, size={position_amount:.6f}")
                 
             except (ValueError, TypeError) as e:
                 logger.error(f"Error parsing position data for {market}: {e}")
@@ -2713,11 +2651,11 @@ class DailyRangeBot:
                 if isinstance(positions_data, list):
                     for pos in positions_data:
                         if pos.get('market') == market:
-                            position_size = safe_float(pos.get('amount', 0))
+                            position_size = safe_float(pos.get('open_interest', 0))
                             break
                 elif isinstance(positions_data, dict):
                     if market in positions_data:
-                        position_size = safe_float(positions_data[market].get('amount', 0))
+                        position_size = safe_float(positions_data[market].get('open_interest', 0))
             
             # Direct query to exchange for orders
             orders_response = self.client.get_pending_orders(market)

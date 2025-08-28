@@ -12,6 +12,7 @@ from config.settings import (
 from src.data.market_data import MarketDataManager
 from src.core.position_manager import PositionManager
 from src.utils.logger import get_logger
+from src.utils.safe_conversions import safe_float
 
 
 logger = get_logger(__name__)
@@ -182,7 +183,7 @@ class PositionSizer:
             return False, f"Size ${size_usdt:.2f} exceeds available capital ${available_capital:.2f}"
         
         # Check minimum amount
-        min_amount = float(market_info.get('min_amount', 0))
+        min_amount = safe_float(market_info.get('min_amount', 0))
         if quantity < min_amount:
             return False, f"Quantity {quantity:.6f} below minimum {min_amount}"
         

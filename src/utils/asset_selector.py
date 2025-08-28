@@ -12,6 +12,7 @@ from rich.text import Text
 from src.data.market_data import MarketDataManager
 from src.core.position_sizing import PositionSizer
 from src.utils.logger import get_logger
+from src.utils.safe_conversions import safe_float
 
 
 logger = get_logger(__name__)
@@ -172,7 +173,7 @@ class AssetSelector:
                 'range_percent': range_percent,
                 'volume_24h': prev_ohlc.get('volume', 0),
                 'min_order_value': min_order_value,
-                'min_amount': float(market_info.get('min_amount', 0)),
+                'min_amount': safe_float(market_info.get('min_amount', 0)),
                 'prev_high': prev_ohlc['high'],
                 'prev_low': prev_ohlc['low'],
                 'prev_close': prev_ohlc['close']

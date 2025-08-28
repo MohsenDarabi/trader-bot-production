@@ -20,6 +20,7 @@ from src.utils.logger import get_logger
 from src.utils.error_handling import handle_api_error, handle_network_error, handle_validation_error
 from src.utils.retry_handler import retry_on_transient_error, COINEX_RETRY_CONFIG
 from src.utils.smart_logging import smart_api_logger
+from src.utils.safe_conversions import safe_float
 
 
 logger = get_logger(__name__)
@@ -428,8 +429,8 @@ class CoinExClient:
             market_data = next((m for m in market_info if m.get('market') == market), None)
             
             if market_data:
-                min_amount = float(market_data.get('min_amount', 0))
-                tick_size = float(market_data.get('tick_size', 0.0001))
+                min_amount = safe_float(market_data.get('min_amount', 0))
+                tick_size = safe_float(market_data.get('tick_size', 0.0001))
                 
                 # Get amount precision from market data or derive from min_amount
                 amount_precision = market_data.get('amount_precision')
@@ -798,15 +799,15 @@ class CoinExClient:
             # Handle both list and dict responses
             positions = positions_response if isinstance(positions_response, list) else positions_response.get('data', [])
             
-            # Look for position with this market (even if no open interest)
+            # Look for position with this market
             for position in positions:
                 if position.get('market') == market:
                     return {
                         'market': market,
                         'leverage': int(position.get('leverage', 1)),
                         'margin_mode': position.get('margin_mode', 'cross'),
-                        'has_position': float(position.get('open_interest', 0)) > 0,
-                        'open_interest': float(position.get('open_interest', 0))
+                        'has_position': safe_float(position.get('open_interest', 0)) > 0,
+                        'open_interest': safe_float(position.get('open_interest', 0))
                     }
             
             # If no position found in the response, it could mean:
@@ -891,7 +892,7 @@ class CoinExClient:
             logger.info(f"  Situation: {analysis['situation']}")
             logger.info(f"  Orders: {analysis['buy_count']} buy, {analysis['sell_count']} sell")
             logger.info(f"  Position: {'Yes' if analysis['has_position'] else 'No'} "
-                       f"({analysis['open_interest']} open interest)")
+                       f"({analysis['open_interest']} open_interest)")
             if leverage_info.get('leverage_unknown'):
                 logger.info(f"  Current leverage: Unknown (no position data)")
             else:
@@ -1131,8 +1132,8 @@ class CoinExClient:
                 market_info = self.get_futures_markets()
                 market_data = next((m for m in market_info if m.get('market') == market), None)
                 if market_data:
-                    min_amount = float(market_data.get('min_amount', 0))
-                    tick_size = float(market_data.get('tick_size', 0.0001))
+                    min_amount = safe_float(market_data.get('min_amount', 0))
+                    tick_size = safe_float(market_data.get('tick_size', 0.0001))
                     
                     # Ensure amount meets minimum requirement
                     amount_float = float(amount_str)

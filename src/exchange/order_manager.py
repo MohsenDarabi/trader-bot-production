@@ -12,6 +12,7 @@ from src.exchange.coinex_client import CoinExClient
 from src.exchange.order_tracker import OrderSide
 from src.core.profitability import ProfitabilityValidator
 from src.utils.logger import get_logger
+from src.utils.safe_conversions import safe_float
 from config.settings import ENABLE_REST_API_STATUS_CHECKS, ORDER_STATUS_CHECK_INTERVAL
 from src.utils.settlement_handler import settlement_retry
 
@@ -194,9 +195,9 @@ class OrderManager:
                 raise Exception("Order placement timed out - possible API or network issue")
             
             # Extract comprehensive order data from exchange response
-            exchange_amount = float(response.get('amount', amount))
-            exchange_filled = float(response.get('filled_amount', 0))
-            exchange_unfilled = float(response.get('unfilled_amount', amount))
+            exchange_amount = safe_float(response.get('amount', amount))
+            exchange_filled = safe_float(response.get('filled_amount', 0))
+            exchange_unfilled = safe_float(response.get('unfilled_amount', amount))
             
             # Determine order status based on fill state
             if exchange_filled > 0 and exchange_filled >= exchange_amount:
@@ -241,7 +242,7 @@ class OrderManager:
             # UNIFIED IMMEDIATE PAIRING: Coordinate with tracking system
             filled_amount = exchange_filled
             unfilled_amount = exchange_unfilled
-            last_filled_price = float(response.get('last_filled_price', price))
+            last_filled_price = safe_float(response.get('last_filled_price', price))
             
             # Always track the buy order first
             if self.order_tracker:
@@ -472,9 +473,9 @@ class OrderManager:
             )
             
             # Extract comprehensive order data from exchange response
-            exchange_amount = float(response.get('amount', amount))
-            exchange_filled = float(response.get('filled_amount', 0))
-            exchange_unfilled = float(response.get('unfilled_amount', amount))
+            exchange_amount = safe_float(response.get('amount', amount))
+            exchange_filled = safe_float(response.get('filled_amount', 0))
+            exchange_unfilled = safe_float(response.get('unfilled_amount', amount))
             
             # Determine order status based on fill state
             if exchange_filled > 0 and exchange_filled >= exchange_amount:
@@ -685,7 +686,7 @@ class OrderManager:
                     order.status = OrderStatus.CANCELLED
                 
                 # Update filled amount
-                order.filled_amount = float(status_response.get('filled_amount', 0))
+                order.filled_amount = safe_float(status_response.get('filled_amount', 0))
                 order.updated_at = datetime.now(timezone.utc)
                 
                 # Log status changes
@@ -741,7 +742,7 @@ class OrderManager:
                             elif exchange_status == 'cancel':
                                 order.status = OrderStatus.CANCELLED
                             
-                            order.filled_amount = float(status_response.get('filled_amount', 0))
+                            order.filled_amount = safe_float(status_response.get('filled_amount', 0))
                             order.updated_at = datetime.now(timezone.utc)
                             
                             if old_status != order.status:
@@ -905,7 +906,7 @@ class OrderManager:
                         price=float(order_data['price']),
                         status=OrderStatus.PENDING,
                         exchange_order_id=order_data['order_id'],
-                        filled_amount=float(order_data.get('filled_amount', 0)),
+                        filled_amount=safe_float(order_data.get('filled_amount', 0)),
                         created_at=created_at
                     )
                     
@@ -1058,7 +1059,7 @@ class OrderManager:
             if client_id in self.active_orders:
                 order = self.active_orders[client_id]
                 order.status = OrderStatus.FILLED
-                order.filled_amount = float(order_data.get('filled_amount', order.amount))
+                order.filled_amount = safe_float(order_data.get('filled_amount', order.amount))
                 order.updated_at = datetime.now(timezone.utc)
                 
                 # Remove from active orders (it's completed)

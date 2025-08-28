@@ -12,6 +12,7 @@ from datetime import datetime
 from src.exchange.websocket_client import CoinExWebSocketClient
 from src.exchange.coinex_client import CoinExClient
 from src.utils.logger import get_logger
+from src.utils.safe_conversions import safe_float
 
 
 logger = get_logger(__name__)
@@ -280,10 +281,10 @@ class OrderTracker:
                 order_id=order_id,
                 market=deal_data.get("market"),
                 side=OrderSide(deal_data.get("side")),
-                amount=float(deal_data.get("amount")),
-                price=float(deal_data.get("price")),
-                timestamp=datetime.fromtimestamp(float(deal_data.get("timestamp", time.time()))),
-                fee=float(deal_data.get("fee", 0)),
+                amount=safe_float(deal_data.get("amount")),
+                price=safe_float(deal_data.get("price")),
+                timestamp=datetime.fromtimestamp(safe_float(deal_data.get("timestamp", time.time()))),
+                fee=safe_float(deal_data.get("fee", 0)),
                 role=deal_data.get("role", "taker")
             )
             
@@ -379,8 +380,8 @@ class OrderTracker:
                         client_id=order_data.get("client_id"),
                         market=order_data.get("market"),
                         side=side,
-                        amount=float(order_data.get("amount")),
-                        price=float(order_data.get("price"))
+                        amount=safe_float(order_data.get("amount")),
+                        price=safe_float(order_data.get("price"))
                     )
                     
                     # Update with current status

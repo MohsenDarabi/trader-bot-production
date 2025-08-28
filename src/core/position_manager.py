@@ -8,6 +8,7 @@ from enum import Enum
 
 from src.exchange.coinex_client import CoinExClient
 from src.utils.logger import get_logger
+from src.utils.safe_conversions import safe_float
 
 
 logger = get_logger(__name__)
@@ -278,13 +279,15 @@ class PositionManager:
             
             for pos_data in exchange_positions:
                 market_name = pos_data['market']
-                open_interest = float(pos_data.get('open_interest', 0))
+                # Use correct position field names from CoinEx API
+                open_interest = safe_float(pos_data.get('open_interest', 0))
                 
-                # Only sync positions with open interest
+                # Only sync positions with open_interest > 0
                 if open_interest > 0:
-                    avg_entry_price = float(pos_data.get('avg_entry_price', 0))
-                    unrealized_pnl = float(pos_data.get('unrealized_pnl', 0))
-                    liquidation_price = float(pos_data.get('liq_price', 0))
+                    # Use correct avg_entry_price field from CoinEx API
+                    avg_entry_price = safe_float(pos_data.get('avg_entry_price', 0))
+                    unrealized_pnl = safe_float(pos_data.get('unrealized_pnl', 0))
+                    liquidation_price = safe_float(pos_data.get('liq_price', 0))
                     
                     # Calculate total cost (this is an approximation)
                     total_cost = open_interest * avg_entry_price
@@ -326,7 +329,7 @@ class PositionManager:
                 
                 # Check if this market is in exchange data
                 found = any(pos['market'] == market_name and 
-                          float(pos.get('open_interest', 0)) > 0 
+                          safe_float(pos.get('open_interest', 0)) > 0 
                           for pos in exchange_positions)
                 
                 if not found:

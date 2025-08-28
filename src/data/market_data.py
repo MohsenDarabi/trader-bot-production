@@ -8,6 +8,7 @@ import pandas as pd
 from src.exchange.coinex_client import CoinExClient
 from src.data.websocket_market_data import WebSocketMarketDataProvider
 from src.utils.logger import get_logger
+from src.utils.safe_conversions import safe_float
 
 
 logger = get_logger(__name__)
@@ -77,7 +78,7 @@ class MarketDataManager:
             Minimum order value in USDT
         """
         market_info = self.get_market_info(market)
-        min_amount = float(market_info.get('min_amount', 0))
+        min_amount = safe_float(market_info.get('min_amount', 0))
         
         # For futures, min_amount is in base currency, so multiply by price
         min_value = min_amount * current_price
@@ -118,9 +119,9 @@ class MarketDataManager:
             # Convert timestamp to datetime
             df['date'] = pd.to_datetime(df['created_at'], unit='ms')
             
-            # Convert price columns to float
+            # Convert price columns to float using safe conversion
             for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = df[col].astype(float)
+                df[col] = df[col].apply(safe_float)
             
             # Sort by date
             df = df.sort_values('date', ascending=False)
@@ -152,11 +153,11 @@ class MarketDataManager:
         
         ohlc = {
             'date': prev_day['date'].strftime('%Y-%m-%d'),
-            'open': float(prev_day['open']),
-            'high': float(prev_day['high']),
-            'low': float(prev_day['low']),
-            'close': float(prev_day['close']),
-            'volume': float(prev_day['volume'])
+            'open': safe_float(prev_day['open']),
+            'high': safe_float(prev_day['high']),
+            'low': safe_float(prev_day['low']),
+            'close': safe_float(prev_day['close']),
+            'volume': safe_float(prev_day['volume'])
         }
         
         logger.info(f"Previous day OHLC for {market} ({ohlc['date']}): "
@@ -193,7 +194,7 @@ class MarketDataManager:
             else:
                 ticker = ticker_response
             
-            price = float(ticker.get('last', 0))
+            price = safe_float(ticker.get('last', 0))
             
             if price <= 0:
                 raise ValueError(f"Invalid price for {market}: {price}")
