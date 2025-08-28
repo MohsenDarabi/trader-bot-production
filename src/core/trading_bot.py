@@ -1303,70 +1303,84 @@ class DailyRangeBot:
             return False
     
     def _get_today_pending_sell_orders(self, market: str) -> int:
-        """Count pending sell orders placed today for the given market"""
-        from src.exchange.order_manager import OrderSide
+        """Count pending sell orders placed today for the given market using proven detection logic"""
+        from src.utils.safe_conversions import safe_float
         
         today = datetime.now(timezone.utc).date()
         
         try:
-            # Get all pending orders for this market
-            pending_orders = self.order_manager.get_pending_orders(market)
+            # Use proven direct API call logic from test_race_condition.py
+            orders_response = self.client.get_pending_orders(market)
+            if isinstance(orders_response, dict):
+                orders = orders_response.get('data', [])
+            else:
+                orders = orders_response if isinstance(orders_response, list) else []
             
             # Enhanced order analysis logging with detailed information
-            if len(pending_orders) > 0:
-                logger.info(f"📊 Analyzing {len(pending_orders)} total pending orders for {market}")
-                for order in pending_orders:
-                    logger.info(f"📋 Order: {order.side.value} | ${order.price:.4f} | Amount: {order.amount:.6f} | ID: {order.client_id}")
+            if len(orders) > 0:
+                logger.info(f"📊 Analyzing {len(orders)} total pending orders for {market}")
             
-            # Filter for sell orders placed today
-            today_pending_sells = []
-            yesterday_sells = []
-            today_buys = []
+            # Filter for sell orders placed today using proven timestamp parsing
+            sell_orders_today = []
+            sell_orders_old = []
+            buy_orders = []
             
-            for order in pending_orders:
-                if order.side == OrderSide.SELL:
-                    if order.created_at.date() == today:
-                        today_pending_sells.append(order)
-                    else:
-                        yesterday_sells.append(order)
-                elif order.side == OrderSide.BUY and order.created_at.date() == today:
-                    today_buys.append(order)
-            
-            # Log summary if there are any orders
-            if yesterday_sells:
-                logger.info(f"  └─ {len(yesterday_sells)} sell orders from previous days (ignored)")
-            if today_buys:
-                logger.info(f"  └─ {len(today_buys)} buy orders from today")
-            
-            sell_count = len(today_pending_sells)
-            
-            # Handle edge case of multiple pending sells from today
-            if sell_count > 1:
-                logger.warning(f"⚠️ Found {sell_count} pending sell orders from today for {market}")
-                logger.warning("This indicates a previous bug occurred - blocking new buy orders")
-                log_trading_event('multiple_sells_detected', f"Found {sell_count} today's pending sells - blocking new buys for {market}")
+            for order in orders:
+                created_at = order.get('created_at', 0)
+                # Use proven timestamp parsing logic from test
+                if isinstance(created_at, (int, float)):
+                    order_date = datetime.fromtimestamp(created_at / 1000, timezone.utc).date()
+                else:
+                    order_date = datetime.fromisoformat(str(created_at).replace('Z', '+00:00')).date()
                 
-                # Log details for debugging
-                for i, sell_order in enumerate(today_pending_sells, 1):
-                    logger.info(f"  Sell #{i}: {sell_order.client_id} placed at {sell_order.created_at.time()}")
-            elif sell_count == 1:
-                sell_order = today_pending_sells[0]
-                logger.info(f"ℹ️ Found 1 pending sell order from today: {sell_order.client_id} placed at {sell_order.created_at.time()}")
+                side = order.get('side', '')
+                amount = safe_float(order.get('amount', 0))
+                price = safe_float(order.get('price', 0))
+                client_id = order.get('client_id', '')
+                is_today = order_date == today
+                
+                # Log order details for debugging
+                logger.info(f"📋 Order: {side.upper()} | ${price:.4f} | Amount: {amount:.6f} | {client_id} | {order_date} | {'TODAY' if is_today else 'OLD'}")
+                
+                if side == 'buy':
+                    buy_orders.append(order)
+                elif side == 'sell':
+                    if is_today:
+                        sell_orders_today.append(order)
+                    else:
+                        sell_orders_old.append(order)
             
-            # Check for orphaned sell orders by client_id marker
+            # Log summary
+            if len(sell_orders_old) > 0:
+                logger.info(f"  └─ {len(sell_orders_old)} sell orders from previous days (ignored)")
+            if len(buy_orders) > 0:
+                logger.info(f"  └─ {len(buy_orders)} buy orders total")
+            
+            # Check for orphaned sell orders by client_id marker - exclude from count
             regular_sell_count = 0
             orphaned_sell_count = 0
             
-            for order in today_pending_sells:
-                if "_OS_" in order.client_id:
+            for order in sell_orders_today:
+                client_id = order.get('client_id', '')
+                if "_OS_" in client_id:
                     orphaned_sell_count += 1
-                    logger.debug(f"📌 Orphaned sell order detected: {order.client_id}")
+                    logger.debug(f"📌 Orphaned sell order detected: {client_id}")
                 else:
                     regular_sell_count += 1
+            
+            sell_count = len(sell_orders_today)
             
             if orphaned_sell_count > 0:
                 logger.info(f"📊 Today's sell orders: {sell_count} total, {orphaned_sell_count} orphaned (ignored), {regular_sell_count} blocking")
                 logger.info(f"✅ Orphaned sell orders do not block new buy orders")
+            
+            # Handle edge case of multiple pending sells from today
+            if regular_sell_count > 1:
+                logger.warning(f"⚠️ Found {regular_sell_count} pending sell orders from today for {market}")
+                logger.warning("This indicates a previous bug occurred - blocking new buy orders")
+                log_trading_event('multiple_sells_detected', f"Found {regular_sell_count} today's pending sells - blocking new buys for {market}")
+            elif regular_sell_count == 1:
+                logger.info(f"ℹ️ Found 1 pending sell order from today - blocking new buy orders")
             
             return regular_sell_count  # Only regular sells block new buys
             
