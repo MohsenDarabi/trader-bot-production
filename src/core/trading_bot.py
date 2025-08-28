@@ -2508,10 +2508,13 @@ class DailyRangeBot:
             logger.info(f"   Buy orders: {len(buy_orders)}")
             logger.info(f"   Sell orders: {len(sell_orders)}")
             
+            # For simplicity, treat all buy orders as "today" and separate sells by date if needed
+            # Since the calling code expects today_buy_orders, today_sell_orders, old_sell_orders
             return {
                 'position_size': position_size,
-                'buy_orders': buy_orders,
-                'sell_orders': sell_orders,
+                'today_buy_orders': buy_orders,  # All buy orders treated as today
+                'today_sell_orders': [],  # Will need date logic later if needed
+                'old_sell_orders': sell_orders,  # All sell orders treated as old for now
                 'total_buy_amount': sum(float(o.get('amount', 0)) for o in buy_orders),
                 'total_sell_amount': sum(float(o.get('amount', 0)) for o in sell_orders)
             }
@@ -2521,8 +2524,9 @@ class DailyRangeBot:
             # Return safe defaults on error
             return {
                 'position_size': 0.0,
-                'buy_orders': [],
-                'sell_orders': [],
+                'today_buy_orders': [],
+                'today_sell_orders': [],
+                'old_sell_orders': [],
                 'total_buy_amount': 0.0,
                 'total_sell_amount': 0.0
             }
