@@ -74,6 +74,28 @@ def safe_str_format(value, format_spec=".2f"):
         return str(value) if value is not None else "N/A"
 
 
+def safe_int(value, default=0):
+    """
+    Safely convert value to int, handling both string and numeric types
+    
+    Args:
+        value: Value to convert (can be string with decimals, int, float, or None)
+        default: Default value if conversion fails
+        
+    Returns:
+        Integer value or default
+    """
+    if value is None:
+        return default
+    try:
+        # Handle strings that might contain decimals (e.g., "123.0")
+        if isinstance(value, str) and '.' in value:
+            return int(float(value))
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
 class TradingCircuitBreaker:
     """Enhanced circuit breaker with priority levels, dynamic cooldowns, and position coverage checks"""
     
@@ -1163,13 +1185,13 @@ class DailyRangeBot:
                 # Count ALL sell orders from exchange (bot + manual)
                 for order_data in orders_data:
                     if order_data.get('side') == 'sell':
-                        order_amount = float(order_data.get('amount', 0))
+                        order_amount = safe_float(order_data.get('amount', 0))
                         exchange_sell_amount += order_amount
                 
                 # Use exchange total if it's higher (includes manual orders bot doesn't track)
                 if exchange_sell_amount > bot_sell_amount:
                     total_sell_amount = exchange_sell_amount
-                    logger.info(f"📊 Exchange has more sell orders than bot tracking: {exchange_sell_amount:.6f} vs {bot_sell_amount:.6f}")
+                    logger.info(f"📊 Exchange has more sell orders than bot tracking: {safe_str_format(exchange_sell_amount, '.6f')} vs {safe_str_format(bot_sell_amount, '.6f')}")
                 
             except Exception as e:
                 logger.warning(f"Failed to fetch exchange sell orders for {market}, using bot tracking only: {e}")
@@ -1563,7 +1585,7 @@ class DailyRangeBot:
         # Phase 2.5: Position and cycle analysis with fresh data
         if position_size > 0:
             # Calculate total sell order amount from fresh data
-            total_sell_amount = sum(float(s.get('amount', 0)) for s in pending_sell_orders)
+            total_sell_amount = sum(safe_float(s.get('amount', 0)) for s in pending_sell_orders)
             uncovered_amount = position_size - total_sell_amount
             
             # Check for today's pending sells to determine if cycle is in progress
@@ -2155,11 +2177,11 @@ class DailyRangeBot:
                 if ccy == "USDT":
                     try:
                         # Extract balance information
-                        available = float(balance_data.get("available", 0))
-                        frozen = float(balance_data.get("frozen", 0))
-                        margin = float(balance_data.get("margin", 0))
-                        unrealized_pnl = float(balance_data.get("unrealized_pnl", 0))
-                        equity = float(balance_data.get("equity", 0))
+                        available = safe_float(balance_data.get("available", 0))
+                        frozen = safe_float(balance_data.get("frozen", 0))
+                        margin = safe_float(balance_data.get("margin", 0))
+                        unrealized_pnl = safe_float(balance_data.get("unrealized_pnl", 0))
+                        equity = safe_float(balance_data.get("equity", 0))
                         
                         # Update bot status with new balance
                         old_balance = self.status.account_balance
@@ -2228,12 +2250,12 @@ class DailyRangeBot:
             
             try:
                 # Extract position information
-                position_id = int(position_data.get("position_id", 0))
+                position_id = safe_int(position_data.get("position_id", 0))
                 side = position_data.get("side", "long")  # 'long' or 'short'
-                open_interest = float(position_data.get("open_interest", 0))
-                avg_entry_price = float(position_data.get("avg_entry_price", 0))
-                unrealized_pnl = float(position_data.get("unrealized_pnl", 0))
-                liq_price = float(position_data.get("liq_price", 0))
+                open_interest = safe_float(position_data.get("open_interest", 0))
+                avg_entry_price = safe_float(position_data.get("avg_entry_price", 0))
+                unrealized_pnl = safe_float(position_data.get("unrealized_pnl", 0))
+                liq_price = safe_float(position_data.get("liq_price", 0))
                 
                 # Update position in position manager
                 from src.core.position_manager import PositionSide, Position
@@ -2535,7 +2557,7 @@ class DailyRangeBot:
         
         for order in orders:
             try:
-                created_at = order.get('created_at', 0)
+                created_at = safe_int(order.get('created_at', 0))
                 if created_at:
                     # Handle both millisecond and second timestamps
                     if created_at > 1e10:  # Millisecond timestamp
@@ -2577,19 +2599,19 @@ class DailyRangeBot:
         if not all_sell_orders:
             return True  # No sell orders - always safe
         
-        total_sell_amount = sum(float(o.get('amount', 0)) for o in all_sell_orders)
+        total_sell_amount = sum(safe_float(o.get('amount', 0)) for o in all_sell_orders)
         
         # CRITICAL: Position = 0 but sell orders exist
         if position_size == 0 and len(all_sell_orders) > 0:
             logger.error(f"🚨 DANGEROUS STATE for {market}: No position but {len(all_sell_orders)} sell orders exist!")
-            logger.error(f"   Sell orders total: {total_sell_amount:.6f}")
+            logger.error(f"   Sell orders total: {safe_str_format(total_sell_amount, '.6f')}")
             
             # Log details of each sell order for investigation
             for i, order in enumerate(all_sell_orders, 1):
                 client_id = order.get('client_id', 'N/A')
-                amount = order.get('amount', 0)
-                price = order.get('price', 0)
-                logger.error(f"   Sell #{i}: {client_id} - {amount:.6f} @ ${price:.4f}")
+                amount = safe_float(order.get('amount', 0))
+                price = safe_float(order.get('price', 0))
+                logger.error(f"   Sell #{i}: {client_id} - {safe_str_format(amount, '.6f')} @ ${safe_str_format(price, '.4f')}")
             
             logger.error("   This indicates either:")
             logger.error("   1. Stale position query (position actually exists)")
@@ -2739,8 +2761,8 @@ class DailyRangeBot:
                 'today_sell_orders': today_sell_orders,  # REAL today's sell orders
                 'old_sell_orders': old_sell_orders,      # REAL old sell orders
                 'is_consistent': is_consistent,          # Position-order consistency flag
-                'total_buy_amount': sum(float(o.get('amount', 0)) for o in today_buy_orders),
-                'total_sell_amount': sum(float(o.get('amount', 0)) for o in today_sell_orders + old_sell_orders)
+                'total_buy_amount': sum(safe_float(o.get('amount', 0)) for o in today_buy_orders),
+                'total_sell_amount': sum(safe_float(o.get('amount', 0)) for o in today_sell_orders + old_sell_orders)
             }
             
         except Exception as e:
@@ -2763,7 +2785,7 @@ class DailyRangeBot:
         """
         try:
             today = datetime.now(timezone.utc).date()
-            logger.debug(f"Looking for buy fill matching {uncovered_amount:.6f} {market} from today ({today})")
+            logger.debug(f"Looking for buy fill matching {safe_str_format(uncovered_amount, '.6f')} {market} from today ({today})")
             
             # Method 1: Check order tracker for recent buy fills from today
             if hasattr(self, 'order_tracker') and self.order_tracker:
@@ -2782,7 +2804,7 @@ class DailyRangeBot:
                             for fill in order.fills:
                                 fill_amount = safe_float(fill.amount)
                                 if abs(fill_amount - uncovered_amount) < 0.000001:  # Precise match
-                                    logger.info(f"✓ Found matching buy fill: {fill_amount:.6f} @ ${fill.price:.4f}")
+                                    logger.info(f"✓ Found matching buy fill: {safe_str_format(fill_amount, '.6f')} @ ${safe_str_format(fill.price, '.4f')}")
                                     return {
                                         'order_id': order.order_id,
                                         'client_id': order.client_id,
@@ -2797,10 +2819,41 @@ class DailyRangeBot:
                 except Exception as e:
                     logger.debug(f"Order tracker fill lookup failed: {e}")
             
-            # Method 2: Use order status queries to check recent filled orders
+            # Method 2: Use new user_deals API to get actual fills
+            if hasattr(self.client, 'get_user_deals'):
+                try:
+                    # Get today's buy fills from the API
+                    start_time = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+                    deals_response = self.client.get_user_deals(
+                        market=market,
+                        side='buy',
+                        start_time=start_time,
+                        limit=100
+                    )
+                    
+                    if deals_response and deals_response.get('data'):
+                        for deal in deals_response['data']:
+                            deal_amount = safe_float(deal.get('amount', 0))
+                            if abs(deal_amount - uncovered_amount) < 0.000001:
+                                logger.info(f"✓ Found matching buy fill from user_deals: {safe_str_format(deal_amount, '.6f')} @ ${safe_str_format(safe_float(deal.get('price', 0)), '.4f')}")
+                                return {
+                                    'deal_id': deal.get('deal_id'),
+                                    'order_id': deal.get('order_id'),
+                                    'amount': deal_amount,
+                                    'price': safe_float(deal.get('price', 0)),
+                                    'created_at': safe_int(deal.get('created_at', 0)),
+                                    'market': market
+                                }
+                    
+                    logger.debug("No matching fills found in user_deals")
+                    
+                except Exception as e:
+                    logger.debug(f"User deals API lookup failed: {e}")
+            
+            # Method 3: Fallback to pending orders check
             try:
                 # Get recent order history through order status queries
-                # This is less efficient but works when WebSocket data is incomplete
+                # This is less efficient but works as a fallback
                 
                 pending_orders_response = self.client.get_pending_orders(market)
                 if pending_orders_response and pending_orders_response.get('data'):
@@ -2813,7 +2866,7 @@ class DailyRangeBot:
                             
                             filled_amount = safe_float(order_data.get('filled_amount', 0))
                             if abs(filled_amount - uncovered_amount) < 0.000001:
-                                logger.info(f"✓ Found matching filled buy order via API: {filled_amount:.6f}")
+                                logger.info(f"✓ Found matching filled buy order via API: {safe_str_format(filled_amount, '.6f')}")
                                 return {
                                     'order_id': order_data.get('order_id'),
                                     'client_id': order_data.get('client_id'),
@@ -2828,7 +2881,7 @@ class DailyRangeBot:
                 logger.debug(f"Order status fill lookup failed: {e}")
             
             # Method 3: Return None if no match found - let WebSocket handle future fills
-            logger.debug(f"No buy fill found matching {uncovered_amount:.6f} - WebSocket will handle future fills")
+            logger.debug(f"No buy fill found matching {safe_str_format(uncovered_amount, '.6f')} - WebSocket will handle future fills")
             return None
                 
         except Exception as e:

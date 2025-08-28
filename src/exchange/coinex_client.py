@@ -652,6 +652,84 @@ class CoinExClient:
         """
         return self._request('GET', '/v2/assets/futures/balance')
     
+    def get_user_deals(self, market: str, side: Optional[str] = None,
+                      start_time: Optional[int] = None, end_time: Optional[int] = None,
+                      page: int = 1, limit: int = 100) -> Dict:
+        """
+        Get user transaction/fill history
+        
+        Args:
+            market: Market name (e.g., 'BTCUSDT')
+            side: Optional order side filter ('buy' or 'sell')
+            start_time: Optional start timestamp in milliseconds
+            end_time: Optional end timestamp in milliseconds
+            page: Page number (default 1)
+            limit: Number per page (default 100, max 500)
+            
+        Returns:
+            Dictionary with user deals/fills data
+        """
+        params = {
+            'market': market,
+            'market_type': 'FUTURES',
+            'page': page,
+            'limit': min(limit, 500)  # API max is 500
+        }
+        
+        if side:
+            params['side'] = side
+        if start_time:
+            params['start_time'] = start_time
+        if end_time:
+            params['end_time'] = end_time
+            
+        return self._request('GET', '/v2/futures/user-deals', params=params)
+    
+    def get_order_deals(self, market: str, order_id: int,
+                       page: int = 1, limit: int = 100) -> Dict:
+        """
+        Get transaction/fill details for a specific order
+        
+        Args:
+            market: Market name (e.g., 'BTCUSDT')
+            order_id: Order ID to get fills for
+            page: Page number (default 1)
+            limit: Number per page (default 100)
+            
+        Returns:
+            Dictionary with order fills data
+        """
+        params = {
+            'market': market,
+            'market_type': 'FUTURES',
+            'order_id': order_id,
+            'page': page,
+            'limit': min(limit, 100)
+        }
+        
+        return self._request('GET', '/v2/futures/order-deals', params=params)
+    
+    def get_batch_order_status(self, market: str, order_ids: List[int]) -> Dict:
+        """
+        Get status for multiple orders in a single request
+        
+        Args:
+            market: Market name (e.g., 'BTCUSDT')
+            order_ids: List of order IDs to query
+            
+        Returns:
+            Dictionary with batch order status data
+        """
+        # Convert list of IDs to comma-separated string
+        order_ids_str = ','.join(str(oid) for oid in order_ids)
+        
+        params = {
+            'market': market,
+            'order_ids': order_ids_str
+        }
+        
+        return self._request('GET', '/v2/futures/batch-order-status', params=params)
+    
     @retry_on_transient_error(config=COINEX_RETRY_CONFIG)
     def adjust_position_leverage(self, market: str, leverage: int, 
                                margin_mode: str = 'cross') -> Dict:
