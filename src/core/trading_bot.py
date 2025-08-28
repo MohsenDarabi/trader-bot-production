@@ -1507,8 +1507,8 @@ class DailyRangeBot:
         # Never trust cached data for critical buy decisions
         exchange_state = self._get_exchange_position_and_orders_direct(market)
         position_size = exchange_state['position_size']
-        pending_buy_orders = exchange_state['buy_orders']
-        pending_sell_orders = exchange_state['sell_orders']
+        pending_buy_orders = exchange_state['today_buy_orders']
+        pending_sell_orders = exchange_state['today_sell_orders'] + exchange_state['old_sell_orders']
         
         # Check for existing pending buy orders first
         if pending_buy_orders:
