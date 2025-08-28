@@ -1629,14 +1629,23 @@ class DailyRangeBot:
         fresh_today_buy_orders = fresh_data['today_buy_orders']
         fresh_today_sell_orders = fresh_data['today_sell_orders']
         fresh_old_sell_orders = fresh_data['old_sell_orders']
-        fresh_pending_sells_today = len([o for o in fresh_today_sell_orders if o.status in ['pending', 'partially_filled']])
+        is_consistent = fresh_data['is_consistent']
+        fresh_pending_sells_today = len([o for o in fresh_today_sell_orders if o.get('status', 'pending') in ['pending', 'partially_filled']])
+        
+        # CRITICAL: Block trading if position-order state is inconsistent
+        if not is_consistent:
+            if self._should_log_state_change(market, 'inconsistent_state', True):
+                logger.error(f"🚨 BLOCKING BUY ORDER for {market} - Position-order state is inconsistent!")
+                log_trading_event('consistency_block', f"Buy blocked - dangerous position-order state for {market}")
+            return False
         
         has_today_buy = len(fresh_today_buy_orders) > 0
         
         # Log fresh data decision details
         logger.info(f"🔄 Fresh exchange data for {market}: today_buys={len(fresh_today_buy_orders)}, "
                    f"today_sells={len(fresh_today_sell_orders)} (pending={fresh_pending_sells_today}), "
-                   f"old_sells={len(fresh_old_sell_orders)}, cycle_complete={cycle_complete_flag}")
+                   f"old_sells={len(fresh_old_sell_orders)}, cycle_complete={cycle_complete_flag}, "
+                   f"consistency={'✅' if is_consistent else '🚨'}")
         
         # Decision logic using fresh data
         if cycle_complete_flag:
@@ -2465,6 +2474,161 @@ class DailyRangeBot:
                 'cancelled_stale': 0
             }
     
+    def _classify_orders_by_date(self, orders: List[Dict], today_utc) -> tuple:
+        """
+        Classify orders into today's vs old orders based on create_time timestamp
+        
+        Args:
+            orders: List of order dictionaries from exchange
+            today_utc: Today's date in UTC for comparison
+            
+        Returns:
+            Tuple of (today_orders, old_orders)
+        """
+        from datetime import datetime, timezone
+        
+        today_orders = []
+        old_orders = []
+        
+        for order in orders:
+            try:
+                create_time = order.get('create_time', 0)
+                if create_time:
+                    # Handle both millisecond and second timestamps
+                    if create_time > 1e10:  # Millisecond timestamp
+                        order_date = datetime.fromtimestamp(create_time/1000, timezone.utc).date()
+                    else:  # Second timestamp
+                        order_date = datetime.fromtimestamp(create_time, timezone.utc).date()
+                    
+                    if order_date == today_utc:
+                        today_orders.append(order)
+                        logger.debug(f"📅 Today's order: {order.get('client_id', 'N/A')} from {order_date}")
+                    else:
+                        old_orders.append(order)
+                        logger.debug(f"📅 Old order: {order.get('client_id', 'N/A')} from {order_date}")
+                else:
+                    # No timestamp - treat as old for safety
+                    old_orders.append(order)
+                    logger.warning(f"⚠️ Order without timestamp treated as old: {order.get('client_id', 'N/A')}")
+            except Exception as e:
+                logger.warning(f"Failed to parse order timestamp for {order.get('client_id', 'N/A')}: {e}")
+                # On error, treat as old for safety
+                old_orders.append(order)
+        
+        logger.info(f"📊 Date classification: {len(today_orders)} today, {len(old_orders)} old orders")
+        return today_orders, old_orders
+
+    def _validate_position_order_consistency(self, market: str, position_size: float, 
+                                           all_sell_orders: List[Dict]) -> bool:
+        """
+        Validate position-order consistency to detect dangerous states
+        
+        Args:
+            market: Market symbol
+            position_size: Current position size from exchange
+            all_sell_orders: All sell orders (today + old)
+            
+        Returns:
+            True if state is consistent and safe, False if dangerous
+        """
+        if not all_sell_orders:
+            return True  # No sell orders - always safe
+        
+        total_sell_amount = sum(float(o.get('amount', 0)) for o in all_sell_orders)
+        
+        # CRITICAL: Position = 0 but sell orders exist
+        if position_size == 0 and len(all_sell_orders) > 0:
+            logger.error(f"🚨 DANGEROUS STATE for {market}: No position but {len(all_sell_orders)} sell orders exist!")
+            logger.error(f"   Sell orders total: {total_sell_amount:.6f}")
+            
+            # Log details of each sell order for investigation
+            for i, order in enumerate(all_sell_orders, 1):
+                client_id = order.get('client_id', 'N/A')
+                amount = order.get('amount', 0)
+                price = order.get('price', 0)
+                logger.error(f"   Sell #{i}: {client_id} - {amount:.6f} @ ${price:.4f}")
+            
+            logger.error("   This indicates either:")
+            logger.error("   1. Stale position query (position actually exists)")
+            logger.error("   2. Orphaned sell orders (position was closed)")
+            logger.error("   3. Data synchronization issue")
+            
+            # Attempt to clean up orphaned orders
+            logger.info("🔧 Attempting to clean up potentially orphaned sell orders...")
+            cancelled_count = self._handle_orphaned_sell_orders(market, all_sell_orders)
+            
+            if cancelled_count > 0:
+                logger.info(f"✅ Cleaned up {cancelled_count} orphaned orders - state may be recovered")
+                # Return False still - let next cycle verify if state is actually fixed
+            else:
+                logger.error("❌ Could not clean up orders - may indicate real position exists with stale query")
+            
+            logger.error("   ⚠️ BLOCKING TRADING until state is verified in next cycle!")
+            return False
+        
+        # Check for potential over-selling (sells > position + 10% tolerance)
+        if position_size > 0 and total_sell_amount > position_size * 1.1:
+            logger.error(f"🚨 OVERSELLING DETECTED for {market}:")
+            logger.error(f"   Position size: {position_size:.6f}")
+            logger.error(f"   Total sell orders: {total_sell_amount:.6f}")
+            logger.error(f"   Excess sells: {total_sell_amount - position_size:.6f}")
+            logger.error("   ⚠️ BLOCKING TRADING to prevent short position!")
+            return False
+        
+        # Log normal state for transparency
+        if position_size > 0:
+            coverage_pct = (total_sell_amount / position_size) * 100 if position_size > 0 else 0
+            logger.debug(f"✅ Position-order consistency OK for {market}: "
+                        f"Position {position_size:.6f}, Sells {total_sell_amount:.6f} ({coverage_pct:.1f}%)")
+        
+        return True
+
+    def _handle_orphaned_sell_orders(self, market: str, sell_orders: List[Dict]) -> int:
+        """
+        Handle orphaned sell orders when no position exists
+        
+        Args:
+            market: Market symbol
+            sell_orders: List of sell orders to potentially clean up
+            
+        Returns:
+            Number of orders cancelled
+        """
+        if not sell_orders:
+            return 0
+            
+        logger.warning(f"🔧 Detected {len(sell_orders)} potentially orphaned sell orders for {market}")
+        cancelled_count = 0
+        
+        for order in sell_orders:
+            try:
+                client_id = order.get('client_id', '')
+                amount = order.get('amount', 0)
+                price = order.get('price', 0)
+                
+                if not client_id:
+                    logger.warning(f"⚠️ Skipping order without client_id: amount={amount}")
+                    continue
+                    
+                logger.info(f"🗑️ Attempting to cancel orphaned sell order: {client_id} - {amount:.6f} @ ${price:.4f}")
+                
+                if self.order_manager.cancel_order(client_id):
+                    logger.info(f"✅ Cancelled orphaned sell order: {client_id}")
+                    cancelled_count += 1
+                    log_trading_event('orphaned_cleanup', f"Cancelled orphaned sell order {client_id} for {market}")
+                else:
+                    logger.warning(f"⚠️ Failed to cancel orphaned sell order: {client_id}")
+                    
+            except Exception as e:
+                logger.error(f"Error cancelling orphaned order {order.get('client_id', 'N/A')}: {e}")
+        
+        if cancelled_count > 0:
+            logger.info(f"✅ Orphaned sell cleanup complete: Cancelled {cancelled_count}/{len(sell_orders)} orders for {market}")
+        else:
+            logger.warning(f"⚠️ Orphaned sell cleanup failed: Could not cancel any of {len(sell_orders)} orders for {market}")
+            
+        return cancelled_count
+
     def _get_exchange_position_and_orders_direct(self, market: str) -> Dict[str, Any]:
         """
         Query exchange directly for position and order state - TRUE single source of truth
@@ -2503,20 +2667,37 @@ class DailyRangeBot:
                         elif order.get('side') == 'sell':
                             sell_orders.append(order)
             
+            # CRITICAL FIX: Implement proper date classification
+            from datetime import datetime, timezone
+            today_utc = datetime.now(timezone.utc).date()
+            
+            # Classify buy orders by date
+            today_buy_orders, old_buy_orders = self._classify_orders_by_date(buy_orders, today_utc)
+            
+            # Classify sell orders by date  
+            today_sell_orders, old_sell_orders = self._classify_orders_by_date(sell_orders, today_utc)
+            
+            # CRITICAL: Validate position-order consistency
+            all_sell_orders = today_sell_orders + old_sell_orders
+            is_consistent = self._validate_position_order_consistency(market, position_size, all_sell_orders)
+            
             logger.info(f"📡 Direct exchange query for {market}:")
             logger.info(f"   Position: {position_size:.6f}")
-            logger.info(f"   Buy orders: {len(buy_orders)}")
-            logger.info(f"   Sell orders: {len(sell_orders)}")
+            logger.info(f"   Today buy orders: {len(today_buy_orders)}")
+            logger.info(f"   Today sell orders: {len(today_sell_orders)}")
+            logger.info(f"   Old buy orders: {len(old_buy_orders)}")
+            logger.info(f"   Old sell orders: {len(old_sell_orders)}")
+            logger.info(f"   Position-Order Consistency: {'✅ SAFE' if is_consistent else '🚨 DANGEROUS'}")
             
-            # For simplicity, treat all buy orders as "today" and separate sells by date if needed
-            # Since the calling code expects today_buy_orders, today_sell_orders, old_sell_orders
+            # FIXED: Return proper date-classified orders with consistency flag
             return {
                 'position_size': position_size,
-                'today_buy_orders': buy_orders,  # All buy orders treated as today
-                'today_sell_orders': [],  # Will need date logic later if needed
-                'old_sell_orders': sell_orders,  # All sell orders treated as old for now
-                'total_buy_amount': sum(float(o.get('amount', 0)) for o in buy_orders),
-                'total_sell_amount': sum(float(o.get('amount', 0)) for o in sell_orders)
+                'today_buy_orders': today_buy_orders,    # REAL today's buy orders
+                'today_sell_orders': today_sell_orders,  # REAL today's sell orders
+                'old_sell_orders': old_sell_orders,      # REAL old sell orders
+                'is_consistent': is_consistent,          # Position-order consistency flag
+                'total_buy_amount': sum(float(o.get('amount', 0)) for o in today_buy_orders),
+                'total_sell_amount': sum(float(o.get('amount', 0)) for o in today_sell_orders + old_sell_orders)
             }
             
         except Exception as e:
@@ -2527,6 +2708,7 @@ class DailyRangeBot:
                 'today_buy_orders': [],
                 'today_sell_orders': [],
                 'old_sell_orders': [],
+                'is_consistent': True,  # Assume safe on error
                 'total_buy_amount': 0.0,
                 'total_sell_amount': 0.0
             }
