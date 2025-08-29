@@ -273,13 +273,13 @@ class TradingBotManager:
                                 self.console.print(f"📊 Status: Balance=${balance:.2f}, Positions={positions}", style="cyan")
                         
                         # Wait before next cycle
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(3)
                         
                     except KeyboardInterrupt:
                         break
                     except Exception as e:
                         logger.error(f"Trading cycle error: {e}", exc_info=True)
-                        await asyncio.sleep(10)  # Longer wait on error
+                        await asyncio.sleep(5)  # Longer wait on error
             else:
                 # Full live display for local environments
                 layout = self.create_display_layout()
@@ -299,13 +299,13 @@ class TradingBotManager:
                                 force_log_summaries()
                             
                             # Wait before next cycle
-                            await asyncio.sleep(5)
+                            await asyncio.sleep(3)
                             
                         except KeyboardInterrupt:
                             break
                         except Exception as e:
                             logger.error(f"Error in bot cycle: {e}", exc_info=True)
-                            await asyncio.sleep(10)  # Wait longer on error
+                            await asyncio.sleep(5)  # Wait longer on error
                         
         except KeyboardInterrupt:
             pass
