@@ -1404,7 +1404,15 @@ class DailyRangeBot:
             return 1
     
     def _should_place_buy_order(self, market: str, signal: TradingSignal, current_price: float) -> bool:
-        """Buy order decision using fresh exchange data with day-start cancellation and funding fee protection"""
+        """Buy order decision using fresh exchange data with period-start cancellation and funding fee protection"""
+        
+        # Import and check trading timeframe
+        from config.settings import TRADING_TIMEFRAME
+        timeframe = TRADING_TIMEFRAME
+        
+        # Initialize period tracking if not exists
+        if not hasattr(self, '_last_reset_period'):
+            self._last_reset_period = {}
         
         # CRITICAL PHASE 0: Signal availability check
         if not signal:
@@ -1420,21 +1428,33 @@ class DailyRangeBot:
             log_trading_event('signal_invalid', f"❌ Buy order blocked - invalid signal for {market}")
             return False
         
-        # Verify signal is for today (not stale)
-        today = datetime.now(timezone.utc).date().isoformat()
-        if signal.date != today:
-            logger.warning(f"⚠️ Signal for {market} is stale (signal date: {signal.date}, today: {today})")
+        # Verify signal is for current period (not stale)
+        if timeframe == 'hourly':
+            current_period = datetime.now(timezone.utc).strftime('%Y-%m-%d-%H')
+            signal_period = getattr(signal, 'hour_key', signal.date)
+        else:
+            current_period = datetime.now(timezone.utc).date().isoformat()
+            signal_period = signal.date
+            
+        if signal_period != current_period:
+            logger.warning(f"⚠️ Signal for {market} is stale (signal period: {signal_period}, current: {current_period})")
             logger.warning("Attempting to generate fresh signal...")
             
             # Try to generate a fresh signal
-            fresh_signal = self.strategy.generate_daily_signal(market, force=True)
-            if fresh_signal and fresh_signal.date == today:
-                logger.info(f"✅ Generated fresh signal for {market}")
+            if timeframe == 'hourly':
+                fresh_signal = self.strategy.generate_hourly_signal(market, force=True)
+                is_fresh = fresh_signal and getattr(fresh_signal, 'hour_key', fresh_signal.date) == current_period
+            else:
+                fresh_signal = self.strategy.generate_daily_signal(market, force=True)
+                is_fresh = fresh_signal and fresh_signal.date == current_period
+                
+            if is_fresh:
+                logger.info(f"✅ Generated fresh {timeframe} signal for {market}")
                 # Note: We can't update the signal parameter, but the caller should get a fresh one next cycle
                 return False  # Skip this cycle, let caller get fresh signal
             else:
-                logger.error(f"❌ Could not generate fresh signal for {market}")
-                log_trading_event('signal_stale', f"❌ Buy order blocked - stale signal for {market}")
+                logger.error(f"❌ Could not generate fresh {timeframe} signal for {market}")
+                log_trading_event('signal_stale', f"❌ Buy order blocked - stale {timeframe} signal for {market}")
                 return False
         
         logger.debug(f"✅ Signal validation passed for {market}: Buy=${signal.buy_price:.2f}, Sell=${signal.sell_price:.2f}")
@@ -1459,23 +1479,34 @@ class DailyRangeBot:
                 log_trading_event('settlement_approach', f"Buy order blocked - approaching settlement for {market}")
             return False
         
-        # Phase 1: One-time daily reset check
+        # Phase 1: Period reset check (daily or hourly based on timeframe)
         now = datetime.now(timezone.utc)
-        today = now.date()
         current_hour = now.hour
         current_minute = now.minute
         
-        # Check if we need to do daily reset (once per day after 00:04 UTC)
-        last_reset_date = self._last_reset_date.get(market)
-        needs_daily_reset = (last_reset_date != today and current_hour == 0 and current_minute >= 4)
+        if timeframe == 'hourly':
+            # Hourly reset logic
+            current_period = now.strftime('%Y-%m-%d-%H')
+            last_reset = self._last_reset_period.get(market)
+            is_new_period = self.market_data.is_new_trading_hour(market)
+            needs_reset = (last_reset != current_period and is_new_period)
+            reset_type = "hourly"
+        else:
+            # Daily reset logic (existing)
+            today = now.date()
+            current_period = today
+            last_reset = self._last_reset_date.get(market) if hasattr(self, '_last_reset_date') else None
+            is_new_period = current_hour == 0 and current_minute >= 4
+            needs_reset = (last_reset != today and is_new_period)
+            reset_type = "daily"
         
-        if needs_daily_reset:
-            logger.info(f"🌅 Performing one-time daily reset for {market} (last reset: {last_reset_date}, today: {today})")
+        if needs_reset:
+            logger.info(f"🌅 Performing one-time {reset_type} reset for {market} (last reset: {last_reset}, current: {current_period})")
             
             # Don't cancel orders during settlement periods
             if is_settlement_period() or is_approaching_settlement():
-                logger.info(f"⏳ Daily reset delayed - waiting for settlement period to end for {market}")
-                log_trading_event('settlement_delay', f"Daily reset delayed due to settlement period for {market}")
+                logger.info(f"⏳ {reset_type.title()} reset delayed - waiting for settlement period to end for {market}")
+                log_trading_event('settlement_delay', f"{reset_type.title()} reset delayed due to settlement period for {market}")
                 # Don't mark as complete, try again next cycle
                 return False
             
@@ -1489,24 +1520,30 @@ class DailyRangeBot:
                     # Cancel ALL buy orders during daily reset (cleanup any buggy duplicates)
                     try:
                         order_age = (now - order.created_at).total_seconds() / 3600
-                        logger.info(f"🗑️ Daily reset - cancelling buy order: {order.client_id} from {order.created_at.date()} (age: {order_age:.1f}h)")
+                        logger.info(f"🗑️ {reset_type.title()} reset - cancelling buy order: {order.client_id} from {order.created_at.date()} (age: {order_age:.1f}h)")
                         if self.order_manager.cancel_order(order.client_id):
                             cancelled_count += 1
-                            log_trading_event('daily_reset_cleanup', f"Cancelled buy order {order.client_id} during daily reset")
+                            log_trading_event(f'{reset_type}_reset_cleanup', f"Cancelled buy order {order.client_id} during {reset_type} reset")
                     except Exception as e:
                         logger.error(f"Failed to cancel buy order {order.client_id}: {e}")
             
             if cancelled_count > 0:
-                logger.info(f"✅ Daily reset complete: Cancelled {cancelled_count} buy orders for {market}")
+                logger.info(f"✅ {reset_type.title()} reset complete: Cancelled {cancelled_count} buy orders for {market}")
                 # Small delay to let cancellations process
                 import time
                 time.sleep(0.5)
             else:
-                logger.info(f"✅ Daily reset complete: No buy orders to cancel for {market}")
+                logger.info(f"✅ {reset_type.title()} reset complete: No buy orders to cancel for {market}")
             
-            # Mark daily reset as completed for today
-            self._last_reset_date[market] = today
-            logger.info(f"✅ Daily reset marked complete for {market} on {today}")
+            # Mark reset as completed for current period
+            if timeframe == 'hourly':
+                self._last_reset_period[market] = current_period
+                logger.info(f"✅ Hourly reset marked complete for {market} on {current_period}")
+            else:
+                if not hasattr(self, '_last_reset_date'):
+                    self._last_reset_date = {}
+                self._last_reset_date[market] = current_period
+                logger.info(f"✅ Daily reset marked complete for {market} on {current_period}")
             
             # IMPORTANT: Continue to buy decision logic after reset
             # Don't return here - allow first buy of the day to proceed
@@ -1517,22 +1554,27 @@ class DailyRangeBot:
         # Get fresh data using existing methods
         pending_sells_today = self._get_today_pending_sell_orders(market)  # Already excludes orphaned
         
-        # Check if it's a new trading day
-        is_new_day = self.market_data.is_new_trading_day(market)
-        
-        # Check if we have any buy orders from today (using existing method)
-        buy_status = self._check_daily_buy_status(market)
-        has_today_buy = buy_status.get('has_today_buy', False)
+        # Check period and buy conditions based on timeframe
+        if timeframe == 'hourly':
+            is_new_period = self.market_data.is_new_trading_hour(market)
+            buy_status = self._check_daily_buy_status(market)  # Reuse existing method - it checks recent buy activity
+            has_period_buy = buy_status.get('has_today_buy', False)
+            period_name = "hour"
+        else:
+            is_new_period = self.market_data.is_new_trading_day(market)
+            buy_status = self._check_daily_buy_status(market)
+            has_period_buy = buy_status.get('has_today_buy', False)
+            period_name = "day"
         
         # Check cycle completion flag
         cycle_complete = self._cycle_completion_flags.get(market, False)
         
-        # CONDITION 1: Either (new day + first buy) OR cycle complete
-        can_proceed = (is_new_day and not has_today_buy) or cycle_complete
+        # CONDITION 1: Either (new period + first buy) OR cycle complete
+        can_proceed = (is_new_period and not has_period_buy) or cycle_complete
         
         if not can_proceed:
-            logger.info(f"❌ Cannot buy - not new day first buy and cycle not complete for {market}")
-            logger.info(f"   is_new_day: {is_new_day}, has_today_buy: {has_today_buy}, cycle_complete: {cycle_complete}")
+            logger.info(f"❌ Cannot buy - not new {period_name} first buy and cycle not complete for {market}")
+            logger.info(f"   is_new_period: {is_new_period}, has_period_buy: {has_period_buy}, cycle_complete: {cycle_complete}")
             return False
         
         # If pending sells from today exist, cannot buy

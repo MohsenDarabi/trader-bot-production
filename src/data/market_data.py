@@ -166,6 +166,85 @@ class MarketDataManager:
         
         return ohlc
     
+    def get_hourly_candles(self, market: str, hours: int = 2) -> pd.DataFrame:
+        """
+        Fetch hourly OHLC candles
+        
+        Args:
+            market: Market symbol
+            hours: Number of hours to fetch (minimum 2 for previous hour calculation)
+            
+        Returns:
+            DataFrame with OHLC data
+        """
+        try:
+            # Fetch hourly candles
+            klines = self.client.get_kline(
+                market=market,
+                period='1hour',
+                limit=hours + 1  # Extra hour for safety
+            )
+            
+            if not klines:
+                raise ValueError(f"No candle data available for {market}")
+            
+            # Convert to DataFrame
+            df = pd.DataFrame(klines)
+            
+            # Ensure we have the required columns
+            required_cols = ['created_at', 'open', 'high', 'low', 'close']
+            if not all(col in df.columns for col in required_cols):
+                raise ValueError(f"Missing required columns in kline data")
+            
+            # Convert timestamp to datetime
+            df['date'] = pd.to_datetime(df['created_at'], unit='ms')
+            
+            # Convert price columns to float using safe conversion
+            for col in ['open', 'high', 'low', 'close']:
+                df[col] = df[col].apply(safe_float)
+            
+            # Sort by date
+            df = df.sort_values('date', ascending=False)
+            
+            logger.info(f"Fetched {len(df)} hourly candles for {market}")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch hourly candles for {market}: {e}")
+            raise
+    
+    def get_previous_hour_ohlc(self, market: str) -> Dict[str, float]:
+        """
+        Get previous hour's OHLC data
+        
+        Args:
+            market: Market symbol
+            
+        Returns:
+            Dictionary with open, high, low, close prices
+        """
+        df = self.get_hourly_candles(market, hours=2)
+        
+        if len(df) < 2:
+            raise ValueError(f"Insufficient data for {market}, need at least 2 hours")
+        
+        # Get previous hour (second row, as we sorted descending)
+        prev_hour = df.iloc[1]
+        
+        ohlc = {
+            'date': prev_hour['date'].strftime('%Y-%m-%d %H:00'),
+            'open': safe_float(prev_hour['open']),
+            'high': safe_float(prev_hour['high']),
+            'low': safe_float(prev_hour['low']),
+            'close': safe_float(prev_hour['close'])
+        }
+        
+        logger.info(f"Previous hour OHLC for {market} ({ohlc['date']}): "
+                   f"O={ohlc['open']:.2f}, H={ohlc['high']:.2f}, "
+                   f"L={ohlc['low']:.2f}, C={ohlc['close']:.2f}")
+        
+        return ohlc
+
     def get_current_price(self, market: str) -> float:
         """
         Get current market price, preferring WebSocket data with HTTP fallback
@@ -255,6 +334,37 @@ class MarketDataManager:
         logger.info(f"Trading day check for {market}: current_time={current_time.strftime('%H:%M:%S UTC')}, is_daily_reset_window={is_daily_reset_window}")
         
         return is_daily_reset_window
+    
+    def is_new_trading_hour(self, market: str) -> bool:
+        """
+        Check if it's a new trading hour requiring signal reset
+        
+        Respects funding fee settlements at 00:00, 08:00, 16:00 UTC
+        - Funding hours: wait 1 minute (XX:01:00)
+        - Other hours: wait 1 second (XX:00:01)
+        
+        Args:
+            market: Market symbol
+            
+        Returns:
+            True if signals should be reset for new hour
+        """
+        current_time = datetime.now(timezone.utc)
+        current_hour = current_time.hour
+        current_minute = current_time.minute
+        current_second = current_time.second
+        
+        # At funding fee hours, wait 1 minute for settlement
+        if current_hour in [0, 8, 16]:
+            is_hourly_reset_window = current_minute == 1 and current_second < 10
+        else:
+            # Other hours: start at XX:00:01
+            is_hourly_reset_window = current_minute == 0 and current_second >= 1 and current_second < 10
+        
+        logger.info(f"Trading hour check for {market}: current_time={current_time.strftime('%H:%M:%S UTC')}, "
+                   f"is_hourly_reset_window={is_hourly_reset_window}")
+        
+        return is_hourly_reset_window
     
     def get_available_markets(self) -> List[str]:
         """

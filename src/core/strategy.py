@@ -218,6 +218,87 @@ class DailyRangeStrategy:
             logger.error(f"Failed to generate signal for {market}: {e}", exc_info=True)
             return None
     
+    def generate_hourly_signal(self, market: str, force: bool = False) -> Optional[TradingSignal]:
+        """
+        Generate hourly trading signal for a market
+        
+        Args:
+            market: Market symbol
+            force: Force signal generation even if already exists
+            
+        Returns:
+            Trading signal or None if not a new hour
+        """
+        try:
+            logger.info(f"🎯 Starting hourly signal generation for {market}")
+            # Check if we already have a signal for this hour
+            current_hour = datetime.now(timezone.utc).strftime('%Y-%m-%d-%H')
+            
+            if not force and market in self._current_signals:
+                signal = self._current_signals[market]
+                if hasattr(signal, 'hour_key') and signal.hour_key == current_hour:
+                    logger.debug(f"Using cached signal for {market} on hour {current_hour}")
+                    return signal
+            
+            logger.info(f"🕐 Checking signal generation conditions for {market} (force={force})")
+            is_hourly_reset_window = self.market_data.is_new_trading_hour(market)
+            
+            # Allow signal generation if:
+            # 1. Force flag is set, OR
+            # 2. We're in the hourly reset window, OR  
+            # 3. We don't have a signal for this hour
+            should_generate = force or is_hourly_reset_window or (market not in self._current_signals or 
+                             not hasattr(self._current_signals[market], 'hour_key') or 
+                             self._current_signals[market].hour_key != current_hour)
+            
+            if not should_generate:
+                logger.info(f"Signal generation not needed for {market} - valid signal already exists")
+                return self._current_signals.get(market)
+            
+            logger.info(f"Proceeding with hourly signal generation for {market} (force={force}, hourly_reset={is_hourly_reset_window})")
+            
+            logger.info(f"Generating new signal for {market} - getting previous hour OHLC...")
+            
+            # Get previous hour OHLC
+            ohlc = self.market_data.get_previous_hour_ohlc(market)
+            logger.info(f"Retrieved OHLC for {market}: {ohlc}")
+            
+            # Calculate signal prices (using same formula, only needs high and low)
+            buy_price, sell_price, range_value = self.calculate_signal_prices(
+                ohlc['high'], 
+                ohlc['low']
+            )
+            
+            # Create signal with hour_key
+            signal = TradingSignal(
+                market=market,
+                date=current_hour,  # Using hour format for compatibility
+                buy_price=buy_price,
+                sell_price=sell_price,
+                range_value=range_value,
+                previous_high=ohlc['high'],
+                previous_low=ohlc['low'],
+                created_at=datetime.now(timezone.utc)
+            )
+            signal.hour_key = current_hour  # Add hour tracking
+            
+            # Cache the signal in memory
+            self._current_signals[market] = signal
+            
+            # Save signal to database for persistence
+            self._save_signal_to_database(signal)
+            
+            logger.info(f"Generated hourly signal for {market} on {current_hour}: "
+                       f"Buy=${buy_price:.2f}, Sell=${sell_price:.2f}")
+            
+            logger.info(f"📊 Hourly Trading Signals for {market}: Buy=${buy_price:.4f} | Sell=${sell_price:.4f} | Range=${range_value:.4f}")
+            
+            return signal
+            
+        except Exception as e:
+            logger.error(f"Failed to generate hourly signal for {market}: {e}", exc_info=True)
+            return None
+
     def get_current_signal(self, market: str) -> Optional[TradingSignal]:
         """
         Get current day's signal if exists, checking memory first then database

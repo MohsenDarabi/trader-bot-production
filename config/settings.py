@@ -24,7 +24,7 @@ SIMULATE_ORDERS = os.getenv('SIMULATE_ORDERS', 'true').lower() == 'true'
 
 # Trading Strategy Parameters
 RANGE_DIVISOR = 4  # (High - Low) / 4 formula
-POSITION_SIZE_PERCENT = 10.0  # 10% of available capital per trade
+POSITION_SIZE_PERCENT = 1.0  # 1% of available capital per trade
 LEVERAGE = 2.0  # 2x leverage on positions
 MAKER_FEE = 0.001  # 0.1% maker fee
 TAKER_FEE = 0.001  # 0.1% taker fee
@@ -83,6 +83,7 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 # Trading Time Settings
 SIGNAL_GENERATION_TIME = "00:00"  # UTC time for daily signal generation
 TIMEZONE = "UTC"
+TRADING_TIMEFRAME = os.getenv('TRADING_TIMEFRAME', 'daily')  # 'daily' or 'hourly'
 
 # Safety Settings
 MAX_OPEN_POSITIONS = 10  # Maximum number of concurrent positions
