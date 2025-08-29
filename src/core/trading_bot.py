@@ -392,46 +392,46 @@ class DailyRangeBot:
             # Set WebSocket provider reference for enhanced availability monitoring
             self.market_data.set_websocket_provider(self.websocket_market_data)
             
-            # Initialize WebSocket connection using proven pattern from tests
-            logger.info("Starting WebSocket connection for real-time order tracking...")
+            # DISABLED: WebSocket connection - using REST API only for reliability
+            logger.info("WebSocket disabled - using REST API polling for order tracking...")
             
-            # Connect and authenticate WebSocket (same pattern as working tests)
-            connected = await self.websocket_client.connect()
-            if not connected:
-                raise Exception("Failed to connect WebSocket")
-            logger.info("✓ WebSocket connected")
+            # # Connect and authenticate WebSocket (same pattern as working tests)
+            # connected = await self.websocket_client.connect()
+            # if not connected:
+            #     raise Exception("Failed to connect WebSocket")
+            # logger.info("✓ WebSocket connected")
+            # 
+            # # Authenticate
+            # authenticated = await self.websocket_client.authenticate()
+            # if not authenticated:
+            #     raise Exception("Failed to authenticate WebSocket")
+            # logger.info("✓ WebSocket authenticated")
             
-            # Authenticate
-            authenticated = await self.websocket_client.authenticate()
-            if not authenticated:
-                raise Exception("Failed to authenticate WebSocket")
-            logger.info("✓ WebSocket authenticated")
-            
-            # Register WebSocket message handlers
-            self.websocket_client.register_handler(
-                "state.update", 
-                self.websocket_market_data.handle_state_update
-            )
-            self.websocket_client.register_handler(
-                "balance.update",
-                self._handle_balance_update
-            )
-            self.websocket_client.register_handler(
-                "position.update",
-                self._handle_position_update
-            )
-            self.websocket_client.register_handler(
-                "order.update",
-                self._handle_order_update
-            )
-            self.websocket_client.register_handler(
-                "user_deals.update",
-                self._handle_user_deals_update
-            )
-            
-            # Subscribe to balance updates for real-time account balance (no market filter needed)
-            await self.websocket_client.subscribe_balance(["USDT"])
-            logger.info("✓ Subscribed to WebSocket balance updates")
+            # DISABLED: WebSocket handlers and subscriptions - using REST API only
+            # self.websocket_client.register_handler(
+            #     "state.update", 
+            #     self.websocket_market_data.handle_state_update
+            # )
+            # self.websocket_client.register_handler(
+            #     "balance.update",
+            #     self._handle_balance_update
+            # )
+            # self.websocket_client.register_handler(
+            #     "position.update",
+            #     self._handle_position_update
+            # )
+            # self.websocket_client.register_handler(
+            #     "order.update",
+            #     self._handle_order_update
+            # )
+            # self.websocket_client.register_handler(
+            #     "user_deals.update",
+            #     self._handle_user_deals_update
+            # )
+            # 
+            # # Subscribe to balance updates for real-time account balance (no market filter needed)
+            # await self.websocket_client.subscribe_balance(["USDT"])
+            logger.info("✓ WebSocket handlers and subscriptions disabled - using REST API polling")
             
             # Note: Market-specific subscriptions (orders, user_deals, market_state, positions) 
             # will be set up in set_trading_market() after market is selected
@@ -688,29 +688,30 @@ class DailyRangeBot:
             # Initialize tracking for this market
             # REMOVED: Cache update - now using direct exchange queries
             
-            # Subscribe to market-specific WebSocket streams for real-time data
-            if self.websocket_client and self.websocket_client.is_connected:
-                logger.info(f"Setting up WebSocket subscriptions for {market}...")
-                
-                # Subscribe to order updates for this market only
-                await self.websocket_client.subscribe_orders([market])
-                logger.info(f"✓ Subscribed to order updates for {market}")
-                
-                # Subscribe to user deals/trades for this market only
-                await self.websocket_client.subscribe_user_deals([market])
-                logger.info(f"✓ Subscribed to user deals for {market}")
-                
-                # Subscribe to market state updates for this market only (real-time price data)
-                await self.websocket_client.subscribe_market_state([market])
-                logger.info(f"✓ Subscribed to market state updates for {market}")
-                
-                # Subscribe to position updates for this market only
-                await self.websocket_client.subscribe_positions([market])
-                logger.info(f"✓ Subscribed to position updates for {market}")
-                
-                logger.info(f"🔗 All WebSocket subscriptions configured for {market}")
-            else:
-                logger.warning(f"⚠️ WebSocket not connected - market subscriptions for {market} will be set up on reconnect")
+            # DISABLED: Market-specific WebSocket subscriptions - using REST API only
+            # if self.websocket_client and self.websocket_client.is_connected:
+            #     logger.info(f"Setting up WebSocket subscriptions for {market}...")
+            #     
+            #     # Subscribe to order updates for this market only
+            #     await self.websocket_client.subscribe_orders([market])
+            #     logger.info(f"✓ Subscribed to order updates for {market}")
+            #     
+            #     # Subscribe to user deals/trades for this market only
+            #     await self.websocket_client.subscribe_user_deals([market])
+            #     logger.info(f"✓ Subscribed to user deals for {market}")
+            #     
+            #     # Subscribe to market state updates for this market only (real-time price data)
+            #     await self.websocket_client.subscribe_market_state([market])
+            #     logger.info(f"✓ Subscribed to market state updates for {market}")
+            #     
+            #     # Subscribe to position updates for this market only
+            #     await self.websocket_client.subscribe_positions([market])
+            #     logger.info(f"✓ Subscribed to position updates for {market}")
+            #     
+            #     logger.info(f"🔗 All WebSocket subscriptions configured for {market}")
+            # else:
+            #     logger.warning(f"⚠️ WebSocket not connected - market subscriptions for {market} will be set up on reconnect")
+            logger.info(f"🔗 Market WebSocket subscriptions disabled for {market} - using REST API polling")
     
     async def execute_trading_cycle(self):
         """Execute one complete trading cycle"""
@@ -1327,17 +1328,26 @@ class DailyRangeBot:
             
             for order in orders:
                 created_at = order.get('created_at', 0)
-                # Use proven timestamp parsing logic from test
-                if isinstance(created_at, (int, float)):
-                    order_date = datetime.fromtimestamp(created_at / 1000, timezone.utc).date()
-                else:
-                    order_date = datetime.fromisoformat(str(created_at).replace('Z', '+00:00')).date()
-                
+                client_id = order.get('client_id', '')
                 side = order.get('side', '')
                 amount = safe_float(order.get('amount', 0))
                 price = safe_float(order.get('price', 0))
-                client_id = order.get('client_id', '')
+                
+                # DEBUG: Log raw timestamp data
+                logger.debug(f"🔍 DEBUG Raw order data: created_at={created_at} (type: {type(created_at)}), client_id={client_id}")
+                
+                # Use proven timestamp parsing logic from test
+                if isinstance(created_at, (int, float)):
+                    order_date = datetime.fromtimestamp(created_at / 1000, timezone.utc).date()
+                    logger.debug(f"🔍 DEBUG Timestamp parsed as int/float: {created_at} → {order_date}")
+                else:
+                    order_date = datetime.fromisoformat(str(created_at).replace('Z', '+00:00')).date()
+                    logger.debug(f"🔍 DEBUG Timestamp parsed as string: {created_at} → {order_date}")
+                
                 is_today = order_date == today
+                
+                # DEBUG: Log detailed comparison
+                logger.debug(f"🔍 DEBUG Date comparison: order_date={order_date}, today={today}, is_today={is_today}")
                 
                 # Log order details for debugging
                 logger.info(f"📋 Order: {side.upper()} | ${price:.4f} | Amount: {amount:.6f} | {client_id} | {order_date} | {'TODAY' if is_today else 'OLD'}")
@@ -1347,8 +1357,10 @@ class DailyRangeBot:
                 elif side == 'sell':
                     if is_today:
                         sell_orders_today.append(order)
+                        logger.debug(f"🔍 DEBUG Added to sell_orders_today: {client_id}")
                     else:
                         sell_orders_old.append(order)
+                        logger.debug(f"🔍 DEBUG Added to sell_orders_old: {client_id}")
             
             # Log summary
             if len(sell_orders_old) > 0:
@@ -1362,11 +1374,13 @@ class DailyRangeBot:
             
             for order in sell_orders_today:
                 client_id = order.get('client_id', '')
+                logger.debug(f"🔍 DEBUG Classifying sell order: client_id={client_id}, contains_OS={'_OS_' in client_id}")
                 if "_OS_" in client_id:
                     orphaned_sell_count += 1
                     logger.debug(f"📌 Orphaned sell order detected: {client_id}")
                 else:
                     regular_sell_count += 1
+                    logger.debug(f"🔍 DEBUG Regular sell order detected: {client_id}")
             
             sell_count = len(sell_orders_today)
             
@@ -1425,23 +1439,8 @@ class DailyRangeBot:
         
         logger.debug(f"✅ Signal validation passed for {market}: Buy=${signal.buy_price:.2f}, Sell=${signal.sell_price:.2f}")
         
-        # CRITICAL: Force fresh order validation before emergency check to ensure accurate status
-        logger.debug(f"🔄 Forcing order validation before buy decision for {market}")
-        import asyncio
-        try:
-            # Run validation in current event loop
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If we're already in an async context, schedule validation
-                asyncio.create_task(self._validate_order_manager_state())
-                # Small delay to let validation complete
-                import time
-                time.sleep(0.5)
-            else:
-                # Run validation synchronously
-                loop.run_until_complete(self._validate_order_manager_state())
-        except Exception as e:
-            logger.warning(f"⚠️ Could not force validation before buy decision: {e}")
+        # Using fresh exchange data directly - no validation needed
+        logger.debug(f"🔄 Using fresh exchange data for buy decision for {market}")
         
         # EMERGENCY SAFETY CHECK moved after fresh data loading for consistency
         
@@ -1512,17 +1511,58 @@ class DailyRangeBot:
             # IMPORTANT: Continue to buy decision logic after reset
             # Don't return here - allow first buy of the day to proceed
         
-        # Use direct exchange queries for single source of truth
-        buy_status = self._get_exchange_buy_status(market)
+        # REFINED BUY LOGIC: Get fresh data and apply our conditions
+        logger.info(f"🔄 Checking refined buy conditions for {market}")
         
-        # Phase 2: CRITICAL - Get FRESH exchange data for position and orders
-        # Never trust cached data for critical buy decisions
+        # Get fresh data using existing methods
+        pending_sells_today = self._get_today_pending_sell_orders(market)  # Already excludes orphaned
+        
+        # Check if it's a new trading day
+        is_new_day = self.market_data.is_new_trading_day(market)
+        
+        # Check if we have any buy orders from today (using existing method)
+        buy_status = self._check_daily_buy_status(market)
+        has_today_buy = buy_status.get('has_today_buy', False)
+        
+        # Check cycle completion flag
+        cycle_complete = self._cycle_completion_flags.get(market, False)
+        
+        # CONDITION 1: Either (new day + first buy) OR cycle complete
+        can_proceed = (is_new_day and not has_today_buy) or cycle_complete
+        
+        if not can_proceed:
+            logger.info(f"❌ Cannot buy - not new day first buy and cycle not complete for {market}")
+            logger.info(f"   is_new_day: {is_new_day}, has_today_buy: {has_today_buy}, cycle_complete: {cycle_complete}")
+            return False
+        
+        # If pending sells from today exist, cannot buy
+        if pending_sells_today > 0:
+            logger.info(f"❌ Cannot buy - {pending_sells_today} pending sell order(s) from today for {market}")
+            return False
+        
+        # CONDITION 2: Position coverage check using existing method
+        balance = self._calculate_position_sell_balance(market)
+        position_size = balance.get('position_size', 0)
+        uncovered = balance.get('uncovered_position', 0)
+        
+        if position_size > 0 and uncovered > self.min_order_size:
+            logger.info(f"⚠️ Position {position_size} not fully covered. Uncovered: {uncovered}")
+            # Place sell order for uncovered amount
+            self._place_missing_sell_order(market, uncovered, signal)
+            return False  # Don't buy this cycle
+        
+        # Clear cycle completion flag after using it
+        if cycle_complete:
+            self._cycle_completion_flags[market] = False
+            logger.info(f"🔄 Cleared cycle completion flag for {market}")
+        
+        logger.info(f"✅ All refined buy conditions met for {market}")
+        
+        # Continue with remaining safety checks from original code
         exchange_state = self._get_exchange_position_and_orders_direct(market)
-        position_size = exchange_state['position_size']
         pending_buy_orders = exchange_state['today_buy_orders']
-        pending_sell_orders = exchange_state['today_sell_orders'] + exchange_state['old_sell_orders']
         
-        # Check for existing pending buy orders first
+        # Final safety check for pending buy orders
         if pending_buy_orders:
             if self._should_log_state_change(market, 'fresh_buy_orders_exist', True):
                 logger.warning(f"❌ Cannot place buy - {len(pending_buy_orders)} pending buy orders exist for {market}")
@@ -1682,11 +1722,11 @@ class DailyRangeBot:
             # This logic is now primarily for logging clarity and double-verification
             
             # Redundant safety check (already handled by emergency check above, but kept for explicit clarity)
-            if fresh_pending_sells_today > 0:
+            if pending_sells_today > 0:
                 # This should never be reached due to emergency check above, but keeping for safety
                 logger.error(f"🚨 CRITICAL: Startup safety check triggered - this should have been caught by emergency check!")
-                logger.error(f"❌ Cannot place first buy - {fresh_pending_sells_today} pending sell orders from today for {market}")
-                log_trading_event('startup_safety_block', f"🚨 Startup safety check blocked buy - {fresh_pending_sells_today} today's sells for {market}")
+                logger.error(f"❌ Cannot place first buy - {pending_sells_today} pending sell orders from today for {market}")
+                log_trading_event('startup_safety_block', f"🚨 Startup safety check blocked buy - {pending_sells_today} today's sells for {market}")
                 return False
             
             # Startup scenario: No pending sells from today - allow first buy of day
@@ -2398,8 +2438,7 @@ class DailyRangeBot:
                     del self.order_manager.active_orders[client_id]
                     logger.info(f"✅ Removed completed order {client_id} from OrderManager")
             
-            # Force immediate validation against exchange
-            await self._validate_order_manager_state()
+            # Using fresh exchange data - no validation needed
             
             # Trigger fresh buy status check for critical decisions
             fresh_status = self._get_exchange_buy_status(market)
@@ -2413,8 +2452,7 @@ class DailyRangeBot:
         try:
             logger.debug(f"🔄 Reconciling state after {side} fill: {amount} @ ${price} for {market}")
             
-            # Force OrderManager and PositionManager sync
-            await self._validate_order_manager_state()
+            # Using fresh exchange data - sync position only
             self.position_manager.sync_with_exchange()
             
             # Get fresh state for decision making
@@ -2433,7 +2471,6 @@ class DailyRangeBot:
             logger.info(f"🔍 Performing comprehensive state reconciliation for {market}")
             
             # Full state sync with exchange
-            await self._validate_order_manager_state()
             self.position_manager.sync_with_exchange()
             await self._update_account_status()
             
@@ -3017,9 +3054,7 @@ class DailyRangeBot:
             orders_synced = self.order_manager.load_existing_orders()
             logger.info(f"Synced {orders_synced} existing orders")
             
-            # Force validation of OrderManager state against exchange state
-            # More thorough validation if we detected a reconnection
-            await self._validate_order_manager_state()
+            # Using fresh exchange data - no validation needed
             
             # Enhanced position sync logging with details
             positions = self.position_manager.get_all_positions()
@@ -3089,68 +3124,6 @@ class DailyRangeBot:
                     raise
         return None
 
-    async def _validate_order_manager_state(self):
-        """Validate OrderManager internal state against live exchange data for all trading markets"""
-        try:
-            # Loop through all actual trading markets (from command line or environment)
-            for market in self.trading_markets:
-                if not market:
-                    continue
-                    
-                logger.info(f"🔍 Validating order status for {market}")
-                
-                # Get pending orders from OrderManager state
-                cached_orders = self.order_manager.get_pending_orders(market)
-                logger.info(f"📊 Internal cache has {len(cached_orders)} orders for {market}")
-                
-                # Get actual pending orders from exchange with retry logic
-                try:
-                    exchange_response = await self._get_exchange_orders_with_retry(market)
-                    exchange_orders = []
-                    if isinstance(exchange_response, dict):
-                        exchange_orders = exchange_response.get('data', [])
-                    elif isinstance(exchange_response, list):
-                        exchange_orders = exchange_response
-                    
-                    logger.info(f"🔍 Exchange has {len(exchange_orders)} pending orders for {market}")
-                    
-                except Exception as e:
-                    logger.error(f"❌ Could not get exchange orders for {market}: {e}")
-                    continue  # Skip this market but continue with others
-                
-                # Find orders in OrderManager state that are not on exchange (stale/filled orders)
-                stale_client_ids = []
-                exchange_order_ids = {str(order.get('order_id')) for order in exchange_orders}
-                exchange_client_ids = {order.get('client_id') for order in exchange_orders if order.get('client_id')}
-                
-                for cached_order in cached_orders:
-                    # Check if this tracked order exists on exchange
-                    order_exists = (
-                        str(cached_order.exchange_order_id) in exchange_order_ids or
-                        cached_order.client_id in exchange_client_ids
-                    )
-                    
-                    if not order_exists:
-                        stale_client_ids.append(cached_order.client_id)
-                        logger.debug(f"🗑️ Detected stale order: {cached_order.client_id}")
-                
-                # Remove stale orders from OrderManager state
-                stale_removed = 0
-                for client_id in stale_client_ids:
-                    if client_id in self.order_manager.active_orders:
-                        del self.order_manager.active_orders[client_id]
-                        self.order_manager._last_status_check.pop(client_id, None)
-                        stale_removed += 1
-                        logger.warning(f"🧹 Removed stale order from OrderManager: {client_id}")
-                
-                if stale_removed > 0:
-                    logger.warning(f"⚠️ Cleaned {stale_removed} stale orders for {market} that were filled but missed by WebSocket")
-                    log_trading_event('stale_orders_cleaned', f"Cleaned {stale_removed} stale orders for {market}")
-                else:
-                    logger.debug(f"✅ No stale orders found for {market}")
-                
-        except Exception as e:
-            logger.error(f"Error validating OrderManager state: {e}")
     
     def get_pairing_status(self) -> Dict[str, Any]:
         """Get current pairing system status"""
