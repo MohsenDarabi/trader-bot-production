@@ -1545,7 +1545,12 @@ class DailyRangeBot:
         position_size = balance.get('position_size', 0)
         uncovered = balance.get('uncovered_position', 0)
         
-        if position_size > 0 and uncovered > 0.01:  # Dust threshold to avoid tiny uncovered amounts
+        # Get minimum order amount for this market as dust threshold
+        market_info = self.market_data.get_market_info(market)
+        min_amount = safe_float(market_info.get('min_amount', 0.001))
+        dust_threshold = min_amount * 0.1  # 10% of minimum order as dust threshold
+        
+        if position_size > 0 and uncovered > dust_threshold:
             logger.info(f"⚠️ Position {position_size} not fully covered. Uncovered: {uncovered}")
             # Place sell order for uncovered amount
             self._place_missing_sell_order(market, uncovered, signal)
