@@ -3067,12 +3067,11 @@ class DailyRangeBot:
                             
                             # Set up pairing rules if not already set
                             if market not in self.pairing_manager.pairing_rules:
-                                self.pairing_manager.set_pairing_rule(
+                                self.pairing_manager.configure_pairing_rule(
                                     market=market,
-                                    buy_price=signal.buy_price,
-                                    sell_price=signal.sell_price
+                                    sell_price_levels=[signal.sell_price]
                                 )
-                                logger.info(f"📋 Pairing rule set for startup: Buy=${signal.buy_price:.2f}, Sell=${signal.sell_price:.2f}")
+                                logger.info(f"📋 Pairing rule configured for startup: Sell levels=[${signal.sell_price:.2f}]")
                             
                             await self._place_entry_order(market, 'buy', signal.buy_price, signal)
                             log_trading_event('startup_buy', f"Placed startup buy order for {market}")
