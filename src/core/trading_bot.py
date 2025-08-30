@@ -712,6 +712,41 @@ class DailyRangeBot:
             # else:
             #     logger.warning(f"⚠️ WebSocket not connected - market subscriptions for {market} will be set up on reconnect")
             logger.info(f"🔗 Market WebSocket subscriptions disabled for {market} - using REST API polling")
+            
+            # STARTUP BUY LOGIC: Place first buy order if this is startup and no pending sells from today
+            if not self._startup_cleanup_completed:
+                logger.info("🚀 Market setup complete - checking if startup buy order should be placed...")
+                
+                try:
+                    from src.utils.settlement_handler import is_settlement_period, is_approaching_settlement
+                    
+                    # Skip if in settlement period
+                    if is_settlement_period() or is_approaching_settlement():
+                        logger.info(f"⏳ Skipping startup buy for {market} - settlement period")
+                    else:
+                        # Check for pending sell orders from today
+                        pending_sells_today = self._get_today_pending_sell_orders(market)
+                        
+                        if pending_sells_today > 0:
+                            logger.info(f"📌 {market}: {pending_sells_today} pending sell order(s) from today - skipping startup buy")
+                        else:
+                            # Get or generate today's signal (should already exist from above)
+                            signal = self.strategy.get_current_signal(market)
+                            if not signal:
+                                logger.info(f"📊 Generating signal for {market} during startup...")
+                                signal = self.strategy.generate_daily_signal(market)
+                            
+                            if signal:
+                                logger.info(f"🎯 Placing startup buy order for {market} at ${signal.buy_price:.2f}")
+                                await self._place_entry_order(market, 'buy', signal.buy_price, signal)
+                                log_trading_event('startup_buy', f"Placed startup buy order for {market}")
+                            else:
+                                logger.warning(f"⚠️ Could not generate signal for {market} during startup")
+                                
+                except Exception as e:
+                    logger.error(f"Error placing startup buy for {market}: {e}")
+                
+                logger.info("✅ Startup buy order check completed")
     
     async def execute_trading_cycle(self):
         """Execute one complete trading cycle"""
@@ -2891,7 +2926,7 @@ class DailyRangeBot:
                 logger.debug("Startup cleanup already completed - skipping")
                 return
             
-            from src.utils.settlement_handler import settlement_retry_async, is_settlement_period, is_approaching_settlement
+            from src.utils.settlement_handler import settlement_retry_async
             logger.info("🧹 Starting one-time startup order cleanup...")
             
             total_cancelled = 0
@@ -3000,42 +3035,6 @@ class DailyRangeBot:
                     logger.error(f"Error checking orphaned position for {market}: {e}")
             
             logger.info("✅ Startup order cleanup and orphaned position check completed")
-            
-            # STARTUP BUY LOGIC: Place first buy order if no pending sells from today
-            logger.info("🚀 Checking if startup buy order should be placed...")
-            
-            for market in self.trading_markets:
-                try:
-                    # Skip if in settlement period
-                    if is_settlement_period() or is_approaching_settlement():
-                        logger.info(f"⏳ Skipping startup buy for {market} - settlement period")
-                        continue
-                    
-                    # Check for pending sell orders from today
-                    pending_sells_today = self._get_today_pending_sell_orders(market)
-                    
-                    if pending_sells_today > 0:
-                        logger.info(f"📌 {market}: {pending_sells_today} pending sell order(s) from today - skipping startup buy")
-                        continue
-                    
-                    # Get or generate today's signal
-                    signal = self.strategy.get_current_signal(market)
-                    if not signal:
-                        logger.info(f"📊 Generating signal for {market} during startup...")
-                        signal = self.strategy.generate_daily_signal(market)
-                    
-                    if signal:
-                        current_price = self.market_data.get_current_price(market)
-                        logger.info(f"🎯 Placing startup buy order for {market} at ${signal.buy_price:.2f}")
-                        await self._place_entry_order(market, 'buy', signal.buy_price, signal)
-                        log_trading_event('startup_buy', f"Placed startup buy order for {market}")
-                    else:
-                        logger.warning(f"⚠️ Could not generate signal for {market} during startup")
-                        
-                except Exception as e:
-                    logger.error(f"Error placing startup buy for {market}: {e}")
-            
-            logger.info("✅ Startup buy order check completed")
             
             # Mark startup cleanup as completed (one-time execution)
             self._startup_cleanup_completed = True
