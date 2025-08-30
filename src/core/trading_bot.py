@@ -482,6 +482,26 @@ class DailyRangeBot:
             logger.info("Syncing order tracker...")
             await self.order_tracker.sync_existing_orders()
             
+            # CRITICAL: Load account balance BEFORE startup buy logic
+            logger.info("Loading account balance for startup operations...")
+            try:
+                account_info = self.client.get_account_info()
+                if isinstance(account_info, list):
+                    for asset in account_info:
+                        if asset.get('ccy') == 'USDT':
+                            self.status.account_balance = float(asset.get('available', 0))
+                            logger.info(f"✅ Account balance loaded: ${self.status.account_balance:.2f}")
+                            break
+                    else:
+                        logger.warning("⚠️ USDT balance not found in account info")
+                        self.status.account_balance = 0.0
+                else:
+                    logger.warning("⚠️ Invalid account info format")
+                    self.status.account_balance = 0.0
+            except Exception as e:
+                logger.error(f"❌ Failed to load account balance: {e}")
+                self.status.account_balance = 0.0
+            
             # Check if we're in funding fee settlement period
             from src.utils.settlement_handler import is_settlement_period, wait_for_settlement_end, log_settlement_schedule
             
