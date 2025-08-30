@@ -34,6 +34,51 @@ from src.utils.asset_selector import AssetSelector
 from process_lock import ProcessLock
 
 
+def load_environment_variables():
+    """Load environment variables with priority: market-specific .env files first, then fallback to default .env"""
+    import os
+    from dotenv import load_dotenv
+    from rich.console import Console
+    
+    temp_console = Console()
+    env_files_loaded = []
+    
+    # Priority 1: Check for specific env files based on potential market names
+    specific_env_files = ['.env.ada', '.env.eth', '.env.btc']
+    
+    for env_file in specific_env_files:
+        if os.path.exists(env_file):
+            load_dotenv(env_file, override=True)
+            env_files_loaded.append(env_file)
+            break  # Load only the first found specific env file
+    
+    # Priority 2: Always load default .env as fallback (if it exists and no specific file was loaded)
+    if not env_files_loaded and os.path.exists('.env'):
+        load_dotenv('.env', override=False)  # Don't override if specific file was loaded
+        env_files_loaded.append('.env')
+    elif os.path.exists('.env'):
+        load_dotenv('.env', override=False)  # Load as fallback but don't override
+        env_files_loaded.append('.env (fallback)')
+    
+    # Log which env files were loaded
+    if env_files_loaded:
+        temp_console.print(f"🔧 Loaded environment from: {', '.join(env_files_loaded)}", style="dim cyan")
+        
+        # Validate that we have the required market variable
+        default_market = os.getenv('DEFAULT_TRADING_MARKET')
+        if default_market:
+            temp_console.print(f"📈 DEFAULT_TRADING_MARKET: {default_market}", style="dim cyan")
+        else:
+            temp_console.print("⚠️  WARNING: DEFAULT_TRADING_MARKET not found in environment files", style="yellow")
+    else:
+        temp_console.print("⚠️  WARNING: No .env files found", style="yellow")
+    
+    return env_files_loaded
+
+
+# Load environment variables at startup
+load_environment_variables()
+
 logger = get_logger(__name__)
 console = Console()
 

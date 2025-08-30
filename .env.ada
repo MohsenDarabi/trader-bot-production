@@ -8,5 +8,8 @@ TRADING_MODE=NORMAL
 POSITION_SIZE_MODE=percentage
 LEVERAGE=2.0
 
+# Default Trading Market
+DEFAULT_TRADING_MARKET=ADAUSDT
+
 # Container Settings
 DOCKER_CONTAINER=true
