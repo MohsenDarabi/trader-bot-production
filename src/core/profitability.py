@@ -2,13 +2,17 @@
 Three-Layer Profitability Validation System
 Ensures all trades meet minimum profit requirements
 """
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.data.market_data import MarketDataManager
 from dataclasses import dataclass
 
 from config.settings import (
     MAKER_FEE, TAKER_FEE, MIN_PROFIT_PERCENT, LEVERAGE
 )
 from src.utils.logger import get_logger
+from src.utils.precision_helper import precision_helper
 
 
 logger = get_logger(__name__)
@@ -89,17 +93,22 @@ class ProfitabilityValidator:
     # Layer 2: Price Optimization
     def optimize_prices_for_profit(self, buy_price: float, sell_price: float,
                                  range_value: float, margin: float,
-                                 high: float, low: float) -> Tuple[float, float, bool]:
+                                 high: float, low: float,
+                                 market: Optional[str] = None, 
+                                 market_data: Optional['MarketDataManager'] = None) -> Tuple[float, float, bool]:
         """
-        Layer 2: Optimize prices to meet profit requirements
+        Simple price optimization for profitability
+        If not profitable, symmetrically expand the spread
         
         Args:
             buy_price: Initial buy price
             sell_price: Initial sell price
-            range_value: Calculated range value
+            range_value: Calculated range value (not used as limit)
             margin: User's margin/collateral in USDT
-            high: Previous day high
-            low: Previous day low
+            high: Previous day high (not used as limit)
+            low: Previous day low (not used as limit)
+            market: Market symbol for precision formatting (optional)
+            market_data: Market data manager for getting market info (optional)
             
         Returns:
             Tuple of (optimized_buy_price, optimized_sell_price, was_optimized)
@@ -112,70 +121,61 @@ class ProfitabilityValidator:
             return buy_price, sell_price, False
         
         # Calculate minimum required spread for profitability
-        # NO LIMITS - optimize prices with unlimited range
-        
-        # Calculate required price increase percentage for profitability
-        # Total fees as percentage: taker fee + maker fee  
+        # With leverage, fees, and minimum profit requirement
         total_fee_percent = (self.taker_fee + self.maker_fee) * 100
-        
-        # Required price increase including fees and profit (adjusted for leverage)
         required_price_increase = (self.min_profit_percent + total_fee_percent) / self.leverage
         min_spread_factor = 1 + (required_price_increase / 100)
         
-        # Calculate minimum sell price needed for profitability
-        min_sell_price = buy_price * min_spread_factor
-        
-        if sell_price >= min_sell_price:
-            # Already profitable - no optimization needed
-            return buy_price, sell_price, False
-        
-        # Need to optimize - calculate options with NO LIMITS
-        # Option 1: Keep buy price, increase sell price
-        option1_buy = buy_price
-        option1_sell = min_sell_price
-        
-        # Option 2: Keep sell price, decrease buy price
-        option2_sell = sell_price
-        option2_buy = sell_price / min_spread_factor
-        
-        # Option 3: Symmetric adjustment - expand both directions
-        current_spread = sell_price - buy_price
+        # Calculate required spread in absolute terms
         required_spread = buy_price * (min_spread_factor - 1)
-        expansion_needed = (required_spread - current_spread) / 2
+        current_spread = sell_price - buy_price
         
-        option3_buy = buy_price - expansion_needed
-        option3_sell = sell_price + expansion_needed
+        # How much more spread do we need?
+        spread_deficit = required_spread - current_spread
         
-        # Choose the option that minimizes deviation from original prices
-        # Calculate total deviation for each option
-        dev1 = abs(option1_sell - sell_price)
-        dev2 = abs(option2_buy - buy_price) 
-        dev3 = abs(option3_buy - buy_price) + abs(option3_sell - sell_price)
-        
-        if dev1 <= dev2 and dev1 <= dev3:
-            # Option 1: Keep buy, adjust sell
-            best_buy, best_sell = option1_buy, option1_sell
-            adjustment_type = "increased sell price"
-        elif dev2 <= dev3:
-            # Option 2: Adjust buy, keep sell
-            best_buy, best_sell = option2_buy, option2_sell
-            adjustment_type = "decreased buy price"
-        else:
-            # Option 3: Symmetric adjustment
-            best_buy, best_sell = option3_buy, option3_sell
-            adjustment_type = "symmetric adjustment"
-        
-        # Final validation
-        final_result = self.is_signal_profitable(best_buy, best_sell, margin)
-        if final_result.is_profitable:
-            logger.info(f"✅ Optimized prices for profitability ({adjustment_type}):")
-            logger.info(f"   Original: Buy=${buy_price:.2f}, Sell=${sell_price:.2f}")
-            logger.info(f"   Optimized: Buy=${best_buy:.2f}, Sell=${best_sell:.2f}")
-            logger.info(f"   Expected profit: {final_result.profit_percent:.2f}%")
-            return best_buy, best_sell, True
-        else:
-            logger.error(f"❌ Optimization failed - calculation error")
+        if spread_deficit <= 0:
+            # Should already be profitable (sanity check)
             return buy_price, sell_price, False
+        
+        # Split the deficit equally: buy lower, sell higher
+        adjustment = spread_deficit / 2
+        
+        # Apply symmetric adjustment (NO rounding here - exchange handles it)
+        new_buy = buy_price - adjustment
+        new_sell = sell_price + adjustment
+        
+        # Dynamic precision logging
+        if market and market_data:
+            try:
+                market_info = market_data.get_market_info(market)
+                # Format prices with market-specific precision
+                current_spread_str = precision_helper.format_price(current_spread, market_info, market)
+                required_spread_str = precision_helper.format_price(required_spread, market_info, market)
+                adjustment_str = precision_helper.format_price(adjustment, market_info, market)
+                new_buy_str = precision_helper.format_price(new_buy, market_info, market)
+                new_sell_str = precision_helper.format_price(new_sell, market_info, market)
+                
+                logger.info(f"📊 Price adjustment for profitability:")
+                logger.info(f"   Current spread: ${current_spread_str}")
+                logger.info(f"   Required spread: ${required_spread_str}")
+                logger.info(f"   Adjustment: ±${adjustment_str}")
+                logger.info(f"   New prices: Buy=${new_buy_str}, Sell=${new_sell_str}")
+            except Exception:
+                # Fallback to default formatting if market info not available
+                logger.info(f"📊 Price adjustment for profitability:")
+                logger.info(f"   Current spread: ${current_spread:.4f}")
+                logger.info(f"   Required spread: ${required_spread:.4f}")
+                logger.info(f"   Adjustment: ±${adjustment:.4f}")
+                logger.info(f"   New prices: Buy=${new_buy:.4f}, Sell=${new_sell:.4f}")
+        else:
+            # No market info - use default formatting
+            logger.info(f"📊 Price adjustment for profitability:")
+            logger.info(f"   Current spread: ${current_spread:.4f}")
+            logger.info(f"   Required spread: ${required_spread:.4f}")
+            logger.info(f"   Adjustment: ±${adjustment:.4f}")
+            logger.info(f"   New prices: Buy=${new_buy:.4f}, Sell=${new_sell:.4f}")
+        
+        return new_buy, new_sell, True
     
     # Layer 3: Position Exit Validation
     def is_position_profitable(self, entry_price: float, quantity: float,

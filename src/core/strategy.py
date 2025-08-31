@@ -10,6 +10,7 @@ from src.data.market_data import MarketDataManager
 from src.data.database import DatabaseManager
 from src.core.profitability import ProfitabilityValidator
 from src.utils.logger import get_logger
+from src.utils.precision_helper import precision_helper
 
 
 logger = get_logger(__name__)
@@ -196,13 +197,27 @@ class DailyRangeStrategy:
             
             optimized_buy, optimized_sell, was_optimized = validator.optimize_prices_for_profit(
                 buy_price, sell_price, range_value, typical_margin,
-                ohlc['high'], ohlc['low']
+                ohlc['high'], ohlc['low'],
+                market=market, market_data=self.market_data
             )
             
             if was_optimized:
-                logger.info(f"🎯 Signal prices optimized for {market}:")
-                logger.info(f"   Original: Buy=${buy_price:.4f}, Sell=${sell_price:.4f}")
-                logger.info(f"   Optimized: Buy=${optimized_buy:.4f}, Sell=${optimized_sell:.4f}")
+                try:
+                    market_info = self.market_data.get_market_info(market)
+                    orig_buy_str = precision_helper.format_price(buy_price, market_info, market)
+                    orig_sell_str = precision_helper.format_price(sell_price, market_info, market)
+                    opt_buy_str = precision_helper.format_price(optimized_buy, market_info, market)
+                    opt_sell_str = precision_helper.format_price(optimized_sell, market_info, market)
+                    
+                    logger.info(f"🎯 Signal prices optimized for {market}:")
+                    logger.info(f"   Original: Buy=${orig_buy_str}, Sell=${orig_sell_str}")
+                    logger.info(f"   Optimized: Buy=${opt_buy_str}, Sell=${opt_sell_str}")
+                except Exception:
+                    # Fallback to fixed precision
+                    logger.info(f"🎯 Signal prices optimized for {market}:")
+                    logger.info(f"   Original: Buy=${buy_price:.4f}, Sell=${sell_price:.4f}")
+                    logger.info(f"   Optimized: Buy=${optimized_buy:.4f}, Sell=${optimized_sell:.4f}")
+                
                 buy_price = optimized_buy
                 sell_price = optimized_sell
             else:
@@ -226,11 +241,21 @@ class DailyRangeStrategy:
             # Save signal to database for persistence
             self._save_signal_to_database(signal)
             
-            logger.info(f"Generated signal for {market} on {today}: "
-                       f"Buy=${buy_price:.2f}, Sell=${sell_price:.2f}")
-            
-            # Enhanced daily signal display
-            logger.info(f"📊 Daily Trading Signals for {market}: Buy=${buy_price:.4f} | Sell=${sell_price:.4f} | Range=${range_value:.4f}")
+            # Enhanced daily signal display with dynamic precision
+            try:
+                market_info = self.market_data.get_market_info(market)
+                buy_str = precision_helper.format_price(buy_price, market_info, market)
+                sell_str = precision_helper.format_price(sell_price, market_info, market)
+                range_str = precision_helper.format_price(range_value, market_info, market)
+                
+                logger.info(f"Generated signal for {market} on {today}: "
+                           f"Buy=${buy_str}, Sell=${sell_str}")
+                logger.info(f"📊 Daily Trading Signals for {market}: Buy=${buy_str} | Sell=${sell_str} | Range=${range_str}")
+            except Exception:
+                # Fallback to fixed precision
+                logger.info(f"Generated signal for {market} on {today}: "
+                           f"Buy=${buy_price:.2f}, Sell=${sell_price:.2f}")
+                logger.info(f"📊 Daily Trading Signals for {market}: Buy=${buy_price:.4f} | Sell=${sell_price:.4f} | Range=${range_value:.4f}")
             
             return signal
             
