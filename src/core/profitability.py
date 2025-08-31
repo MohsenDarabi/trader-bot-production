@@ -42,33 +42,32 @@ class ProfitabilityValidator:
     
     # Layer 1: Signal Profitability
     def is_signal_profitable(self, buy_price: float, sell_price: float,
-                           position_size: float) -> ProfitabilityResult:
+                           margin: float) -> ProfitabilityResult:
         """
         Layer 1: Check if a trading signal can be profitable
         
         Args:
             buy_price: Planned entry price
             sell_price: Planned exit price
-            position_size: Position size in USDT
+            margin: User's margin/collateral in USDT
             
         Returns:
             ProfitabilityResult with validation details
         """
         # Calculate with leverage
-        actual_capital = position_size  # User's capital
-        leveraged_amount = position_size * self.leverage
-        quantity = leveraged_amount / buy_price
+        notional_value = margin * self.leverage  # Total position value with leverage
+        quantity = notional_value / buy_price
         
         # Calculate fees
-        buy_fees = actual_capital * self.taker_fee  # Pay fee on actual capital
+        buy_fees = margin * self.taker_fee  # Pay fee on margin
         sell_revenue = quantity * sell_price
         sell_fees = sell_revenue * self.maker_fee
         total_fees = buy_fees + sell_fees
         
         # Calculate profit
-        gross_profit = sell_revenue - leveraged_amount
+        gross_profit = sell_revenue - notional_value
         net_profit = gross_profit - total_fees
-        profit_percent = (net_profit / actual_capital) * 100
+        profit_percent = (net_profit / margin) * 100
         
         # Check profitability
         is_profitable = profit_percent >= self.min_profit_percent
@@ -91,7 +90,7 @@ class ProfitabilityValidator:
     
     # Layer 2: Price Optimization
     def optimize_prices_for_profit(self, buy_price: float, sell_price: float,
-                                 range_value: float, position_size: float,
+                                 range_value: float, margin: float,
                                  high: float, low: float) -> Tuple[float, float, bool]:
         """
         Layer 2: Optimize prices to meet profit requirements
@@ -100,7 +99,7 @@ class ProfitabilityValidator:
             buy_price: Initial buy price
             sell_price: Initial sell price
             range_value: Calculated range value
-            position_size: Position size in USDT
+            margin: User's margin/collateral in USDT
             high: Previous day high
             low: Previous day low
             
@@ -108,7 +107,7 @@ class ProfitabilityValidator:
             Tuple of (optimized_buy_price, optimized_sell_price, was_optimized)
         """
         # First check if current prices are profitable
-        result = self.is_signal_profitable(buy_price, sell_price, position_size)
+        result = self.is_signal_profitable(buy_price, sell_price, margin)
         
         if result.is_profitable:
             logger.debug("Prices already profitable, no optimization needed")
@@ -116,8 +115,7 @@ class ProfitabilityValidator:
         
         # Calculate required price spread for profitability
         # Work backwards from profit requirement
-        actual_capital = position_size
-        min_net_profit = actual_capital * (self.min_profit_percent / 100)
+        min_net_profit = margin * (self.min_profit_percent / 100)
         
         # Try different range expansions
         max_expansion = range_value * (self.max_range_deviation / 100)
@@ -139,7 +137,7 @@ class ProfitabilityValidator:
             test_sell = min(test_sell, high * 1.005)  # 0.5% buffer
             
             # Test profitability
-            test_result = self.is_signal_profitable(test_buy, test_sell, position_size)
+            test_result = self.is_signal_profitable(test_buy, test_sell, margin)
             
             if test_result.is_profitable:
                 best_buy = test_buy
