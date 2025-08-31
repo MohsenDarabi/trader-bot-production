@@ -29,7 +29,6 @@ LEVERAGE = 2.0  # 2x leverage on positions
 MAKER_FEE = 0.001  # 0.1% maker fee
 TAKER_FEE = 0.001  # 0.1% taker fee
 MIN_PROFIT_PERCENT = 1.2  # 1.2% minimum profit after fees
-MAX_RANGE_DEVIATION = 10.0  # Max 10% range expansion allowed
 
 # Risk Management
 TRADING_MODE = os.getenv('TRADING_MODE', 'TEST')  # TEST or NORMAL

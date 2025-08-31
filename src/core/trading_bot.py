@@ -24,7 +24,7 @@ from src.utils.logger import get_logger
 from src.utils.smart_logging import log_trading_event, force_log_summaries
 from config.settings import (
     SIGNAL_GENERATION_TIME, TIMEZONE, is_test_mode, 
-    MIN_PROFIT_PERCENT, MAX_RANGE_DEVIATION
+    MIN_PROFIT_PERCENT
 )
 from src.utils.safe_conversions import safe_float, safe_int, safe_str_format
 
