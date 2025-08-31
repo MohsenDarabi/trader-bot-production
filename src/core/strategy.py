@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from config.settings import RANGE_DIVISOR, MAKER_FEE, TAKER_FEE
 from src.data.market_data import MarketDataManager
 from src.data.database import DatabaseManager
+from src.core.profitability import ProfitabilityValidator
 from src.utils.logger import get_logger
 
 
@@ -188,6 +189,25 @@ class DailyRangeStrategy:
                 ohlc['low']
             )
             
+            # Optimize prices for profitability with NO LIMITS
+            validator = ProfitabilityValidator()
+            # Use a typical margin for validation (can be adjusted)
+            typical_margin = 100.0  # $100 USDT typical position
+            
+            optimized_buy, optimized_sell, was_optimized = validator.optimize_prices_for_profit(
+                buy_price, sell_price, range_value, typical_margin,
+                ohlc['high'], ohlc['low']
+            )
+            
+            if was_optimized:
+                logger.info(f"🎯 Signal prices optimized for {market}:")
+                logger.info(f"   Original: Buy=${buy_price:.4f}, Sell=${sell_price:.4f}")
+                logger.info(f"   Optimized: Buy=${optimized_buy:.4f}, Sell=${optimized_sell:.4f}")
+                buy_price = optimized_buy
+                sell_price = optimized_sell
+            else:
+                logger.info(f"✅ Signal prices already profitable for {market}")
+            
             # Create signal
             signal = TradingSignal(
                 market=market,
@@ -268,6 +288,25 @@ class DailyRangeStrategy:
                 ohlc['high'], 
                 ohlc['low']
             )
+            
+            # Optimize prices for profitability with NO LIMITS
+            validator = ProfitabilityValidator()
+            # Use a typical margin for validation (can be adjusted)
+            typical_margin = 100.0  # $100 USDT typical position
+            
+            optimized_buy, optimized_sell, was_optimized = validator.optimize_prices_for_profit(
+                buy_price, sell_price, range_value, typical_margin,
+                ohlc['high'], ohlc['low']
+            )
+            
+            if was_optimized:
+                logger.info(f"🎯 Hourly signal prices optimized for {market}:")
+                logger.info(f"   Original: Buy=${buy_price:.4f}, Sell=${sell_price:.4f}")
+                logger.info(f"   Optimized: Buy=${optimized_buy:.4f}, Sell=${optimized_sell:.4f}")
+                buy_price = optimized_buy
+                sell_price = optimized_sell
+            else:
+                logger.info(f"✅ Hourly signal prices already profitable for {market}")
             
             # Create signal with hour_key
             signal = TradingSignal(
