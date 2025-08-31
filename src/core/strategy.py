@@ -393,31 +393,31 @@ class DailyRangeStrategy:
         return should_sell
     
     def calculate_expected_profit(self, buy_price: float, sell_price: float,
-                                position_size: float) -> Dict[str, float]:
+                                margin: float) -> Dict[str, float]:
         """
         Calculate expected profit for a trade
         
         Args:
             buy_price: Entry price
             sell_price: Exit price
-            position_size: Position size in USDT
+            margin: User's margin/collateral in USDT
             
         Returns:
             Dictionary with profit calculations
         """
         # Calculate quantities
-        buy_quantity = position_size / buy_price
+        buy_quantity = margin / buy_price
         
         # Calculate fees
-        buy_fee = position_size * TAKER_FEE
+        buy_fee = margin * TAKER_FEE
         sell_revenue = buy_quantity * sell_price
         sell_fee = sell_revenue * MAKER_FEE
         total_fees = buy_fee + sell_fee
         
         # Calculate profit
-        gross_profit = sell_revenue - position_size
+        gross_profit = sell_revenue - margin
         net_profit = gross_profit - total_fees
-        profit_percent = (net_profit / position_size) * 100
+        profit_percent = (net_profit / margin) * 100
         
         return {
             'gross_profit': gross_profit,
