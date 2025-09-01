@@ -51,8 +51,8 @@ class Order:
     status: OrderStatus
     exchange_order_id: Optional[int] = None
     filled_amount: float = 0.0
-    created_at: datetime = None
-    updated_at: datetime = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     
     def __post_init__(self):
         if self.created_at is None:

@@ -3,12 +3,10 @@ Daily Range Accumulation Trading Bot Core
 Orchestrates all trading components and executes the strategy
 """
 import asyncio
-import os
-from datetime import datetime, timezone, time, timedelta
+from datetime import datetime, timezone, time
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
-from src.exchange.coinex_client import CoinExClient
 from src.exchange.exchange_factory import ExchangeFactory
 from src.exchange.order_manager import OrderManager, OrderStatus
 from src.exchange.websocket_client import CoinExWebSocketClient
@@ -21,11 +19,8 @@ from src.data.websocket_market_data import WebSocketMarketDataProvider
 from src.core.strategy import DailyRangeStrategy, TradingSignal
 from src.core.position_sizing import PositionSizer
 from src.utils.logger import get_logger
-from src.utils.smart_logging import log_trading_event, force_log_summaries
-from config.settings import (
-    SIGNAL_GENERATION_TIME, TIMEZONE, is_test_mode, 
-    MIN_PROFIT_PERCENT
-)
+from src.utils.smart_logging import log_trading_event
+from config.settings import SIGNAL_GENERATION_TIME
 from src.utils.safe_conversions import safe_float, safe_int, safe_str_format
 
 
@@ -392,8 +387,8 @@ class DailyRangeBot:
             # Set WebSocket provider reference for enhanced availability monitoring
             self.market_data.set_websocket_provider(self.websocket_market_data)
             
-            # DISABLED: WebSocket connection - using REST API only for reliability
-            logger.info("WebSocket disabled - using REST API polling for order tracking...")
+            # DISABLED: WebSocket connection - using REST API polling with WebSocket infrastructure for compatibility
+            logger.info("WebSocket connection disabled - using REST API polling with WebSocket client for order tracking compatibility")
             
             # # Connect and authenticate WebSocket (same pattern as working tests)
             # connected = await self.websocket_client.connect()
@@ -407,31 +402,21 @@ class DailyRangeBot:
             #     raise Exception("Failed to authenticate WebSocket")
             # logger.info("✓ WebSocket authenticated")
             
-            # DISABLED: WebSocket handlers and subscriptions - using REST API only
-            # self.websocket_client.register_handler(
-            #     "state.update", 
-            #     self.websocket_market_data.handle_state_update
-            # )
-            # self.websocket_client.register_handler(
-            #     "balance.update",
-            #     self._handle_balance_update
-            # )
-            # self.websocket_client.register_handler(
-            #     "position.update",
-            #     self._handle_position_update
-            # )
-            # self.websocket_client.register_handler(
-            #     "order.update",
-            #     self._handle_order_update
-            # )
-            # self.websocket_client.register_handler(
-            #     "user_deals.update",
-            #     self._handle_user_deals_update
-            # )
-            # 
-            # # Subscribe to balance updates for real-time account balance (no market filter needed)
+            # DISABLED: WebSocket handlers and subscriptions - functionality replaced with REST API polling
+            # Real-time updates from WebSocket handlers have been replaced with periodic REST API checks:
+            # - Balance updates: handled in _update_account_status() every 2 minutes
+            # - Position updates: handled in _sync_positions() every 1 minute  
+            # - Order updates: handled by OrderManager.update_order_status() during sync
+            # - User deals (fills): handled by _check_for_completed_sell_orders() every 1 minute
+            # - Market state: handled by MarketDataManager via REST API
+            #
+            # self.websocket_client.register_handler("state.update", self.websocket_market_data.handle_state_update)
+            # self.websocket_client.register_handler("balance.update", self._handle_balance_update)
+            # self.websocket_client.register_handler("position.update", self._handle_position_update) 
+            # self.websocket_client.register_handler("order.update", self._handle_order_update)
+            # self.websocket_client.register_handler("user_deals.update", self._handle_user_deals_update)
             # await self.websocket_client.subscribe_balance(["USDT"])
-            logger.info("✓ WebSocket handlers and subscriptions disabled - using REST API polling")
+            logger.info("✓ WebSocket handlers disabled - equivalent functionality provided via REST API polling")
             
             # Note: Market-specific subscriptions (orders, user_deals, market_state, positions) 
             # will be set up in set_trading_market() after market is selected
@@ -445,7 +430,6 @@ class DailyRangeBot:
             logger.info("Initializing bot and cleaning stale orders...")
             self._last_trading_day = datetime.now(timezone.utc).date()
             if self.trading_markets:
-                total_cleaned = 0
                 for market in self.trading_markets:
                     # REMOVED: Cache update - now using direct exchange queries
                     logger.info(f"✅ Bot startup completed for {market}")
@@ -489,7 +473,7 @@ class DailyRangeBot:
                 if isinstance(account_info, list):
                     for asset in account_info:
                         if asset.get('ccy') == 'USDT':
-                            self.status.account_balance = float(asset.get('available', 0))
+                            self.status.account_balance = safe_float(asset.get('available', 0))
                             logger.info(f"✅ Account balance loaded: ${self.status.account_balance:.2f}")
                             break
                     else:
@@ -680,11 +664,15 @@ class DailyRangeBot:
             # Get current trading signal to configure pairing rule (after generation)
             current_signal = self.strategy.get_current_signal(market)
             if current_signal:
+                # Get market-specific minimum amount
+                market_info = self.market_data.get_market_info(market)
+                min_fill_amount = safe_float(market_info.get('min_amount', 0.001))
+                
                 # Configure pairing rules with current signal's sell price
                 self.pairing_manager.configure_pairing_rule(
                     market=market,
                     sell_price_levels=[current_signal.sell_price],  # Use today's strategy sell price
-                    min_fill_amount=0.001  # Minimum fill to trigger sell orders
+                    min_fill_amount=min_fill_amount  # Dynamic minimum fill amount from exchange
                 )
                 logger.info(f"Configured pairing rules for {market} with sell price ${current_signal.sell_price:.2f}")
             else:
@@ -698,11 +686,15 @@ class DailyRangeBot:
                 
                 if forced_signal:
                     logger.info(f"✅ Forced signal generation successful for {market}")
+                    # Get market-specific minimum amount
+                    market_info = self.market_data.get_market_info(market)
+                    min_fill_amount = safe_float(market_info.get('min_amount', 0.001))
+                    
                     # Configure pairing rules with forced signal
                     self.pairing_manager.configure_pairing_rule(
                         market=market,
                         sell_price_levels=[forced_signal.sell_price],
-                        min_fill_amount=0.001
+                        min_fill_amount=min_fill_amount
                     )
                     logger.info(f"Configured pairing rules for {market} with forced signal sell price ${forced_signal.sell_price:.2f}")
                 else:
@@ -738,7 +730,7 @@ class DailyRangeBot:
             #     logger.info(f"🔗 All WebSocket subscriptions configured for {market}")
             # else:
             #     logger.warning(f"⚠️ WebSocket not connected - market subscriptions for {market} will be set up on reconnect")
-            logger.info(f"🔗 Market WebSocket subscriptions disabled for {market} - using REST API polling")
+            logger.info(f"🔗 Market WebSocket subscriptions disabled for {market} - equivalent functionality via REST API polling")
     
     async def execute_trading_cycle(self):
         """Execute one complete trading cycle"""
@@ -850,10 +842,14 @@ class DailyRangeBot:
                 
                 # Update pairing rule with new signal's sell price
                 if self.pairing_manager:
+                    # Get market-specific minimum amount
+                    market_info = self.market_data.get_market_info(market)
+                    min_fill_amount = safe_float(market_info.get('min_amount', 0.001))
+                    
                     self.pairing_manager.configure_pairing_rule(
                         market=market,
                         sell_price_levels=[signal.sell_price],  # Use new signal's sell price
-                        min_fill_amount=0.001  # Minimum fill to trigger sell orders
+                        min_fill_amount=min_fill_amount  # Dynamic minimum fill amount from exchange
                     )
                     logger.info(f"Updated pairing rule for {market} with new sell price ${signal.sell_price:.2f}")
             else:
@@ -870,8 +866,8 @@ class DailyRangeBot:
                 if not current_price:
                     return
                 
-                # Determine exit price based on position side
-                exit_price = signal.sell_price if position.side.value == 'buy' else signal.buy_price
+                # Always use sell price for exits (long-only strategy)
+                exit_price = signal.sell_price
                 
                 # Validate profitability
                 validator = ProfitabilityValidator()
@@ -965,7 +961,6 @@ class DailyRangeBot:
             # CRITICAL FIX: Clean up duplicate orders before checking if we should place buy
             buy_status = self._get_exchange_buy_status(market)
             total_buy_orders = buy_status.get('total_buy_orders', 0)
-            all_buy_orders = buy_status.get('all_buy_orders', [])
             
             # Check if we need cleanup (only for multiple orders - NOT age-based)
             needs_cleanup = False
@@ -1015,7 +1010,7 @@ class DailyRangeBot:
         try:
             # Force sync with exchange to ensure fresh data and cleanup stale orders
             log_trading_event('buy_status_sync', f"Forcing order sync with exchange for {market}")
-            sync_count = self.order_manager.load_existing_orders(market)
+            self.order_manager.load_existing_orders(market)
             
             # Get all pending buy orders using proven endpoint
             pending_orders = self.order_manager.get_pending_orders(market)
@@ -1430,7 +1425,7 @@ class DailyRangeBot:
             # Return 1 to be safe - block new buy orders if we can't determine state
             return 1
     
-    def _should_place_buy_order(self, market: str, signal: TradingSignal, current_price: float) -> bool:
+    def _should_place_buy_order(self, market: str, signal: TradingSignal, _current_price: float) -> bool:
         """Buy order decision using fresh exchange data with day-start cancellation and funding fee protection"""
         
         # CRITICAL PHASE 0: Signal availability check
@@ -1593,6 +1588,7 @@ class DailyRangeBot:
         # Continue with remaining safety checks from original code
         exchange_state = self._get_exchange_position_and_orders_direct(market)
         pending_buy_orders = exchange_state['today_buy_orders']
+        pending_sell_orders = exchange_state['today_sell_orders'] + exchange_state['old_sell_orders']
         
         # Final safety check for pending buy orders
         if pending_buy_orders:
@@ -1886,7 +1882,7 @@ class DailyRangeBot:
             
             # Verify cleanup results with fresh sync
             logger.info(f"🔍 Verifying cleanup results for {market}")
-            final_sync_count = self.order_manager.load_existing_orders(market)
+            self.order_manager.load_existing_orders(market)
             final_pending_orders = self.order_manager.get_pending_orders(market)
             final_buy_orders = [o for o in final_pending_orders if o.side.value == 'buy']
             
@@ -2378,9 +2374,10 @@ class DailyRangeBot:
         except Exception as e:
             logger.error(f"Error handling order update: {e}")
     
-    def _handle_user_deals_update(self, data: Dict[str, Any]):
-        """Handle user_deals.update message from WebSocket with comprehensive state updates"""
-        try:
+    # DISABLED: WebSocket handler - replaced with REST API polling in _check_for_completed_sell_orders()
+    # def _handle_user_deals_update(self, data: Dict[str, Any]):
+    #     """Handle user_deals.update message from WebSocket with comprehensive state updates"""
+    #     try:
             deals = data.get("user_deals", [])
             if not deals:
                 return
@@ -2918,7 +2915,6 @@ class DailyRangeBot:
                 logger.debug("Startup cleanup already completed - skipping")
                 return
             
-            from src.utils.settlement_handler import settlement_retry_async
             logger.info("🧹 Starting one-time startup order cleanup...")
             
             total_cancelled = 0
@@ -2958,7 +2954,6 @@ class DailyRangeBot:
                 # Process each market
                 for market, orders in orders_by_market.items():
                     buy_orders = orders['buy']
-                    sell_orders = orders['sell']
                     
                     market_cancelled = 0
                     
@@ -3087,9 +3082,14 @@ class DailyRangeBot:
                             
                             # Set up pairing rules if not already set
                             if market not in self.pairing_manager.pairing_rules:
+                                # Get market-specific minimum amount
+                                market_info = self.market_data.get_market_info(market)
+                                min_fill_amount = safe_float(market_info.get('min_amount', 0.001))
+                                
                                 self.pairing_manager.configure_pairing_rule(
                                     market=market,
-                                    sell_price_levels=[signal.sell_price]
+                                    sell_price_levels=[signal.sell_price],
+                                    min_fill_amount=min_fill_amount
                                 )
                                 logger.info(f"📋 Pairing rule configured for startup: Sell levels=[${signal.sell_price:.2f}]")
                             
@@ -3131,7 +3131,7 @@ class DailyRangeBot:
                 if isinstance(account_info, list):
                     for asset in account_info:
                         if asset.get('ccy') == 'USDT':
-                            self.status.account_balance = float(asset.get('available', 0))
+                            self.status.account_balance = safe_float(asset.get('available', 0))
                             logger.info(f"HTTP balance update: ${self.status.account_balance:.2f}")
                             break
             
@@ -3145,13 +3145,10 @@ class DailyRangeBot:
     async def _sync_positions(self):
         """Sync positions with exchange (periodic fallback for WebSocket)"""
         try:
-            # Check for WebSocket reconnections that might have caused missed events
-            ws_reconnected = self._detect_websocket_reconnection()
-            if ws_reconnected:
-                logger.warning("WebSocket reconnection detected - performing thorough state validation")
+            # WebSocket is disabled - no reconnection detection needed
             
-            # Log that we're doing periodic sync - should be rare with WebSocket
-            logger.info("Performing periodic position sync via HTTP (WebSocket fallback)")
+            # Periodic sync using REST API (WebSocket disabled)
+            logger.info("Performing periodic position sync via REST API")
             
             self.position_manager.sync_with_exchange()
             
@@ -3162,6 +3159,9 @@ class DailyRangeBot:
             logger.info("Syncing existing orders from exchange...")
             orders_synced = self.order_manager.load_existing_orders()
             logger.info(f"Synced {orders_synced} existing orders")
+            
+            # Check for completed sell orders to detect cycle completion
+            self._check_for_completed_sell_orders()
             
             # Using fresh exchange data - no validation needed
             
@@ -3177,39 +3177,54 @@ class DailyRangeBot:
         except Exception as e:
             logger.error(f"Error syncing with exchange: {e}")
     
-    def _detect_websocket_reconnection(self) -> bool:
-        """Detect if WebSocket has reconnected since last check"""
+    def _check_for_completed_sell_orders(self):
+        """Check for completed sell orders and set cycle completion flags"""
         try:
-            if not self.websocket_client:
-                return False
-                
-            current_connected = self.websocket_client.is_connected
-            current_authenticated = self.websocket_client.is_authenticated
+            today = datetime.now(timezone.utc).date()
+            completed_sells = []
             
-            # Check if connection state changed from disconnected to connected
-            reconnected = (
-                self._ws_connection_state['last_connected'] is False and
-                current_connected is True
-            )
+            # Check all active orders for completed sells
+            for client_id, order in list(self.order_manager.active_orders.items()):
+                if order.side == OrderSide.SELL:
+                    # Store order data before status update (to avoid race condition)
+                    order_market = order.market
+                    order_created_at = order.created_at
+                    
+                    # Update order status from exchange
+                    updated_order = self.order_manager.update_order_status(client_id)
+                    
+                    # Check if order was completed and removed during status update
+                    if updated_order is None or client_id not in self.order_manager.active_orders:
+                        # Order was removed, meaning it was FILLED or CANCELLED
+                        # Check if this was a sell order from today
+                        order_date = order_created_at.date()
+                        is_today = order_date == today
+                        is_orphaned = "_OS_" in client_id
+                        
+                        if is_today and not is_orphaned:
+                            # Set cycle completion flag
+                            self._cycle_completion_flags[order_market] = True
+                            completed_sells.append(order)
+                            
+                            logger.info(f"🔄 Cycle completion flag set for {order_market} - sell order {client_id} from today completed")
+                            log_trading_event('cycle_complete', f"Cycle completion detected for {order_market} - sell order from today filled via REST API")
+                        elif is_today and is_orphaned:
+                            logger.info(f"📌 Orphaned sell order {client_id} completed for {order_market} - no cycle completion triggered")
+                        elif not is_today:
+                            logger.debug(f"Sell order {client_id} from {order_date} completed - not today, no cycle completion")
             
-            # Update state tracking
-            if self._ws_connection_state['last_connected'] != current_connected:
-                logger.info(f"WebSocket connection state changed: {self._ws_connection_state['last_connected']} -> {current_connected}")
-                self._ws_connection_state['last_connected'] = current_connected
+            if completed_sells:
+                logger.info(f"✅ Detected {len(completed_sells)} completed sell orders from today")
                 
-            if self._ws_connection_state['last_authenticated'] != current_authenticated:
-                logger.info(f"WebSocket authentication state changed: {self._ws_connection_state['last_authenticated']} -> {current_authenticated}")
-                self._ws_connection_state['last_authenticated'] = current_authenticated
-                
-            if reconnected:
-                self._ws_connection_state['reconnection_count'] += 1
-                logger.warning(f"WebSocket reconnection #{self._ws_connection_state['reconnection_count']} detected")
-                
-            return reconnected
-            
         except Exception as e:
-            logger.error(f"Error detecting WebSocket reconnection: {e}")
-            return False
+            logger.error(f"Error checking for completed sell orders: {e}")
+    
+    def _detect_websocket_reconnection(self) -> bool:
+        """WebSocket is disabled - always returns False
+        
+        Kept for compatibility with other components that may expect this method.
+        """
+        return False
     
     async def _get_exchange_orders_with_retry(self, market: str, max_retries: int = 3):
         """Get exchange orders with retry logic for reliability"""
