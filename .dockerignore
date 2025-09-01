@@ -67,3 +67,29 @@ temp/
 *.tar.gz
 *.tar
 *.zip
+
+# Virtual environment directories (massive space waste in Docker)
+lib/
+bin/
+include/
+pyvenv.cfg
+share/
+
+# SSH keys and deployment scripts
+*.key
+*.key.pub
+deploy*.sh
+remote_restart.sh
+restart_bots.sh
+
+# Test and check scripts
+check_*.py
+test_*.py
+eth_bot_logs*.txt
+
+# Storage and database (will be mounted as volumes)
+storage/
+
+# Additional environment files
+.env.*
+!.env.example

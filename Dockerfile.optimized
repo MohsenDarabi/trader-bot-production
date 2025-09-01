@@ -1,0 +1,58 @@
+# Multi-stage build for optimized Docker image
+# Stage 1: Build dependencies
+FROM python:3.12-slim as builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy production requirements
+COPY requirements-prod.txt .
+
+# Install Python packages to user location
+RUN pip install --user --no-cache-dir -r requirements-prod.txt
+
+# Stage 2: Runtime image
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Copy Python packages from builder stage
+COPY --from=builder /root/.local /root/.local
+
+# Add local bin to PATH
+ENV PATH=/root/.local/bin:$PATH
+
+# Copy only necessary application files (leveraging .dockerignore)
+COPY main.py .
+COPY entrypoint.sh .
+COPY process_lock.py .
+COPY src/ ./src/
+COPY config/ ./config/
+
+# Create necessary directories with proper permissions
+RUN mkdir -p logs storage && \
+    chmod 777 logs storage
+
+# Make entrypoint executable
+RUN chmod +x entrypoint.sh || true
+
+# Create non-root user
+RUN useradd -m botuser && \
+    chown -R botuser:botuser /app
+USER botuser
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV BOT_INSTANCE=production
+ENV DOCKER_CONTAINER=true
+
+# Create volume mount points
+VOLUME ["/app/logs", "/app/storage"]
+
+# Use entrypoint for proper signal handling
+ENTRYPOINT ["./entrypoint.sh"]
