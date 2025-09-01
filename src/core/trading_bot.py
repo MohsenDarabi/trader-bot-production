@@ -1575,7 +1575,7 @@ class DailyRangeBot:
         if position_size > 0 and uncovered > dust_threshold:
             logger.info(f"⚠️ Position {position_size} not fully covered. Uncovered: {uncovered}")
             # Place sell order for uncovered amount
-            self._place_missing_sell_order(market, uncovered, signal)
+            self._place_missing_sell_order(market, uncovered)
             return False  # Don't buy this cycle
         
         # Clear cycle completion flag after using it
