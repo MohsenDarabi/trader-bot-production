@@ -3058,16 +3058,11 @@ class DailyRangeBot:
                     signal = self.strategy.get_current_signal(market)
                     if not signal:
                         logger.info(f"📊 Generating signal for {market} during startup...")
-                        # Ensure OHLC data is loaded before signal generation
-                        ohlc_data = self.market_data.get_ohlc_data(market)
-                        if not ohlc_data:
-                            logger.info(f"📈 Fetching OHLC data for {market}...")
-                            ohlc_data = self.market_data.fetch_ohlc_data(market)
-                        
-                        if ohlc_data:
+                        # Generate signal (will fetch OHLC data internally)
+                        try:
                             signal = self.strategy.generate_daily_signal(market)
-                        else:
-                            logger.warning(f"⚠️ Could not fetch OHLC data for {market} - skipping startup buy")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Could not generate signal for {market}: {e} - skipping startup buy")
                             continue
                     
                     if signal:
