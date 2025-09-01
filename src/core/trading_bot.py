@@ -1590,7 +1590,7 @@ class DailyRangeBot:
         if position_size > 0 and uncovered > self.min_order_size:
             logger.info(f"⚠️ Position {position_size} not fully covered. Uncovered: {uncovered}")
             # Place sell order for uncovered amount
-            self._place_missing_sell_order(market, uncovered, signal)
+            self._place_missing_sell_order(market, uncovered)
             return False  # Don't buy this cycle
         
         # Clear cycle completion flag after using it
@@ -3096,6 +3096,9 @@ class DailyRangeBot:
             orders_synced = self.order_manager.load_existing_orders()
             logger.info(f"Synced {orders_synced} existing orders")
             
+            # Check for completed sell orders to set cycle completion flags
+            self._check_for_completed_sell_orders()
+            
             # Using fresh exchange data - no validation needed
             
             # Enhanced position sync logging with details
@@ -3109,6 +3112,44 @@ class DailyRangeBot:
             
         except Exception as e:
             logger.error(f"Error syncing with exchange: {e}")
+    
+    def _check_for_completed_sell_orders(self):
+        """Check for completed sell orders and set cycle completion flags"""
+        try:
+            today = datetime.now(timezone.utc).date()
+            completed_sells = []
+            
+            # Check all active orders for completed sells
+            for client_id, order in list(self.order_manager.active_orders.items()):
+                if order.side == OrderSide.SELL:
+                    # Store order data before status update (to avoid race condition)
+                    order_market = order.market
+                    order_created_at = order.created_at
+                    
+                    # Update order status from exchange
+                    updated_order = self.order_manager.update_order_status(client_id)
+                    
+                    # Check if order was completed and removed during status update
+                    if updated_order is None or client_id not in self.order_manager.active_orders:
+                        # Order was removed, meaning it was FILLED or CANCELLED
+                        # Check if this was a sell order from today
+                        order_date = order_created_at.date()
+                        is_today = order_date == today
+                        is_orphaned = "_OS_" in client_id
+                        
+                        if is_today and not is_orphaned:
+                            # Set cycle completion flag
+                            self._cycle_completion_flags[order_market] = True
+                            completed_sells.append(order)
+                            
+                            logger.info(f"🔄 Cycle completion flag set for {order_market} - sell order {client_id} from today completed")
+                            log_trading_event('cycle_complete', f"Cycle completion detected for {order_market} - sell order from today filled via REST API")
+            
+            if completed_sells:
+                logger.info(f"✅ Detected {len(completed_sells)} completed sell orders from today")
+            
+        except Exception as e:
+            logger.error(f"Error checking for completed sell orders: {e}")
     
     def _detect_websocket_reconnection(self) -> bool:
         """Detect if WebSocket has reconnected since last check"""

@@ -1,0 +1,83 @@
+repos:
+  # Python syntax and import checking
+  - repo: https://github.com/PyCQA/pyflakes
+    rev: 3.2.0
+    hooks:
+      - id: pyflakes
+        name: Check for undefined names and imports
+        description: Detects undefined names, unused imports, and syntax errors
+        
+  # Python code style and additional checks
+  - repo: https://github.com/PyCQA/flake8  
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+        name: Code style and error checking
+        description: Checks for PEP 8 compliance and additional errors
+        args: [
+          "--max-line-length=120",
+          "--extend-ignore=E203,W503,E501",  # Allow some formatting flexibility
+          "--exclude=venv,env,lib,include,bin,__pycache__"
+        ]
+
+  # Basic file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-yaml
+        name: Check YAML files
+      - id: check-json
+        name: Check JSON files
+      - id: check-python-syntax
+        name: Check Python syntax
+      - id: check-merge-conflict
+        name: Check for merge conflicts
+      - id: trailing-whitespace
+        name: Remove trailing whitespace
+      - id: end-of-file-fixer
+        name: Fix end of file
+
+  # Import sorting
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        name: Sort imports
+        args: ["--profile", "black", "--line-length=120"]
+
+  # Static type checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.8.0
+    hooks:
+      - id: mypy
+        name: Static type checking
+        description: Detects undefined methods and type errors before runtime
+        args: ["--ignore-missing-imports", "--no-strict-optional"]
+        additional_dependencies: [types-all]
+
+  # Custom validation hooks
+  - repo: local
+    hooks:
+      # API Type Validation
+      - id: api-type-check
+        name: Check API type conversions
+        entry: python scripts/api_type_validator.py
+        language: system
+        files: \.py$
+        pass_filenames: false
+        description: Validates proper handling of API response types (string to float conversions)
+        
+      # Dangerous Code Detection
+      - id: dangerous-code-check
+        name: Check for dangerous code patterns
+        entry: python scripts/dangerous_code_detector.py
+        language: system
+        files: \.py$
+        pass_filenames: false
+        args: ["--block-on", "critical", "--max-issues", "20"]
+        description: Detects TODOs, mock functions, and other dangerous patterns
+
+default_language_version:
+  python: python3.12
+
+fail_fast: false
