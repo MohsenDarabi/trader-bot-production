@@ -492,6 +492,7 @@ build_image_locally() {
 # Enhanced restart function with proper credential handling and verification
 restart_containers() {
     local symbol="$1"
+    local optimization="$2"  # New optimization parameter
     local image_name="ada-bot-fixed:latest"  # Default fallback
     
     # Get the image name from last build
@@ -553,14 +554,32 @@ restart_containers() {
     
     print_status "Starting ${symbol} container with ${env_file}..."
     local market=$(echo "${symbol}" | tr '[:lower:]' '[:upper:]')USDT
-    local container_id=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
-        "cd $VM_DIR && docker run -d --name ${symbol} \
+    
+    # Conditional docker run command based on optimization flag
+    local docker_cmd
+    if [[ "$optimization" == "opt" ]]; then
+        # Optimized image uses ENTRYPOINT, only pass market parameter
+        docker_cmd="cd $VM_DIR && docker run -d --name ${symbol} \
          --env-file ${env_file} \
          --restart always \
          --memory=128m \
          --cpus=0.25 \
          ${image_name} \
-         python main.py ${market}")
+         ${market}"
+        print_status "Using optimized deployment command (entrypoint-based)"
+    else
+        # Standard image, pass full python command
+        docker_cmd="cd $VM_DIR && docker run -d --name ${symbol} \
+         --env-file ${env_file} \
+         --restart always \
+         --memory=128m \
+         --cpus=0.25 \
+         ${image_name} \
+         python main.py ${market}"
+        print_status "Using standard deployment command (direct python)"
+    fi
+    
+    local container_id=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" "${docker_cmd}")
     
     if [[ -n "$container_id" ]]; then
         print_success "${symbol} container started with credentials from ${env_file}"
@@ -631,7 +650,7 @@ execute_deployment() {
         "update")
             print_success "Using local Docker buildx for cross-platform build ($deployment_type)"
             if build_image_locally "$symbol" "$optimization"; then
-                restart_containers "$symbol"
+                restart_containers "$symbol" "$optimization"
                 cleanup_old_vm_images "$symbol"
                 print_success "Deployment completed successfully!"
             else
@@ -640,7 +659,7 @@ execute_deployment() {
             fi
             ;;
         "restart")
-            restart_containers "$symbol"
+            restart_containers "$symbol" "$optimization"
             ;;
     esac
     

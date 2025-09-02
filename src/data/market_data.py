@@ -2,13 +2,12 @@
 Market data fetching and processing for CoinEx futures
 """
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
-import pandas as pd
+from typing import Dict, List, Optional, Tuple, Any
 
 from src.exchange.coinex_client import CoinExClient
 from src.data.websocket_market_data import WebSocketMarketDataProvider
 from src.utils.logger import get_logger
-from src.utils.safe_conversions import safe_float
+from src.utils.safe_conversions import safe_float, safe_int
 
 
 logger = get_logger(__name__)
@@ -86,7 +85,7 @@ class MarketDataManager:
         logger.debug(f"{market} minimum order: {min_amount} @ ${current_price} = ${min_value}")
         return min_value
     
-    def get_daily_candles(self, market: str, days: int = 2) -> pd.DataFrame:
+    def get_daily_candles(self, market: str, days: int = 2) -> List[Dict[str, Any]]:
         """
         Fetch daily OHLC candles
         
@@ -95,7 +94,7 @@ class MarketDataManager:
             days: Number of days to fetch (minimum 2 for previous day calculation)
             
         Returns:
-            DataFrame with OHLC data
+            List of dictionaries with OHLC data, sorted by date descending
         """
         try:
             # Fetch daily candles
@@ -108,26 +107,34 @@ class MarketDataManager:
             if not klines:
                 raise ValueError(f"No candle data available for {market}")
             
-            # Convert to DataFrame
-            df = pd.DataFrame(klines)
-            
             # Ensure we have the required columns
             required_cols = ['created_at', 'open', 'high', 'low', 'close', 'volume']
-            if not all(col in df.columns for col in required_cols):
+            if not klines or not all(col in klines[0] for col in required_cols):
                 raise ValueError(f"Missing required columns in kline data")
             
-            # Convert timestamp to datetime
-            df['date'] = pd.to_datetime(df['created_at'], unit='ms')
+            # Process each kline with safe conversions
+            processed_klines = []
+            for kline in klines:
+                # Convert timestamp to datetime
+                timestamp_ms = safe_int(kline['created_at'])
+                date_obj = datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc)
+                
+                processed_kline = {
+                    'created_at': timestamp_ms,
+                    'date': date_obj,
+                    'open': safe_float(kline['open']),
+                    'high': safe_float(kline['high']),
+                    'low': safe_float(kline['low']),
+                    'close': safe_float(kline['close']),
+                    'volume': safe_float(kline['volume'])
+                }
+                processed_klines.append(processed_kline)
             
-            # Convert price columns to float using safe conversion
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = df[col].apply(safe_float)
+            # Sort by date descending (newest first)
+            processed_klines.sort(key=lambda x: x['created_at'], reverse=True)
             
-            # Sort by date
-            df = df.sort_values('date', ascending=False)
-            
-            logger.info(f"Fetched {len(df)} daily candles for {market}")
-            return df
+            logger.info(f"Fetched {len(processed_klines)} daily candles for {market}")
+            return processed_klines
             
         except Exception as e:
             logger.error(f"Failed to fetch daily candles for {market}: {e}")
@@ -143,21 +150,21 @@ class MarketDataManager:
         Returns:
             Dictionary with open, high, low, close prices
         """
-        df = self.get_daily_candles(market, days=2)
+        klines = self.get_daily_candles(market, days=2)
         
-        if len(df) < 2:
+        if len(klines) < 2:
             raise ValueError(f"Insufficient data for {market}, need at least 2 days")
         
-        # Get previous day (second row, as we sorted descending)
-        prev_day = df.iloc[1]
+        # Get previous day (second item, as we sorted descending)
+        prev_day = klines[1]
         
         ohlc = {
             'date': prev_day['date'].strftime('%Y-%m-%d'),
-            'open': safe_float(prev_day['open']),
-            'high': safe_float(prev_day['high']),
-            'low': safe_float(prev_day['low']),
-            'close': safe_float(prev_day['close']),
-            'volume': safe_float(prev_day['volume'])
+            'open': prev_day['open'],  # Already safe_float converted
+            'high': prev_day['high'],  # Already safe_float converted
+            'low': prev_day['low'],    # Already safe_float converted
+            'close': prev_day['close'], # Already safe_float converted
+            'volume': prev_day['volume'] # Already safe_float converted
         }
         
         logger.info(f"Previous day OHLC for {market} ({ohlc['date']}): "

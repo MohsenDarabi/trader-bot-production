@@ -8,8 +8,7 @@ websocket-client==1.7.0
 websockets==12.0
 python-dotenv==1.0.0
 
-# Data handling - REQUIRED (pandas used in market_data.py)
-pandas==2.1.4
+# Data handling - No external dependencies needed (using plain Python)
 
 # Display and UI
 rich==13.7.0
