@@ -1,0 +1,267 @@
+# CoinEx API Response Schema
+# This file documents the actual response types from CoinEx API endpoints
+# Used for automatic type validation to prevent bugs like treating strings as numbers
+
+api_info:
+  name: "CoinEx Futures API"
+  base_url: "https://api.coinex.com"
+  version: "v2"
+  notes: "Most numeric values are returned as strings and need conversion"
+
+endpoints:
+  # Market information endpoint
+  futures_market:
+    path: "/v2/futures/market"
+    method: "GET"
+    description: "Get futures market information"
+    auth_required: false
+    response_fields:
+      - name: "market"
+        type: "string"
+        converts_to: null
+        example: "BTCUSDT"
+        notes: "Market symbol"
+      - name: "min_amount"
+        type: "string"
+        converts_to: "float"
+        example: "0.001"
+        notes: "Minimum order amount - ALWAYS use safe_float()"
+        validation_pattern: "safe_float\\(.+\\.get\\(['\"]min_amount['\"]"
+      - name: "tick_size"
+        type: "string"
+        converts_to: "float"
+        example: "0.01"
+        notes: "Minimum price increment - ALWAYS use safe_float()"
+        validation_pattern: "safe_float\\(.+\\.get\\(['\"]tick_size['\"]"
+      - name: "amount_precision"
+        type: "integer"
+        converts_to: null
+        example: 6
+        notes: "Number of decimal places for amounts"
+      - name: "price_precision"
+        type: "integer"
+        converts_to: null
+        example: 2
+        notes: "Number of decimal places for prices"
+      - name: "taker_fee_rate"
+        type: "string"
+        converts_to: "float"
+        example: "0.0005"
+        notes: "Taker fee rate - ALWAYS use safe_float()"
+      - name: "maker_fee_rate"
+        type: "string"
+        converts_to: "float"
+        example: "0.0005"
+        notes: "Maker fee rate - ALWAYS use safe_float()"
+
+  # Position information endpoint
+  futures_positions:
+    path: "/v2/futures/pending-position"
+    method: "GET"
+    description: "Get current futures positions"
+    auth_required: true
+    response_fields:
+      - name: "open_interest"
+        type: "string"
+        converts_to: "float"
+        example: "0.001"
+        notes: "Position size - ALWAYS use safe_float()"
+        validation_pattern: "safe_float\\(.+\\.get\\(['\"]open_interest['\"]"
+      - name: "profit_unreal"
+        type: "string"
+        converts_to: "float"
+        example: "-0.05"
+        notes: "Unrealized PnL - ALWAYS use safe_float()"
+        validation_pattern: "safe_float\\(.+\\.get\\(['\"]profit_unreal['\"]"
+      - name: "profit_real"
+        type: "string"
+        converts_to: "float"
+        example: "1.23"
+        notes: "Realized PnL - ALWAYS use safe_float()"
+      - name: "avg_cost"
+        type: "string"
+        converts_to: "float"
+        example: "50000.00"
+        notes: "Average entry price - ALWAYS use safe_float()"
+      - name: "market"
+        type: "string"
+        converts_to: null
+        example: "BTCUSDT"
+        notes: "Market symbol"
+      - name: "side"
+        type: "string"
+        converts_to: null
+        example: "sell"
+        notes: "Position side (buy/sell)"
+
+  # Price ticker endpoint
+  futures_ticker:
+    path: "/v2/futures/ticker"
+    method: "GET"
+    description: "Get market ticker information"
+    auth_required: false
+    response_fields:
+      - name: "last"
+        type: "string"
+        converts_to: "float"
+        example: "50000.00"
+        notes: "Last traded price - ALWAYS use safe_float()"
+        validation_pattern: "safe_float\\(.+\\.get\\(['\"]last['\"]"
+      - name: "open"
+        type: "string"
+        converts_to: "float"
+        example: "49500.00"
+        notes: "24h opening price - ALWAYS use safe_float()"
+      - name: "high"
+        type: "string"
+        converts_to: "float"
+        example: "50500.00"
+        notes: "24h high price - ALWAYS use safe_float()"
+      - name: "low"
+        type: "string"
+        converts_to: "float"
+        example: "49000.00"
+        notes: "24h low price - ALWAYS use safe_float()"
+      - name: "vol"
+        type: "string"
+        converts_to: "float"
+        example: "123.45"
+        notes: "24h volume - ALWAYS use safe_float()"
+
+  # Account balance endpoint  
+  futures_balance:
+    path: "/v2/assets/futures/balance"
+    method: "GET"
+    description: "Get futures account balance"
+    auth_required: true
+    response_fields:
+      - name: "available"
+        type: "string"
+        converts_to: "float"
+        example: "1000.00"
+        notes: "Available balance - ALWAYS use safe_float()"
+        validation_pattern: "safe_float\\(.+\\.get\\(['\"]available['\"]"
+      - name: "margin"
+        type: "string"
+        converts_to: "float"
+        example: "100.00"
+        notes: "Margin balance - ALWAYS use safe_float()"
+      - name: "unrealized_pnl"
+        type: "string"
+        converts_to: "float"
+        example: "-0.50"
+        notes: "Unrealized PnL - ALWAYS use safe_float()"
+
+  # Order status endpoint
+  futures_order_status:
+    path: "/v2/futures/order-status"
+    method: "GET"
+    description: "Get order status information"
+    auth_required: true
+    response_fields:
+      - name: "amount"
+        type: "string"
+        converts_to: "float"
+        example: "0.001"
+        notes: "Order amount - ALWAYS use safe_float()"
+        validation_pattern: "safe_float\\(.+\\.get\\(['\"]amount['\"]"
+      - name: "price"
+        type: "string"
+        converts_to: "float"
+        example: "50000.00"
+        notes: "Order price - ALWAYS use safe_float()"
+        validation_pattern: "safe_float\\(.+\\.get\\(['\"]price['\"]"
+      - name: "deal_amount"
+        type: "string"
+        converts_to: "float"
+        example: "0.0005"
+        notes: "Filled amount - ALWAYS use safe_float()"
+      - name: "deal_money"
+        type: "string"
+        converts_to: "float"
+        example: "25.00"
+        notes: "Filled value - ALWAYS use safe_float()"
+      - name: "order_id"
+        type: "integer"
+        converts_to: null
+        example: 12345678
+        notes: "Order ID - numeric type"
+      - name: "client_id"
+        type: "string"
+        converts_to: null
+        example: "my_order_123"
+        notes: "Client order ID"
+      - name: "status"
+        type: "string"
+        converts_to: null
+        example: "partial"
+        notes: "Order status (pending, partial, done, cancel)"
+
+  # User deals/trades endpoint
+  futures_user_deals:
+    path: "/v2/futures/user-deals"
+    method: "GET"
+    description: "Get user trading history"
+    auth_required: true
+    response_fields:
+      - name: "amount"
+        type: "string"
+        converts_to: "float"
+        example: "0.001"
+        notes: "Trade amount - ALWAYS use safe_float()"
+      - name: "price"
+        type: "string"
+        converts_to: "float"
+        example: "50000.00"
+        notes: "Trade price - ALWAYS use safe_float()"
+      - name: "deal_money"
+        type: "string"
+        converts_to: "float"
+        example: "50.00"
+        notes: "Trade value - ALWAYS use safe_float()"
+      - name: "fee"
+        type: "string"
+        converts_to: "float"
+        example: "0.025"
+        notes: "Trading fee - ALWAYS use safe_float()"
+      - name: "deal_id"
+        type: "integer"
+        converts_to: null
+        example: 87654321
+        notes: "Deal ID - numeric type"
+      - name: "side"
+        type: "string"
+        converts_to: null
+        example: "buy"
+        notes: "Trade side (buy/sell)"
+
+# Common type conversion patterns
+type_patterns:
+  string_to_float:
+    required_function: "safe_float"
+    danger_patterns:
+      - "float\\(.+\\.get\\("  # Direct float() conversion
+      - "int\\(.+\\.get\\("    # Direct int() conversion
+      - "\\.get\\(.+\\) \\* "  # Math operations on raw API response
+      - "\\.get\\(.+\\) \\+ "  # Addition on raw API response
+      - "\\.get\\(.+\\) > "   # Comparison on raw API response
+    safe_patterns:
+      - "safe_float\\(.+\\.get\\("
+      - "safe_int\\(.+\\.get\\("
+
+# Common bugs and fixes
+common_bugs:
+  - description: "Using min_amount directly as number"
+    bad_code: "if quantity < market_info.get('min_amount'):"
+    good_code: "if quantity < safe_float(market_info.get('min_amount', 0)):"
+    consequence: "TypeError: '<' not supported between 'float' and 'str'"
+    
+  - description: "Math operations on string prices"
+    bad_code: "profit = price_data.get('last') * 0.01"
+    good_code: "profit = safe_float(price_data.get('last', 0)) * 0.01"
+    consequence: "TypeError: can't multiply sequence by non-int"
+    
+  - description: "Direct int conversion of order_id"
+    bad_code: "order_id = int(response.get('order_id'))"
+    good_code: "order_id = safe_int(response.get('order_id', 0))"
+    consequence: "ValueError: invalid literal for int()"

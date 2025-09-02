@@ -1209,4 +1209,15 @@ ssh vm "docker load < trader-bot-final-amd64.tar.gz && docker-compose up -d serv
 
 **Fixed in commit:** [Current commit] - Document critical deployment mistakes and prevention protocols
 
+### Future Investigation Required - Type Conversion Safety
+
+**Task**: Audit safe_int() vs int() usage across entire codebase
+- **Scope**: Find all int() calls and validate against CoinEx API specifications  
+- **Focus**: Exchange order IDs, timestamps, amounts, and other numeric API parameters
+- **Goal**: Ensure all CoinEx API responses use proper safe_int() for type safety
+- **Files**: Especially src/exchange/*, but scan entire codebase
+- **Reference**: Use `api_docs/coinex_api_schema.yaml` for proper type conversion requirements
+- **Validation Tools**: Use `scripts/api_type_validator.py` to scan for unsafe patterns
+- **Risk**: int() failures could cause bot crashes on malformed API responses
+
 This guide should be the first place to check when debugging issues with the CoinEx trading bot.
