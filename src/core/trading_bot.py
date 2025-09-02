@@ -1095,6 +1095,28 @@ class DailyRangeBot:
                     logger.warning(f"  Manager orders: {[o.client_id for o in today_buy_orders]}")
                     logger.warning(f"  Exchange orders: {[o.get('client_id', o.get('order_id')) for o in today_exchange_buys]}")
                     
+                    # CRITICAL FIX: Clean phantom buy orders (orders manager has but exchange doesn't)
+                    exchange_client_ids = {o.get('client_id') for o in today_exchange_buys if o.get('client_id')}
+                    phantom_orders = []
+                    for order in today_buy_orders:
+                        if order.client_id not in exchange_client_ids:
+                            phantom_orders.append(order)
+                    
+                    if phantom_orders:
+                        logger.warning(f"Cleaning {len(phantom_orders)} phantom buy orders for {market}")
+                        for phantom_order in phantom_orders:
+                            logger.info(f"🗑️ Removing phantom buy order: {phantom_order.client_id}")
+                            if phantom_order.client_id in self.order_manager.active_orders:
+                                del self.order_manager.active_orders[phantom_order.client_id]
+                            log_trading_event('phantom_cleanup', f"Removed phantom buy order {phantom_order.client_id} for {market}")
+                        
+                        # Recalculate result after cleanup
+                        remaining_today_buys = [o for o in today_buy_orders if o.client_id in exchange_client_ids]
+                        result['has_today_buy'] = len(remaining_today_buys) > 0
+                        result['today_orders'] = remaining_today_buys
+                        result['total_buy_orders'] = len([o for o in buy_orders if o.client_id in exchange_client_ids])
+                        logger.info(f"✅ After phantom cleanup: has_today_buy={result['has_today_buy']}")
+                    
                     # REMOVED: Cache clearing logic - now using direct exchange queries only
                 
             except Exception as validation_error:
@@ -3190,23 +3212,52 @@ class DailyRangeBot:
                     
                     # Check if order was completed and removed during status update
                     if updated_order is None or client_id not in self.order_manager.active_orders:
-                        # Order was removed, meaning it was FILLED or CANCELLED
-                        # Check if this was a sell order from today
+                        # Order was removed - verify actual status via API
                         order_date = order_created_at.date()
                         is_today = order_date == today
                         is_orphaned = "_OS_" in client_id
                         
-                        if is_today and not is_orphaned:
-                            # Set cycle completion flag
-                            self._cycle_completion_flags[order_market] = True
-                            completed_sells.append(order)
-                            
-                            logger.info(f"🔄 Cycle completion flag set for {order_market} - sell order {client_id} from today completed")
-                            log_trading_event('cycle_complete', f"Cycle completion detected for {order_market} - sell order from today filled via REST API")
-                        elif is_today and is_orphaned:
-                            logger.info(f"📌 Orphaned sell order {client_id} completed for {order_market} - no cycle completion triggered")
-                        elif not is_today:
-                            logger.debug(f"Sell order {client_id} from {order_date} completed - not today, no cycle completion")
+                        # Try to verify actual order status
+                        if order.exchange_order_id:
+                            try:
+                                order_data = self.client.get_order_status(
+                                    market=order_market,
+                                    order_id=safe_int(order.exchange_order_id)
+                                )
+                                if order_data:
+                                    status = order_data.get('status', 'unknown')
+                                    fill_time = order_data.get('finished_at', 'unknown')
+                                    avg_price = safe_float(order_data.get('avg_price', 0))
+                                    
+                                    if status == 'filled':
+                                        if is_today and not is_orphaned:
+                                            self._cycle_completion_flags[order_market] = True
+                                            completed_sells.append(order)
+                                            logger.info(f"✅ SELL order {client_id} confirmed FILLED at {fill_time} @ ${avg_price:.4f} - cycle complete for {order_market}")
+                                            log_trading_event('cycle_complete', f"Confirmed sell fill for {order_market} - cycle complete")
+                                        elif is_today and is_orphaned:
+                                            logger.info(f"📌 Orphaned sell order {client_id} confirmed FILLED at {fill_time} @ ${avg_price:.4f}")
+                                        else:
+                                            logger.debug(f"Sell order {client_id} confirmed FILLED from {order_date}")
+                                    elif status in ['cancelled', 'canceled']:
+                                        logger.info(f"❌ Sell order {client_id} confirmed CANCELLED for {order_market}")
+                                    else:
+                                        logger.warning(f"⚠️ Sell order {client_id} has unknown status: {status}")
+                                        
+                            except Exception as e:
+                                logger.warning(f"Could not verify sell order {client_id}: {e}")
+                                # Fallback to old assumption logic
+                                if is_today and not is_orphaned:
+                                    self._cycle_completion_flags[order_market] = True
+                                    completed_sells.append(order)
+                                    logger.info(f"🔄 Cycle completion flag set for {order_market} - sell order {client_id} disappeared (assumed filled)")
+                        else:
+                            # No exchange order ID - use fallback
+                            if is_today and not is_orphaned:
+                                self._cycle_completion_flags[order_market] = True
+                                completed_sells.append(order)
+                                logger.info(f"🔄 Cycle completion flag set for {order_market} - sell order {client_id} disappeared (assumed filled)")
+                                logger.warning(f"⚠️ Missing exchange_order_id for order {client_id} - using assumption")
             
             if completed_sells:
                 logger.info(f"✅ Detected {len(completed_sells)} completed sell orders from today")
