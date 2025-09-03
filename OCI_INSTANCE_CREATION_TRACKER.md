@@ -315,3 +315,34 @@ Out of host capacity
 
 **Attempt 1** (2025-09-03 15:50:40 UTC): Clau:EU-FRANKFURT-1-AD-2 - ❌ FAILED
 Connection timeout
+
+**Attempt 1** (2025-09-03 15:52:32 UTC): Clau:EU-FRANKFURT-1-AD-3 - ❌ FAILED
+Out of host capacity
+
+**Attempt 2** (2025-09-03 15:59:25 UTC): Clau:EU-FRANKFURT-1-AD-1 - ❌ FAILED
+Out of host capacity
+
+**⚠️ SCRIPT TERMINATED** (2025-09-03 16:01:16 UTC)
+
+**⚠️ SCRIPT TERMINATED** (2025-09-03 16:06:17 UTC)
+
+---
+
+## 🤖 Automated Ampere A1 Creation Log
+
+**Started**: 2025-09-03 16:06:18 UTC
+**Configuration**: 4 OCPUs, 24GB RAM, 100GB storage
+**Target ADs**: Clau:EU-FRANKFURT-1-AD-1 Clau:EU-FRANKFURT-1-AD-2 Clau:EU-FRANKFURT-1-AD-3
+**Strategy**: Dynamic intervals (120-600s), unlimited attempts
+
+
+**Attempt 1** (2025-09-03 16:07:59 UTC): Clau:EU-FRANKFURT-1-AD-1 - ❌ FAILED
+Out of host capacity
+
+**Attempt 1** (2025-09-03 16:09:51 UTC): Clau:EU-FRANKFURT-1-AD-2 - ❌ FAILED
+Out of host capacity
+
+**Attempt 1** (2025-09-03 16:11:43 UTC): Clau:EU-FRANKFURT-1-AD-3 - ❌ FAILED
+Out of host capacity
+
+**⚠️ SCRIPT TERMINATED** (2025-09-03 16:11:53 UTC)

@@ -64,14 +64,16 @@ tail -20 ampere_creation.log
 
 ## 📊 Configuration
 
-### Default Settings
+### Default Settings (Optimized)
 - **Instance Shape**: VM.Standard.A1.Flex
 - **OCPUs**: 4 (maximum free tier)
 - **RAM**: 24 GB (maximum free tier)  
 - **Storage**: 100 GB boot volume
-- **Retry Interval**: 5 minutes
-- **Maximum Attempts**: 1440 (5 days)
+- **Retry Strategy**: Dynamic intervals (2-10 minutes)
+- **Maximum Attempts**: Unlimited (runs until success)
 - **Availability Domains**: All 3 in eu-frankfurt-1
+- **Log Rotation**: Auto-rotates at 50 MB to prevent disk issues
+- **Success Notifications**: Desktop alerts + visible files
 
 ### Customization
 Edit the script's configuration section to modify:
@@ -81,9 +83,11 @@ readonly OCPUS=4
 readonly MEMORY_GB=24
 readonly BOOT_VOLUME_GB=100
 
-# Retry Configuration  
-readonly RETRY_INTERVAL_SECONDS=300  # 5 minutes
-readonly MAX_ATTEMPTS=1440           # 5 days
+# Optimized Retry Configuration  
+readonly MIN_RETRY_INTERVAL=120      # 2 minutes (aggressive start)
+readonly MAX_RETRY_INTERVAL=600      # 10 minutes maximum
+readonly MAX_ATTEMPTS=0              # 0 = unlimited attempts
+readonly MAX_LOG_SIZE_MB=50          # Auto-rotate logs
 ```
 
 ## 🛠️ Features
@@ -94,11 +98,12 @@ readonly MAX_ATTEMPTS=1440           # 5 days
 - **Authentication errors** - Clear error messages
 - **Subnet/network issues** - Uses verified network configuration
 
-### ✅ Intelligent Retry Logic
+### ✅ Optimized Retry Logic  
 - Tries all 3 availability domains per attempt
-- 5-minute base interval between attempts
-- Exponential backoff after consecutive failures
-- Maximum 30-minute interval cap
+- Dynamic intervals: 2 minutes (fast start) → 10 minutes (steady state)
+- Unlimited attempts (runs until success)
+- Smart backoff based on failure patterns + randomization
+- Off-peak time detection for better success rates
 
 ### ✅ Detailed Logging & Progress Tracking
 - Real-time progress updates
@@ -109,21 +114,33 @@ readonly MAX_ATTEMPTS=1440           # 5 days
 ### ✅ Background Process Support
 - Daemon-style background execution
 - Process monitoring capabilities
-- Log file rotation (manual)
+- Automatic log rotation (prevents disk space issues)
 - Clean termination handling
+
+### ✅ Unmissable Success Notifications
+- macOS system notifications with sound
+- Visible success files on desktop
+- Detailed success report with SSH instructions
+- Multiple notification methods to ensure visibility
 
 ## 📋 Output Files
 
-### `ampere_creation.log`
-Real-time execution log with timestamps:
+### `ampere_creation.log` (Auto-rotated)
+Real-time execution log with timestamps (auto-rotates at 50MB):
 ```
-[2025-09-03 15:47:04 UTC] [INFO] === Oracle Cloud Ampere A1 Automated Creator Started ===
-[2025-09-03 15:47:05 UTC] [INFO] Checking prerequisites...
-[2025-09-03 15:48:47 UTC] [WARN] Attempt 1 failed in AD-1: Out of host capacity
+[2025-09-03 16:06:17 UTC] [INFO] === Oracle Cloud Ampere A1 Automated Creator Started ===
+[2025-09-03 16:06:17 UTC] [INFO] Max attempts: unlimited, Dynamic intervals: 120-600s
+[2025-09-03 16:06:18 UTC] [INFO] === Attempt 1 of ∞ ===
 ```
 
 ### `ampere_creation_success.json`
 Created upon successful instance creation with full Oracle Cloud response including instance OCID, IP addresses, and configuration.
+
+### `🎉_AMPERE_A1_SUCCESS_🎉.txt`
+**UNMISSABLE** success notification file with SSH instructions and celebration message.
+
+### `🎉_AMPERE_A1_READY_🎉.txt` (Desktop)
+Visible desktop notification file so you can't miss the success.
 
 ### `OCI_INSTANCE_CREATION_TRACKER.md`
 Automatically updated with attempt history and results.
@@ -146,8 +163,10 @@ Automatically updated with attempt history and results.
 
 **Script runs but never succeeds**
 - This is normal! Ampere A1 instances are in very high demand
-- Try different times of day (early morning/late night often better)
-- Consider running for several days
+- Script now runs UNLIMITED attempts - it will eventually succeed
+- Try different times of day (early morning/late night often better)  
+- May run for days/weeks - that's expected and handled
+- Logs auto-rotate to prevent disk space issues
 
 ### Manual Testing
 Test individual components:
@@ -162,6 +181,33 @@ oci compute instance launch \
   --shape "VM.Standard.A1.Flex" \
   --shape-config '{"ocpus": 4, "memoryInGBs": 24}'
 ```
+
+### 📊 Monitoring Long-Running Script
+
+Since the script may run for days/weeks:
+
+```bash
+# Check if script is running
+ps aux | grep ampere_a1_auto_creator | grep -v grep
+
+# Monitor live progress
+tail -f ampere_creation.log
+
+# Check recent attempts (last 20 lines)
+tail -20 ampere_creation.log
+
+# View current attempt count and strategy
+grep "=== Attempt" ampere_creation.log | tail -5
+
+# Check log file size
+ls -lh ampere_creation.log*
+```
+
+The script will:
+- ✅ Run unlimited attempts automatically
+- ✅ Handle rate limiting and backoff
+- ✅ Rotate logs to prevent disk issues
+- ✅ Send unmissable notifications on success
 
 ## 📈 Success Tips
 
