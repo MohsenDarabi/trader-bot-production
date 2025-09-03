@@ -1,15 +1,33 @@
 #!/bin/bash
 
-# Enhanced Trading Bot Deployment Script with Cross-Platform Build Support
-# Usage: ./deploy.sh [ada|eth] [stop|update|restart]
+# Enhanced Trading Bot Deployment Script with Multi-Instance Support
+# Usage: ./deploy.sh [symbol] [action] --instance [first|second] [opt]
 
 set -e  # Exit on any error
 
-# Configuration
+# Instance Configuration
 VM_USER="ubuntu"
-VM_HOST="89.168.111.195"
-SSH_KEY="./ssh-key-2025-07-27.key"
+SSH_KEY="/Users/mohsendarabi/Desktop/workspace/trader-bot-hourly/ssh-key-2025-07-27.key"
 VM_DIR="/home/ubuntu/trader-bot-production"
+
+# Global variables set by parse_arguments
+SELECTED_INSTANCE=""
+VM_HOST=""
+
+# Function to get VM host by instance name
+get_vm_host() {
+    case "$1" in
+        "first")
+            echo "89.168.111.195"
+            ;;
+        "second")
+            echo "92.5.15.61"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
 
 # ENHANCED: Exclude build artifacts and temporary files
 LOCAL_EXCLUDE=".git,.gitignore,logs/*,*.tar.gz,*.tar,__pycache__,*.pyc,env-templates,vm-deploy-*.sh,*-bot-*.tar.gz,ada-bot-*,eth-bot-*"
@@ -44,53 +62,136 @@ print_error() {
 
 # Function to show usage
 show_usage() {
-    echo "Enhanced Trading Bot Deployment Script"
-    echo "Usage: $0 [SYMBOL] [ACTION] [opt]"
+    echo "Enhanced Trading Bot Deployment Script with Multi-Instance Support"
+    echo "Usage: $0 [SYMBOL] [ACTION] --instance [INSTANCE] [opt]"
     echo ""
     echo "SYMBOL:"
     echo "  Any 3-8 letter crypto symbol (e.g. ada, eth, btc, aave, doge)"
-    echo "  Automatically uses available credentials or creates .env file"
     echo ""
     echo "ACTION:"
-    echo "  stop    - Stop specified bot(s)"
-    echo "  update  - Update code and restart bot(s)"
-    echo "  restart - Restart bot(s) without code update"
+    echo "  stop    - Stop specified bot"
+    echo "  update  - Update code and restart bot"
+    echo "  restart - Restart bot without code update"
+    echo "  setup   - Initialize instance with directory structure"
+    echo "  status  - Show running bots on instance"
+    echo ""
+    echo "INSTANCE (REQUIRED):"
+    echo "  --instance first   - Deploy to first instance (89.168.111.195)"
+    echo "  --instance second  - Deploy to second instance (92.5.15.61)"
     echo ""
     echo "OPTIMIZATION (optional):"
     echo "  opt     - Use optimized Docker build (70% smaller image)"
     echo "            Standard: ~400-500MB, Optimized: ~100-150MB"
     echo ""
-    echo "Credential Management:"
-    echo "  • Script automatically finds unused credentials from VM"
-    echo "  • Creates .env files by borrowing from non-running bots"
-    echo "  • Updates trading market automatically (e.g. AAVE → AAVEUSDT)"
+    echo "Instance Usage Strategy:"
+    echo "  • Each instance should run DIFFERENT bots to avoid conflicts"
+    echo "  • Example: ada on first instance, eth on second instance"
+    echo "  • Never run the same bot on both instances simultaneously"
     echo ""
     echo "Examples:"
-    echo "  $0 ada update       # Standard deployment (~400-500MB image)"
-    echo "  $0 ada update opt   # Optimized deployment (~100-150MB image)"
-    echo "  $0 aave restart     # Restart with standard image"
-    echo "  $0 aave restart opt # Restart with optimized image"
-    echo "  $0 btc stop         # Stop BTC bot"
+    echo "  $0 setup --instance second              # Initialize second instance"
+    echo "  $0 ada update --instance first opt      # Deploy ada to first instance (optimized)"
+    echo "  $0 eth update --instance second         # Deploy eth to second instance (standard)"
+    echo "  $0 status --instance first              # Check what's running on first instance"
+    echo "  $0 ada stop --instance first            # Stop ada bot on first instance"
+    echo ""
+    echo "ERROR: --instance parameter is REQUIRED to prevent accidental deployments!"
+}
+
+# Function to parse arguments and set global variables
+parse_arguments() {
+    local symbol=""
+    local action=""
+    local instance=""
+    local optimization=""
+    local instance_found=false
+    
+    # Parse all arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --instance)
+                if [[ -n "$2" && "$2" =~ ^(first|second)$ ]]; then
+                    instance="$2"
+                    instance_found=true
+                    shift 2
+                else
+                    print_error "Invalid --instance value: $2 (must be 'first' or 'second')"
+                    show_usage
+                    exit 1
+                fi
+                ;;
+            opt)
+                optimization="opt"
+                shift
+                ;;
+            setup|status|stop|update|restart)
+                action="$1"
+                shift
+                ;;
+            *)
+                if [[ -z "$symbol" && "$1" =~ ^[a-z]{3,8}$ ]]; then
+                    symbol="$1"
+                    shift
+                elif [[ -z "$action" && "$1" =~ ^(setup|status)$ ]]; then
+                    action="$1"
+                    shift
+                else
+                    print_error "Invalid argument: $1"
+                    show_usage
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+    
+    # Validate required --instance parameter
+    if [[ "$instance_found" != true ]]; then
+        print_error "ERROR: --instance parameter is REQUIRED!"
+        print_error "You must specify either --instance first or --instance second"
+        print_error "This prevents accidental deployments to the wrong VM."
+        show_usage
+        exit 1
+    fi
+    
+    # Output shell commands to set global variables
+    echo "SELECTED_INSTANCE='$instance'"
+    echo "VM_HOST='$(get_vm_host "$instance")'"
+    echo "symbol='$symbol'"
+    echo "action='$action'"
+    echo "optimization='$optimization'"
+    
+    # Print status message to stderr
+    print_status "Selected instance: $instance ($(get_vm_host "$instance"))" >&2
 }
 
 # Function to validate inputs
 validate_inputs() {
-    # Accept any 3-8 character lowercase asset name (typical crypto symbols)
-    if [[ ! "$1" =~ ^[a-z]{3,8}$ ]]; then
-        print_error "Invalid symbol: $1 (must be 3-8 lowercase letters, e.g. ada, eth, btc, aave)"
+    local symbol="$1"
+    local action="$2"
+    local optimization="$3"
+    
+    # Validate action
+    if [[ ! "$action" =~ ^(stop|update|restart|setup|status)$ ]]; then
+        print_error "Invalid action: $action"
         show_usage
         exit 1
     fi
     
-    if [[ ! "$2" =~ ^(stop|update|restart)$ ]]; then
-        print_error "Invalid action: $2"
+    # For setup and status, symbol is optional
+    if [[ "$action" =~ ^(setup|status)$ ]]; then
+        return 0
+    fi
+    
+    # For other actions, symbol is required
+    if [[ ! "$symbol" =~ ^[a-z]{3,8}$ ]]; then
+        print_error "Invalid symbol: $symbol (must be 3-8 lowercase letters, e.g. ada, eth, btc, aave)"
         show_usage
         exit 1
     fi
     
-    # Validate optional third parameter (optimization flag)
-    if [[ -n "$3" && "$3" != "opt" ]]; then
-        print_error "Invalid optimization flag: $3 (must be 'opt' or omitted)"
+    # Validate optimization flag
+    if [[ -n "$optimization" && "$optimization" != "opt" ]]; then
+        print_error "Invalid optimization flag: $optimization (must be 'opt' or omitted)"
         show_usage
         exit 1
     fi
@@ -150,7 +251,7 @@ cleanup_old_builds() {
 # Function to clean up old Docker images on VM
 cleanup_old_vm_images() {
     local symbol="$1"
-    print_status "Cleaning up old ${symbol} Docker images on VM..."
+    print_status "Cleaning up old ${symbol} Docker images on $SELECTED_INSTANCE instance..."
     
     # Get list of old images (keep newest 2 for safety)
     local old_images=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
@@ -159,7 +260,7 @@ cleanup_old_vm_images() {
     
     if [[ -n "$old_images" ]]; then
         local count=$(echo "$old_images" | wc -l)
-        print_status "Found $count old ${symbol} images to remove..."
+        print_status "Found $count old ${symbol} images to remove on $SELECTED_INSTANCE instance..."
         
         echo "$old_images" | while read image_id; do
             if [[ -n "$image_id" ]]; then
@@ -168,9 +269,9 @@ cleanup_old_vm_images() {
             fi
         done
         
-        print_success "Cleaned up old ${symbol} images"
+        print_success "Cleaned up old ${symbol} images on $SELECTED_INSTANCE instance"
     else
-        print_status "No old ${symbol} images to clean"
+        print_status "No old ${symbol} images to clean on $SELECTED_INSTANCE instance"
     fi
 }
 
@@ -504,10 +605,10 @@ restart_containers() {
     # CRITICAL: Use correct env file for each bot
     local env_file=".env.${symbol}"
     
-    print_status "Verifying ${env_file} exists on VM..."
+    print_status "Verifying ${env_file} exists on $SELECTED_INSTANCE instance ($VM_HOST)..."
     if ! ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
         "test -f $VM_DIR/${env_file}"; then
-        print_warning "Environment file ${env_file} not found on VM!"
+        print_warning "Environment file ${env_file} not found on $SELECTED_INSTANCE instance!"
         
         # Try to create it using available credentials
         if create_missing_env_from_vm "$symbol"; then
@@ -595,12 +696,90 @@ restart_containers() {
 # Stop containers function
 stop_containers() {
     local symbol="$1"
-    print_status "Stopping $symbol container..."
+    print_status "Stopping $symbol container on $SELECTED_INSTANCE instance ($VM_HOST)..."
     
     ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
         "docker stop ${symbol} 2>/dev/null && docker rm ${symbol} 2>/dev/null || true"
     
-    print_success "$symbol container stopped"
+    print_success "$symbol container stopped on $SELECTED_INSTANCE instance"
+}
+
+# Setup instance function
+setup_instance() {
+    print_status "Setting up $SELECTED_INSTANCE instance ($VM_HOST)..."
+    
+    # Create directory structure
+    print_status "Creating directory structure..."
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "mkdir -p $VM_DIR"
+    
+    # Copy .env files from backup if second instance and no .env files exist
+    if [[ "$SELECTED_INSTANCE" == "second" ]]; then
+        local existing_envs=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+            "ls $VM_DIR/.env.* 2>/dev/null | wc -l" || echo "0")
+        
+        if [[ "$existing_envs" -eq 0 ]]; then
+            print_status "Copying .env files from backup to second instance..."
+            
+            # Create temporary archive locally with just the main .env files
+            cd /Users/mohsendarabi/Desktop/workspace/trader-bot-hourly/env-backup
+            tar -czf setup-envs.tar.gz .env.ada .env.aave .env.eth .env.example 2>/dev/null || true
+            
+            # Transfer and extract on second instance
+            scp -i "$SSH_KEY" -o StrictHostKeyChecking=no setup-envs.tar.gz "$VM_USER@$VM_HOST:~/"
+            ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+                "cd $VM_DIR && tar -xzf ~/setup-envs.tar.gz && rm -f ~/setup-envs.tar.gz"
+            
+            # Clean up local temp file
+            rm -f setup-envs.tar.gz
+            
+            print_success ".env files copied to second instance"
+        else
+            print_status ".env files already exist on second instance (count: $existing_envs)"
+        fi
+    fi
+    
+    # Check Docker installation
+    print_status "Checking Docker installation..."
+    if ! ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" "docker --version" &>/dev/null; then
+        print_status "Docker not found. Installing Docker..."
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+            "curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh && sudo usermod -aG docker ubuntu"
+        print_status "Docker installed. Please logout and login again, then rerun this command."
+        exit 0
+    else
+        print_success "Docker is installed"
+    fi
+    
+    print_success "Instance setup completed for $SELECTED_INSTANCE ($VM_HOST)"
+}
+
+# Status function
+show_instance_status() {
+    print_status "Checking status of $SELECTED_INSTANCE instance ($VM_HOST)..."
+    
+    # Check connectivity
+    if ! ssh -i "$SSH_KEY" -o ConnectTimeout=10 -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" "echo 'Connected'" &>/dev/null; then
+        print_error "Cannot connect to $SELECTED_INSTANCE instance ($VM_HOST)"
+        return 1
+    fi
+    
+    print_success "Connected to $SELECTED_INSTANCE instance ($VM_HOST)"
+    
+    # Show running containers
+    print_status "Running containers:"
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'" || print_warning "No containers running"
+    
+    # Show available .env files
+    print_status "Available .env files:"
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "ls -la $VM_DIR/.env.* 2>/dev/null || echo 'No .env files found'"
+    
+    # Show disk usage
+    print_status "Disk usage:"
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "df -h / | tail -1"
 }
 
 # Main execution function
@@ -614,27 +793,38 @@ execute_deployment() {
         deployment_type="optimized"
     fi
     
-    print_status "Starting deployment: $symbol $action ($deployment_type)"
-    
-    # Ensure Docker is running
-    ensure_docker_running
-    
-    # Clean up old builds before starting
-    cleanup_old_builds
-    
-    # Clean up old VM archives to free disk space
-    cleanup_old_vm_archives
+    print_status "Starting operation: $action on $SELECTED_INSTANCE instance ($VM_HOST)"
     
     case "$action" in
+        "setup")
+            setup_instance
+            return 0
+            ;;
+        "status")
+            show_instance_status
+            return 0
+            ;;
         "stop")
             stop_containers "$symbol"
+            return 0
             ;;
         "update")
+            print_status "Deployment: $symbol $action ($deployment_type)"
+            
+            # Ensure Docker is running locally for build
+            ensure_docker_running
+            
+            # Clean up old builds before starting
+            cleanup_old_builds
+            
+            # Clean up old VM archives to free disk space
+            cleanup_old_vm_archives
+            
             print_success "Using local Docker buildx for cross-platform build ($deployment_type)"
             if build_image_locally "$symbol" "$optimization"; then
                 restart_containers "$symbol" "$optimization"
                 cleanup_old_vm_images "$symbol"
-                print_success "Deployment completed successfully!"
+                print_success "Deployment completed successfully on $SELECTED_INSTANCE instance!"
             else
                 print_error "Build failed"
                 exit 1
@@ -659,14 +849,17 @@ main() {
         exit 0
     fi
     
-    # Validate inputs
-    validate_inputs "$1" "$2" "$3"
+    # Parse arguments and set global variables directly
+    eval "$(parse_arguments "$@")"
     
-    # Check prerequisites
+    # Validate inputs
+    validate_inputs "$symbol" "$action" "$optimization"
+    
+    # Check prerequisites (SSH connectivity to selected instance)
     check_prerequisites
     
-    # Execute deployment with cleanup
-    execute_deployment "$1" "$2" "$3"
+    # Execute deployment
+    execute_deployment "$symbol" "$action" "$optimization"
 }
 
 # Run main function with all arguments
