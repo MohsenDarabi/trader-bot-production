@@ -45,7 +45,7 @@ print_error() {
 # Function to show usage
 show_usage() {
     echo "Enhanced Trading Bot Deployment Script"
-    echo "Usage: $0 [SYMBOL] [ACTION]"
+    echo "Usage: $0 [SYMBOL] [ACTION] [opt]"
     echo ""
     echo "SYMBOL:"
     echo "  Any 3-8 letter crypto symbol (e.g. ada, eth, btc, aave, doge)"
@@ -56,16 +56,21 @@ show_usage() {
     echo "  update  - Update code and restart bot(s)"
     echo "  restart - Restart bot(s) without code update"
     echo ""
+    echo "OPTIMIZATION (optional):"
+    echo "  opt     - Use optimized Docker build (70% smaller image)"
+    echo "            Standard: ~400-500MB, Optimized: ~100-150MB"
+    echo ""
     echo "Credential Management:"
     echo "  • Script automatically finds unused credentials from VM"
     echo "  • Creates .env files by borrowing from non-running bots"
     echo "  • Updates trading market automatically (e.g. AAVE → AAVEUSDT)"
     echo ""
     echo "Examples:"
-    echo "  $0 ada update     # Update ADA bot"
-    echo "  $0 aave restart   # Restart AAVE bot (auto-creates .env.aave if missing)"
-    echo "  $0 btc stop       # Stop BTC bot"
-    echo "  $0 doge update    # Deploy DOGE bot (borrows unused credentials)"
+    echo "  $0 ada update       # Standard deployment (~400-500MB image)"
+    echo "  $0 ada update opt   # Optimized deployment (~100-150MB image)"
+    echo "  $0 aave restart     # Restart with standard image"
+    echo "  $0 aave restart opt # Restart with optimized image"
+    echo "  $0 btc stop         # Stop BTC bot"
 }
 
 # Function to validate inputs
@@ -79,6 +84,13 @@ validate_inputs() {
     
     if [[ ! "$2" =~ ^(stop|update|restart)$ ]]; then
         print_error "Invalid action: $2"
+        show_usage
+        exit 1
+    fi
+    
+    # Validate optional third parameter (optimization flag)
+    if [[ -n "$3" && "$3" != "opt" ]]; then
+        print_error "Invalid optimization flag: $3 (must be 'opt' or omitted)"
         show_usage
         exit 1
     fi
@@ -393,11 +405,23 @@ transfer_with_retry() {
 # Enhanced local build function with robust transfer
 build_image_locally() {
     local symbol="$1"
+    local optimization="$2"
     local timestamp=$(date '+%Y%m%d_%H%M%S')
-    local image_name="${symbol}-bot-${timestamp}"
-    local tar_file="${symbol}-bot-${timestamp}.tar.gz"
     
-    print_status "Building $symbol image locally for linux/amd64..."
+    # Choose Dockerfile and image naming based on optimization flag
+    local dockerfile="Dockerfile"
+    local image_name="${symbol}-bot-${timestamp}"
+    local build_type="standard"
+    
+    if [[ "$optimization" == "opt" ]]; then
+        dockerfile="Dockerfile.optimized"
+        image_name="${symbol}-bot-opt-${timestamp}"
+        build_type="optimized"
+    fi
+    
+    local tar_file="${image_name}.tar.gz"
+    
+    print_status "Building $symbol image locally for linux/amd64 ($build_type build using $dockerfile)..."
     
     # Clean up any existing builds first
     cleanup_old_builds
@@ -405,7 +429,7 @@ build_image_locally() {
     # Build with buildx for linux/amd64 (--no-cache ensures fresh builds)
     if ! docker buildx build --platform linux/amd64 --no-cache \
         -t "${image_name}:latest" \
-        -f Dockerfile \
+        -f "$dockerfile" \
         --load \
         . ; then
         print_error "Failed to build image"
@@ -468,6 +492,7 @@ build_image_locally() {
 # Enhanced restart function with proper credential handling and verification
 restart_containers() {
     local symbol="$1"
+    local optimization="$2"  # New optimization parameter
     local image_name="ada-bot-fixed:latest"  # Default fallback
     
     # Get the image name from last build
@@ -582,8 +607,14 @@ stop_containers() {
 execute_deployment() {
     local symbol="$1"
     local action="$2"
+    local optimization="$3"
     
-    print_status "Starting deployment: $symbol $action"
+    local deployment_type="standard"
+    if [[ "$optimization" == "opt" ]]; then
+        deployment_type="optimized"
+    fi
+    
+    print_status "Starting deployment: $symbol $action ($deployment_type)"
     
     # Ensure Docker is running
     ensure_docker_running
@@ -599,9 +630,9 @@ execute_deployment() {
             stop_containers "$symbol"
             ;;
         "update")
-            print_success "Using local Docker buildx for cross-platform build"
-            if build_image_locally "$symbol"; then
-                restart_containers "$symbol"
+            print_success "Using local Docker buildx for cross-platform build ($deployment_type)"
+            if build_image_locally "$symbol" "$optimization"; then
+                restart_containers "$symbol" "$optimization"
                 cleanup_old_vm_images "$symbol"
                 print_success "Deployment completed successfully!"
             else
@@ -610,7 +641,7 @@ execute_deployment() {
             fi
             ;;
         "restart")
-            restart_containers "$symbol"
+            restart_containers "$symbol" "$optimization"
             ;;
     esac
     
@@ -629,13 +660,13 @@ main() {
     fi
     
     # Validate inputs
-    validate_inputs "$1" "$2"
+    validate_inputs "$1" "$2" "$3"
     
     # Check prerequisites
     check_prerequisites
     
     # Execute deployment with cleanup
-    execute_deployment "$1" "$2"
+    execute_deployment "$1" "$2" "$3"
 }
 
 # Run main function with all arguments

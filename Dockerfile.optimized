@@ -1,0 +1,62 @@
+# Multi-stage build for optimized Docker image
+# Stage 1: Build dependencies
+FROM python:3.12-alpine AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apk add --no-cache \
+    gcc \
+    g++ \
+    musl-dev \
+    linux-headers
+
+# Copy production requirements
+COPY requirements-prod.txt .
+
+# Install Python packages to user location
+RUN pip install --user --no-cache-dir -r requirements-prod.txt
+
+# Stage 2: Runtime image
+FROM python:3.12-alpine
+
+WORKDIR /app
+
+# Create non-root user first
+RUN adduser -D botuser
+
+# Copy Python packages from builder stage to user location
+COPY --from=builder --chown=botuser:botuser /root/.local /home/botuser/.local
+
+# Add local bin to PATH and Python path
+ENV PATH=/home/botuser/.local/bin:$PATH
+ENV PYTHONPATH=/home/botuser/.local/lib/python3.12/site-packages:${PYTHONPATH:-}
+
+# Copy only necessary application files (leveraging .dockerignore)
+COPY main.py .
+COPY entrypoint.sh .
+COPY process_lock.py .
+COPY src/ ./src/
+COPY config/ ./config/
+
+# Create necessary directories with proper permissions
+RUN mkdir -p logs storage && \
+    chmod 777 logs storage
+
+# Make entrypoint executable
+RUN chmod +x entrypoint.sh || true
+
+# Set proper permissions and switch to user
+RUN chown -R botuser:botuser /app
+USER botuser
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV BOT_INSTANCE=production
+ENV DOCKER_CONTAINER=true
+
+# Create volume mount points
+VOLUME ["/app/logs", "/app/storage"]
+
+# Use entrypoint for proper signal handling
+ENTRYPOINT ["./entrypoint.sh"]

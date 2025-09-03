@@ -801,20 +801,37 @@ class DailyRangeBot:
             logger.error(f"Error processing market {market}: {e}", exc_info=True)
     
     async def _check_and_generate_signals(self, market: str):
-        """Check if we need to generate new daily signals"""
+        """Check if we need to generate new signals based on trading timeframe"""
+        from config.settings import TRADING_TIMEFRAME
+        
         now = datetime.now(timezone.utc)
+        signal = None
         
-        # Check if it's time to generate new signals (daily at configured time)
-        signal_time = time.fromisoformat(SIGNAL_GENERATION_TIME)
-        today_signal_time = datetime.combine(now.date(), signal_time, timezone.utc)
-        
-        # If it's past signal time and we haven't generated today's signal
-        last_generation = self.last_signal_generation.get(market)
-        if (now >= today_signal_time and 
-            (not last_generation or last_generation.date() < now.date())):
+        if TRADING_TIMEFRAME == 'hourly':
+            # Hourly signal generation logic
+            current_hour = now.strftime('%Y-%m-%d-%H')
+            last_generation = self.last_signal_generation.get(market)
             
-            logger.info(f"Generating new daily signal for {market}")
-            signal = self.strategy.generate_daily_signal(market)
+            # Check if we need to generate a signal for this hour
+            needs_signal = (not last_generation or 
+                          (hasattr(last_generation, 'hour') and 
+                           last_generation.strftime('%Y-%m-%d-%H') != current_hour))
+            
+            if needs_signal:
+                logger.info(f"Generating new hourly signal for {market} (hour: {current_hour})")
+                signal = self.strategy.generate_hourly_signal(market)
+        else:
+            # Daily signal generation logic (existing)
+            signal_time = time.fromisoformat(SIGNAL_GENERATION_TIME)
+            today_signal_time = datetime.combine(now.date(), signal_time, timezone.utc)
+            
+            # If it's past signal time and we haven't generated today's signal
+            last_generation = self.last_signal_generation.get(market)
+            if (now >= today_signal_time and 
+                (not last_generation or last_generation.date() < now.date())):
+                
+                logger.info(f"Generating new daily signal for {market}")
+                signal = self.strategy.generate_daily_signal(market)
             
             if signal:
                 self.last_signal_generation[market] = now
@@ -984,8 +1001,11 @@ class DailyRangeBot:
             logger.error(f"Error checking entry opportunities for {market}: {e}")
     
     def _check_daily_buy_status(self, market: str) -> Dict[str, Any]:
-        """Check buy order status for current day with stale order cleanup"""
+        """Check buy order status for current period (day/hour) with stale order cleanup"""
         try:
+            # Import and check trading timeframe
+            from config.settings import TRADING_TIMEFRAME
+            timeframe = TRADING_TIMEFRAME
             # Force sync with exchange to ensure fresh data and cleanup stale orders
             log_trading_event('buy_status_sync', f"Forcing order sync with exchange for {market}")
             sync_count = self.order_manager.load_existing_orders(market)
@@ -1005,17 +1025,37 @@ class DailyRangeBot:
             
             buy_orders = updated_orders
             
-            today = datetime.now(timezone.utc).date()
-            today_buy_orders = []
+            # Set up period checking based on timeframe
+            now = datetime.now(timezone.utc)
+            if timeframe == 'hourly':
+                current_period = now.strftime('%Y-%m-%d-%H')
+                period_name = "current hour"
+                # For hourly: orders older than 2 hours are stale
+                stale_threshold = now - timedelta(hours=2)
+            else:
+                current_period = now.date()
+                period_name = "today"
+                # For daily: orders older than 1 day are stale
+                stale_threshold = now - timedelta(days=1)
+            
+            current_period_buy_orders = []
             stale_orders = []
             
-            # Categorize orders by date
+            # Categorize orders by period
             for order in buy_orders:
-                order_date = order.created_at.date()
-                if order_date == today:
-                    today_buy_orders.append(order)
-                elif order_date < today:
-                    stale_orders.append(order)  # Older than 1 day
+                if timeframe == 'hourly':
+                    order_period = order.created_at.strftime('%Y-%m-%d-%H')
+                    is_current_period = order_period == current_period
+                    is_stale = order.created_at < stale_threshold
+                else:
+                    order_period = order.created_at.date()
+                    is_current_period = order_period == current_period
+                    is_stale = order.created_at < stale_threshold
+                
+                if is_current_period:
+                    current_period_buy_orders.append(order)
+                elif is_stale:
+                    stale_orders.append(order)
             
             # Cancel stale buy orders using proven cancel method
             # Note: cancel_order now has @settlement_retry decorator
@@ -1033,8 +1073,8 @@ class DailyRangeBot:
                         logger.error(f"Failed to cancel stale order {stale_order.client_id}: {e}")
             
             result = {
-                'has_today_buy': len(today_buy_orders) > 0,
-                'today_orders': today_buy_orders,
+                'has_today_buy': len(current_period_buy_orders) > 0,  # Keep existing key for compatibility
+                'today_orders': current_period_buy_orders,  # Keep existing key for compatibility
                 'cancelled_stale': cancelled_count,
                 'total_buy_orders': len(buy_orders),
                 'all_buy_orders': buy_orders  # Return ALL orders for validation
@@ -1050,28 +1090,57 @@ class DailyRangeBot:
                 elif isinstance(direct_exchange_orders, list):
                     exchange_buy_orders = [o for o in direct_exchange_orders if o.get('side') == 'buy']
                 
-                # Filter today's orders from exchange
-                today_exchange_buys = []
+                # Filter current period orders from exchange
+                current_period_exchange_buys = []
                 for order in exchange_buy_orders:
                     created_time = order.get('created_at', 0)
                     if isinstance(created_time, str):
                         from dateutil import parser
-                        order_date = parser.parse(created_time).date()
+                        order_datetime = parser.parse(created_time)
                     else:
-                        order_date = datetime.fromtimestamp(created_time / 1000, timezone.utc).date()
+                        order_datetime = datetime.fromtimestamp(created_time / 1000, timezone.utc)
                     
-                    if order_date == today:
-                        today_exchange_buys.append(order)
+                    if timeframe == 'hourly':
+                        order_period = order_datetime.strftime('%Y-%m-%d-%H')
+                        is_current_period = order_period == current_period
+                    else:
+                        order_period = order_datetime.date()
+                        is_current_period = order_period == current_period
+                    
+                    if is_current_period:
+                        current_period_exchange_buys.append(order)
                 
                 # Log discrepancy if found
-                manager_count = len(today_buy_orders)
-                exchange_count = len(today_exchange_buys)
+                manager_count = len(current_period_buy_orders)
+                exchange_count = len(current_period_exchange_buys)
                 if manager_count != exchange_count:
                     log_trading_event('order_discrepancy', 
                         f"Buy order count mismatch for {market}: manager={manager_count}, exchange={exchange_count}")
                     logger.warning(f"Order manager vs exchange discrepancy detected for {market}:")
-                    logger.warning(f"  Manager orders: {[o.client_id for o in today_buy_orders]}")
-                    logger.warning(f"  Exchange orders: {[o.get('client_id', o.get('order_id')) for o in today_exchange_buys]}")
+                    logger.warning(f"  Manager orders: {[o.client_id for o in current_period_buy_orders]}")
+                    logger.warning(f"  Exchange orders: {[o.get('client_id', o.get('order_id')) for o in current_period_exchange_buys]}")
+                    
+                    # CRITICAL FIX: Clean phantom buy orders (orders manager has but exchange doesn't)
+                    exchange_client_ids = {o.get('client_id') for o in current_period_exchange_buys if o.get('client_id')}
+                    phantom_orders = []
+                    for order in current_period_buy_orders:
+                        if order.client_id not in exchange_client_ids:
+                            phantom_orders.append(order)
+                    
+                    if phantom_orders:
+                        logger.warning(f"Cleaning {len(phantom_orders)} phantom buy orders for {market}")
+                        for phantom_order in phantom_orders:
+                            logger.info(f"🗑️ Removing phantom buy order: {phantom_order.client_id}")
+                            if phantom_order.client_id in self.order_manager.active_orders:
+                                del self.order_manager.active_orders[phantom_order.client_id]
+                            log_trading_event('phantom_cleanup', f"Removed phantom buy order {phantom_order.client_id} for {market}")
+                        
+                        # Recalculate result after cleanup
+                        remaining_period_buys = [o for o in current_period_buy_orders if o.client_id in exchange_client_ids]
+                        result['has_today_buy'] = len(remaining_period_buys) > 0
+                        result['today_orders'] = remaining_period_buys
+                        result['total_buy_orders'] = len([o for o in buy_orders if o.client_id in exchange_client_ids])
+                        logger.info(f"✅ After phantom cleanup: has_{period_name.replace(' ', '_')}_buy={result['has_today_buy']}")
                     
                     # REMOVED: Cache clearing logic - now using direct exchange queries only
                 
@@ -1079,7 +1148,7 @@ class DailyRangeBot:
                 logger.debug(f"Validation check failed for {market}: {validation_error}")
             
             if result['has_today_buy']:
-                log_trading_event('buy_status', f"Found {len(today_buy_orders)} buy order(s) from today for {market}")
+                log_trading_event('buy_status', f"Found {len(current_period_buy_orders)} buy order(s) from {period_name} for {market} ({timeframe} strategy)")
             
             if cancelled_count > 0:
                 log_trading_event('stale_cleanup', f"Cancelled {cancelled_count} stale buy order(s) for {market}")
@@ -3116,7 +3185,19 @@ class DailyRangeBot:
     def _check_for_completed_sell_orders(self):
         """Check for completed sell orders and set cycle completion flags"""
         try:
-            today = datetime.now(timezone.utc).date()
+            # Import and check trading timeframe
+            from config.settings import TRADING_TIMEFRAME
+            timeframe = TRADING_TIMEFRAME
+            
+            # Set up period checking based on timeframe
+            now = datetime.now(timezone.utc)
+            if timeframe == 'hourly':
+                current_period = now.strftime('%Y-%m-%d-%H')
+                period_name = "current hour"
+            else:
+                current_period = now.date()
+                period_name = "today"
+            
             completed_sells = []
             
             # Check all active orders for completed sells
@@ -3131,22 +3212,59 @@ class DailyRangeBot:
                     
                     # Check if order was completed and removed during status update
                     if updated_order is None or client_id not in self.order_manager.active_orders:
-                        # Order was removed, meaning it was FILLED or CANCELLED
-                        # Check if this was a sell order from today
-                        order_date = order_created_at.date()
-                        is_today = order_date == today
+                        # Order was removed - verify actual status via API
+                        if timeframe == 'hourly':
+                            order_period = order_created_at.strftime('%Y-%m-%d-%H')
+                            is_current_period = order_period == current_period
+                        else:
+                            order_period = order_created_at.date()
+                            is_current_period = order_period == current_period
+                            
                         is_orphaned = "_OS_" in client_id
                         
-                        if is_today and not is_orphaned:
-                            # Set cycle completion flag
-                            self._cycle_completion_flags[order_market] = True
-                            completed_sells.append(order)
-                            
-                            logger.info(f"🔄 Cycle completion flag set for {order_market} - sell order {client_id} from today completed")
-                            log_trading_event('cycle_complete', f"Cycle completion detected for {order_market} - sell order from today filled via REST API")
+                        # Try to verify actual order status
+                        if order.exchange_order_id:
+                            try:
+                                order_data = self.client.get_order_status(
+                                    market=order_market,
+                                    order_id=safe_int(order.exchange_order_id)
+                                )
+                                if order_data:
+                                    status = order_data.get('status', 'unknown')
+                                    fill_time = order_data.get('finished_at', 'unknown')
+                                    avg_price = safe_float(order_data.get('avg_price', 0))
+                                    
+                                    if status == 'filled':
+                                        if is_current_period and not is_orphaned:
+                                            self._cycle_completion_flags[order_market] = True
+                                            completed_sells.append(order)
+                                            logger.info(f"✅ SELL order {client_id} confirmed FILLED at {fill_time} @ ${avg_price:.4f} - cycle complete for {order_market}")
+                                            log_trading_event('cycle_complete', f"Confirmed sell fill for {order_market} - cycle complete ({timeframe} strategy)")
+                                        elif is_current_period and is_orphaned:
+                                            logger.info(f"📌 Orphaned sell order {client_id} confirmed FILLED at {fill_time} @ ${avg_price:.4f}")
+                                        else:
+                                            logger.debug(f"Sell order {client_id} confirmed FILLED from {order_period}")
+                                    elif status in ['cancelled', 'canceled']:
+                                        logger.info(f"❌ Sell order {client_id} confirmed CANCELLED for {order_market}")
+                                    else:
+                                        logger.warning(f"⚠️ Sell order {client_id} has unknown status: {status}")
+                                        
+                            except Exception as e:
+                                logger.warning(f"Could not verify sell order {client_id}: {e}")
+                                # Fallback to old assumption logic
+                                if is_current_period and not is_orphaned:
+                                    self._cycle_completion_flags[order_market] = True
+                                    completed_sells.append(order)
+                                    logger.info(f"🔄 Cycle completion flag set for {order_market} - sell order {client_id} disappeared (assumed filled)")
+                        else:
+                            # No exchange order ID - use fallback
+                            if is_current_period and not is_orphaned:
+                                self._cycle_completion_flags[order_market] = True
+                                completed_sells.append(order)
+                                logger.info(f"🔄 Cycle completion flag set for {order_market} - sell order {client_id} completed (no exchange ID)")
             
             if completed_sells:
-                logger.info(f"✅ Detected {len(completed_sells)} completed sell orders from today")
+                logger.info(f"✅ Detected {len(completed_sells)} completed sell orders from {period_name} ({timeframe} strategy)")
             
         except Exception as e:
             logger.error(f"Error checking for completed sell orders: {e}")
