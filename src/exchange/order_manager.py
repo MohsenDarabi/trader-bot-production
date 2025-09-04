@@ -1059,14 +1059,51 @@ class OrderManager:
             if client_id in self.active_orders:
                 order = self.active_orders[client_id]
                 order.status = OrderStatus.FILLED
-                order.filled_amount = safe_float(order_data.get('filled_amount', order.amount))
+                filled_amount = safe_float(order_data.get('filled_amount', order.amount))
+                order.filled_amount = filled_amount
                 order.updated_at = datetime.now(timezone.utc)
+                
+                # CAPTURE DATA BEFORE REMOVAL for fill notification
+                order_side = order.side
+                order_market = order.market
+                order_exchange_id = order.exchange_order_id
                 
                 # Remove from active orders (it's completed)
                 del self.active_orders[client_id]
                 self._last_status_check.pop(client_id, None)
                 
                 logger.info(f"✅ Updated local state: {client_id} marked as filled")
+                
+                # CRITICAL: Notify OrderTracker about REST-discovered fill
+                if self.order_tracker and order_side == OrderSide.BUY:
+                    # Get fill price from order data
+                    avg_price = safe_float(order_data.get('avg_price', 0))
+                    if avg_price == 0:
+                        avg_price = safe_float(order_data.get('price', order.price))
+                    
+                    # Create fill event using captured data
+                    from src.exchange.order_tracker import OrderFill
+                    import time
+                    fill = OrderFill(
+                        fill_id=f"rest_{client_id}_{int(time.time())}",
+                        order_id=str(order_exchange_id),
+                        market=order_market,
+                        side=order_side,
+                        amount=filled_amount,
+                        price=avg_price,
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    
+                    logger.info(f"📢 Notifying pairing system about REST-discovered buy fill")
+                    logger.info(f"   Market: {order_market}, Amount: {filled_amount}, Price: ${avg_price}")
+                    
+                    # Notify all fill handlers
+                    for handler in self.order_tracker.fill_handlers:
+                        try:
+                            handler(fill)
+                            logger.info(f"✅ Handler notified - sell order should be created at signal price")
+                        except Exception as e:
+                            logger.error(f"Error notifying fill handler: {e}")
             else:
                 logger.debug(f"Order {client_id} not in local tracking - no local update needed")
             
