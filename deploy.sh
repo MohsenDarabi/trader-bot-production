@@ -704,7 +704,7 @@ restart_containers() {
          --memory=128m \
          --cpus=0.25 \
          ${image_name} \
-         python main.py \"${market}\" --interval \"${interval}\" --position-percent \"${position_percent}\"")
+         \"${market}\" --interval \"${interval}\" --position-percent \"${position_percent}\"")
     
     if [[ -n "$container_id" ]]; then
         print_success "${symbol} container started with credentials from ${env_file}"
