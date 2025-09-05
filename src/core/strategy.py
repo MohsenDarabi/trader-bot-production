@@ -86,10 +86,17 @@ class DailyRangeStrategy:
         return buy_price, sell_price, range_value
     
     def _load_signals_from_database(self):
-        """Load today's signals from database on startup"""
+        """Load signals from database on startup"""
         try:
-            today = datetime.now(timezone.utc).date().isoformat()
-            logger.info(f"Loading signals from database for date: {today}")
+            from config.settings import TRADING_INTERVAL
+            now = datetime.now(timezone.utc)
+            
+            if TRADING_INTERVAL == 'hourly':
+                period = now.strftime('%Y-%m-%d-%H')
+                logger.info(f"Loading signals from database for hour: {period}")
+            else:
+                period = now.date().isoformat()
+                logger.info(f"Loading signals from database for date: {period}")
             
             # For now, we might not know which markets to load, so we'll load them as needed
             # This method will be called during signal retrieval if signal not in memory

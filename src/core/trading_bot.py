@@ -1,6 +1,7 @@
 """
-Daily Range Accumulation Trading Bot Core
+Range Accumulation Trading Bot Core
 Orchestrates all trading components and executes the strategy
+Supports both hourly and daily trading intervals
 """
 import asyncio
 import os
@@ -338,7 +339,9 @@ class DailyRangeBot:
         
     async def initialize(self):
         """Initialize all bot components"""
-        logger.info("Initializing Daily Range Accumulation Bot...")
+        from config.settings import TRADING_INTERVAL
+        interval_name = "Hourly" if TRADING_INTERVAL == 'hourly' else "Daily"
+        logger.info(f"Initializing {interval_name} Range Accumulation Bot...")
         
         try:
             # Initialize core components - Exchange Factory handles testing vs production
@@ -782,7 +785,7 @@ class DailyRangeBot:
     async def _process_market(self, market: str):
         """Process trading logic for a specific market"""
         try:
-            # Check if we need to generate new daily signals
+            # Check if we need to generate new signals
             await self._check_and_generate_signals(market)
             
             # Get current signal
