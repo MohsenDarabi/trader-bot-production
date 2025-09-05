@@ -85,6 +85,7 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 SIGNAL_GENERATION_TIME = "00:00"  # UTC time for daily signal generation
 TIMEZONE = "UTC"
 TRADING_TIMEFRAME = os.getenv('TRADING_TIMEFRAME', 'daily')  # 'daily' or 'hourly'
+TRADING_INTERVAL = os.getenv('TRADING_INTERVAL', 'daily')  # Primary interval setting
 
 # Safety Settings
 MAX_OPEN_POSITIONS = 10  # Maximum number of concurrent positions

@@ -8,6 +8,7 @@ import sys
 import asyncio
 import signal
 import os
+import argparse
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
@@ -34,6 +35,36 @@ from src.utils.asset_selector import AssetSelector
 from process_lock import ProcessLock
 
 
+def parse_command_line_args():
+    """Parse command-line arguments for interval and position sizing"""
+    parser = argparse.ArgumentParser(description='CoinEx Trading Bot with Interval Support')
+    
+    # Market argument (positional, required)
+    parser.add_argument('market', nargs='?', 
+                       help='Trading market symbol (e.g. SUIUSDT, ADAUSDT)')
+    
+    # Interval argument
+    parser.add_argument('--interval', choices=['hourly', 'daily'], 
+                       default=None,
+                       help='Trading interval: hourly or daily (default: from env var or daily)')
+    
+    # Position percentage argument
+    parser.add_argument('--position-percent', type=float, 
+                       default=None,
+                       help='Position size percentage (e.g. 1.5 for 1.5%)')
+    
+    args = parser.parse_args()
+    
+    # Set environment variables based on command-line arguments
+    if args.interval:
+        os.environ['TRADING_INTERVAL'] = args.interval
+        
+    if args.position_percent:
+        os.environ['POSITION_SIZE_PERCENT'] = str(args.position_percent)
+        
+    return args
+
+
 logger = get_logger(__name__)
 console = Console()
 
@@ -41,11 +72,11 @@ console = Console()
 class TradingBotManager:
     """Main manager for the trading bot with live terminal display"""
     
-    def __init__(self):
+    def __init__(self, market: Optional[str] = None):
         self.bot: Optional[DailyRangeBot] = None
         self.console = Console()
         self.running = False
-        self.selected_market = None
+        self.selected_market = market
         
     def create_display_layout(self) -> Layout:
         """Create the live terminal display layout"""
@@ -205,31 +236,15 @@ class TradingBotManager:
             
             self.console.print(f"💰 Account Balance: ${account_balance:.2f} USDT", style="green")
             
-            # Get market from command line argument or use default
-            import sys
-            
-            # Parse command line arguments more robustly
-            self.selected_market = None
-            
-            # Look for market argument in command line
-            for i, arg in enumerate(sys.argv[1:], 1):
-                # Skip Docker/system arguments that start with --
-                if arg.startswith('--'):
-                    continue
-                    
-                # Check if it's a valid market format (letters + USDT)
-                if arg and len(arg) >= 4 and arg.endswith('USDT') and arg[:-4].isalpha():
-                    self.selected_market = arg
-                    self.console.print(f"📈 Found market argument: {arg}", style="cyan")
-                    break
-            
-            # Fallback to environment variable if no valid market found in args
+            # Use market from constructor (set by command line args) or fallback to env var
             if not self.selected_market:
                 self.selected_market = os.getenv('DEFAULT_TRADING_MARKET')
                 if self.selected_market:
                     self.console.print(f"📈 Using DEFAULT_TRADING_MARKET: {self.selected_market}", style="yellow")
                 else:
                     raise ValueError("No valid market specified in command line or DEFAULT_TRADING_MARKET environment variable")
+            else:
+                self.console.print(f"📈 Using command line market: {self.selected_market}", style="cyan")
             self.console.print(f"📈 Selected Market: {self.selected_market}", style="cyan")
             
             # Initialize market for trading
@@ -323,17 +338,27 @@ class TradingBotManager:
 
 async def main():
     """Main entry point"""
-    # Setup signal handlers
-    manager = TradingBotManager()
+    # Parse command-line arguments first
+    args = parse_command_line_args()
+    
+    # Setup signal handlers with market from command line
+    manager = TradingBotManager(market=args.market)
     signal.signal(signal.SIGINT, manager.handle_shutdown)
     signal.signal(signal.SIGTERM, manager.handle_shutdown)
     
+    # Get configuration for banner
+    interval = os.getenv('TRADING_INTERVAL', 'daily')
+    position_percent = os.getenv('POSITION_SIZE_PERCENT', '1.0' if interval == 'hourly' else '10.0')
+    market = args.market or os.getenv('DEFAULT_TRADING_MARKET', 'Not specified')
+    
     # Show startup banner
     startup_text = f"""
-🚀 CoinEx Daily Range Accumulation Bot
-=====================================
+🚀 CoinEx {interval.title()} Range Trading Bot
+{'=' * (30 + len(interval))}
 
-Strategy: Daily Range Accumulation (No Stop Losses)
+Strategy: {interval.title()} Range Accumulation (No Stop Losses)
+Market: {market}
+Position Size: {position_percent}% per trade
 Mode: {get_position_size_mode()} ({'Test Mode - Minimum Orders' if is_test_mode() else 'Live Mode - Full Position Sizing'})
 
 ⚠️ This bot trades with real money. Monitor carefully.

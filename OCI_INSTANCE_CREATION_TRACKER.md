@@ -983,3 +983,24 @@ Out of host capacity
 
 **Attempt 63** (2025-09-05 17:08:26 UTC): Clau:EU-FRANKFURT-1-AD-2 - ❌ FAILED
 Out of host capacity
+
+**Attempt 63** (2025-09-05 17:10:17 UTC): Clau:EU-FRANKFURT-1-AD-3 - ❌ FAILED
+Out of host capacity
+
+**Attempt 64** (2025-09-05 17:22:34 UTC): Clau:EU-FRANKFURT-1-AD-1 - ❌ FAILED
+Out of host capacity
+
+**Attempt 64** (2025-09-05 17:24:26 UTC): Clau:EU-FRANKFURT-1-AD-2 - ❌ FAILED
+Out of host capacity
+
+**Attempt 64** (2025-09-05 17:26:17 UTC): Clau:EU-FRANKFURT-1-AD-3 - ❌ FAILED
+Out of host capacity
+
+**Attempt 65** (2025-09-05 17:38:04 UTC): Clau:EU-FRANKFURT-1-AD-1 - ❌ FAILED
+Out of host capacity
+
+**Attempt 65** (2025-09-05 17:39:56 UTC): Clau:EU-FRANKFURT-1-AD-2 - ❌ FAILED
+Out of host capacity
+
+**Attempt 65** (2025-09-05 17:41:48 UTC): Clau:EU-FRANKFURT-1-AD-3 - ❌ FAILED
+Out of host capacity

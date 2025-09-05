@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Enhanced Trading Bot Deployment Script with Multi-Instance Support
-# Usage: ./deploy.sh [symbol] [action] --instance [first|second] [opt]
+# Enhanced Trading Bot Deployment Script with Interval and Position Sizing Support
+# Usage: ./deploy.sh [interval] [symbol] [action] --instance [first|second] [position_percent]
 
 set -e  # Exit on any error
 
@@ -62,11 +62,15 @@ print_error() {
 
 # Function to show usage
 show_usage() {
-    echo "Enhanced Trading Bot Deployment Script with Multi-Instance Support"
-    echo "Usage: $0 [SYMBOL] [ACTION] --instance [INSTANCE] [opt]"
+    echo "Enhanced Trading Bot Deployment Script with Interval and Position Sizing Support"
+    echo "Usage: $0 [INTERVAL] [SYMBOL] [ACTION] --instance [INSTANCE] [POSITION_PERCENT]"
+    echo ""
+    echo "INTERVAL:"
+    echo "  hourly  - Trade every hour (1-2.5% position sizing)"
+    echo "  daily   - Trade every day (10-12% position sizing)"
     echo ""
     echo "SYMBOL:"
-    echo "  Any 3-8 letter crypto symbol (e.g. ada, eth, btc, aave, doge)"
+    echo "  Any 3-8 letter crypto symbol (e.g. ada, eth, btc, aave, sui)"
     echo ""
     echo "ACTION:"
     echo "  stop    - Stop specified bot"
@@ -79,31 +83,35 @@ show_usage() {
     echo "  --instance first   - Deploy to first instance (89.168.111.195)"
     echo "  --instance second  - Deploy to second instance (92.5.15.61)"
     echo ""
-    echo "OPTIMIZATION (optional):"
-    echo "  opt     - Use optimized Docker build (70% smaller image)"
-    echo "            Standard: ~400-500MB, Optimized: ~100-150MB"
+    echo "POSITION_PERCENT (optional):"
+    echo "  Decimal number for position size (e.g. 1.5 for 1.5%)"
+    echo "  Defaults: hourly=1.0%, daily=10.0%"
     echo ""
     echo "Instance Usage Strategy:"
     echo "  • Each instance should run DIFFERENT bots to avoid conflicts"
-    echo "  • Example: ada on first instance, eth on second instance"
-    echo "  • Never run the same bot on both instances simultaneously"
+    echo "  • Hourly bots: smaller positions, more frequent trades"
+    echo "  • Daily bots: larger positions, once per day trades"
     echo ""
     echo "Examples:"
-    echo "  $0 setup --instance second              # Initialize second instance"
-    echo "  $0 ada update --instance first opt      # Deploy ada to first instance (optimized)"
-    echo "  $0 eth update --instance second         # Deploy eth to second instance (standard)"
-    echo "  $0 status --instance first              # Check what's running on first instance"
-    echo "  $0 ada stop --instance first            # Stop ada bot on first instance"
+    echo "  $0 setup --instance second                    # Initialize second instance"
+    echo "  $0 hourly sui update --instance second        # Deploy hourly SUI bot (1% default)"
+    echo "  $0 hourly sui update --instance second 1.5    # Deploy hourly SUI bot (1.5% positions)"
+    echo "  $0 daily ada update --instance first          # Deploy daily ADA bot (10% default)"
+    echo "  $0 daily ada update --instance first 12.0     # Deploy daily ADA bot (12% positions)"
+    echo "  $0 status --instance first                     # Check what's running on first instance"
+    echo "  $0 hourly sui stop --instance second          # Stop hourly SUI bot"
     echo ""
+    echo "Note: All deployments now use optimized Docker builds by default"
     echo "ERROR: --instance parameter is REQUIRED to prevent accidental deployments!"
 }
 
 # Function to parse arguments and set global variables
 parse_arguments() {
+    local interval=""
     local symbol=""
     local action=""
     local instance=""
-    local optimization=""
+    local position_percent=""
     local instance_found=false
     
     # Parse all arguments
@@ -120,16 +128,20 @@ parse_arguments() {
                     exit 1
                 fi
                 ;;
-            opt)
-                optimization="opt"
-                shift
-                ;;
             setup|status|stop|update|restart)
                 action="$1"
                 shift
                 ;;
+            hourly|daily)
+                interval="$1"
+                shift
+                ;;
             *)
-                if [[ -z "$symbol" && "$1" =~ ^[a-z]{3,8}$ ]]; then
+                # Check if it's a decimal number for position percent
+                if [[ "$1" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+                    position_percent="$1"
+                    shift
+                elif [[ -z "$symbol" && "$1" =~ ^[a-z]{3,8}$ ]]; then
                     symbol="$1"
                     shift
                 elif [[ -z "$action" && "$1" =~ ^(setup|status)$ ]]; then
@@ -153,12 +165,29 @@ parse_arguments() {
         exit 1
     fi
     
+    # Set defaults: if interval is missing, default to daily
+    if [[ -z "$interval" ]]; then
+        interval="daily"
+    fi
+    
+    # Set defaults for position_percent based on interval
+    if [[ -z "$position_percent" ]]; then
+        if [[ "$interval" == "hourly" ]]; then
+            position_percent="1.0"
+        elif [[ "$interval" == "daily" ]]; then
+            position_percent="10.0"
+        else
+            position_percent="1.0"  # Default fallback (hourly - safer default)
+        fi
+    fi
+    
     # Output shell commands to set global variables
     echo "SELECTED_INSTANCE='$instance'"
     echo "VM_HOST='$(get_vm_host "$instance")'"
+    echo "interval='$interval'"
     echo "symbol='$symbol'"
     echo "action='$action'"
-    echo "optimization='$optimization'"
+    echo "position_percent='$position_percent'"
     
     # Print status message to stderr
     print_status "Selected instance: $instance ($(get_vm_host "$instance"))" >&2
@@ -166,9 +195,10 @@ parse_arguments() {
 
 # Function to validate inputs
 validate_inputs() {
-    local symbol="$1"
-    local action="$2"
-    local optimization="$3"
+    local interval="$1"
+    local symbol="$2"
+    local action="$3"
+    local position_percent="$4"
     
     # Validate action
     if [[ ! "$action" =~ ^(stop|update|restart|setup|status)$ ]]; then
@@ -177,21 +207,28 @@ validate_inputs() {
         exit 1
     fi
     
-    # For setup and status, symbol is optional
+    # For setup and status, symbol and interval are optional
     if [[ "$action" =~ ^(setup|status)$ ]]; then
         return 0
     fi
     
     # For other actions, symbol is required
     if [[ ! "$symbol" =~ ^[a-z]{3,8}$ ]]; then
-        print_error "Invalid symbol: $symbol (must be 3-8 lowercase letters, e.g. ada, eth, btc, aave)"
+        print_error "Invalid symbol: $symbol (must be 3-8 lowercase letters, e.g. ada, eth, btc, aave, sui)"
         show_usage
         exit 1
     fi
     
-    # Validate optimization flag
-    if [[ -n "$optimization" && "$optimization" != "opt" ]]; then
-        print_error "Invalid optimization flag: $optimization (must be 'opt' or omitted)"
+    # Validate interval (should always be set by defaults, but double-check)
+    if [[ -n "$interval" && ! "$interval" =~ ^(hourly|daily)$ ]]; then
+        print_error "Invalid interval: $interval (must be 'hourly' or 'daily')"
+        show_usage
+        exit 1
+    fi
+    
+    # Validate position percent
+    if [[ -n "$position_percent" && ! "$position_percent" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+        print_error "Invalid position percent: $position_percent (must be a decimal number, e.g. 1.5)"
         show_usage
         exit 1
     fi
@@ -506,19 +543,14 @@ transfer_with_retry() {
 # Enhanced local build function with robust transfer
 build_image_locally() {
     local symbol="$1"
-    local optimization="$2"
+    local interval="$2"
+    local position_percent="$3"
     local timestamp=$(date '+%Y%m%d_%H%M%S')
     
-    # Choose Dockerfile and image naming based on optimization flag
-    local dockerfile="Dockerfile"
-    local image_name="${symbol}-bot-${timestamp}"
-    local build_type="standard"
-    
-    if [[ "$optimization" == "opt" ]]; then
-        dockerfile="Dockerfile.optimized"
-        image_name="${symbol}-bot-opt-${timestamp}"
-        build_type="optimized"
-    fi
+    # Always use optimized build (default now)
+    local dockerfile="Dockerfile.optimized"
+    local image_name="${symbol}-bot-${interval}-${timestamp}"
+    local build_type="optimized"
     
     local tar_file="${image_name}.tar.gz"
     
@@ -593,8 +625,9 @@ build_image_locally() {
 # Enhanced restart function with proper credential handling and verification
 restart_containers() {
     local symbol="$1"
-    local optimization="$2"  # New optimization parameter
-    local image_name="ada-bot-fixed:latest"  # Default fallback
+    local interval="$2"
+    local position_percent="$3"
+    local image_name="${symbol}-bot-${interval}-latest"  # Default fallback
     
     # Get the image name from last build
     if [[ -f ".last_built_${symbol}" ]]; then
@@ -653,7 +686,16 @@ restart_containers() {
             "docker rm ${symbol}"
     fi
     
-    print_status "Starting ${symbol} container with ${env_file}..."
+    # Update .env file with current interval and position_percent
+    print_status "Updating ${env_file} with interval=${interval} and position=${position_percent}%..."
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
+        "cd $VM_DIR && \
+         sed -i 's/^TRADING_INTERVAL=.*/TRADING_INTERVAL=${interval}/' ${env_file} && \
+         sed -i 's/^POSITION_SIZE_PERCENT=.*/POSITION_SIZE_PERCENT=${position_percent}/' ${env_file} && \
+         grep -q '^TRADING_INTERVAL=' ${env_file} || echo 'TRADING_INTERVAL=${interval}' >> ${env_file} && \
+         grep -q '^POSITION_SIZE_PERCENT=' ${env_file} || echo 'POSITION_SIZE_PERCENT=${position_percent}' >> ${env_file}"
+    
+    print_status "Starting ${symbol} container with ${env_file} (${interval}, ${position_percent}%)..."
     local market=$(echo "${symbol}" | tr '[:lower:]' '[:upper:]')USDT
     local container_id=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
         "cd $VM_DIR && docker run -d --name ${symbol} \
@@ -662,7 +704,7 @@ restart_containers() {
          --memory=128m \
          --cpus=0.25 \
          ${image_name} \
-         python main.py ${market}")
+         python main.py ${market} --interval ${interval} --position-percent ${position_percent}")
     
     if [[ -n "$container_id" ]]; then
         print_success "${symbol} container started with credentials from ${env_file}"
@@ -784,14 +826,12 @@ show_instance_status() {
 
 # Main execution function
 execute_deployment() {
-    local symbol="$1"
-    local action="$2"
-    local optimization="$3"
+    local interval="$1"
+    local symbol="$2"
+    local action="$3"
+    local position_percent="$4"
     
-    local deployment_type="standard"
-    if [[ "$optimization" == "opt" ]]; then
-        deployment_type="optimized"
-    fi
+    local deployment_type="optimized"  # Always optimized now
     
     print_status "Starting operation: $action on $SELECTED_INSTANCE instance ($VM_HOST)"
     
@@ -809,7 +849,7 @@ execute_deployment() {
             return 0
             ;;
         "update")
-            print_status "Deployment: $symbol $action ($deployment_type)"
+            print_status "Deployment: ${interval} ${symbol} ${action} (${position_percent}%, ${deployment_type})"
             
             # Ensure Docker is running locally for build
             ensure_docker_running
@@ -820,9 +860,9 @@ execute_deployment() {
             # Clean up old VM archives to free disk space
             cleanup_old_vm_archives
             
-            print_success "Using local Docker buildx for cross-platform build ($deployment_type)"
-            if build_image_locally "$symbol" "$optimization"; then
-                restart_containers "$symbol" "$optimization"
+            print_success "Using local Docker buildx for cross-platform build (${deployment_type})"
+            if build_image_locally "$symbol" "$interval" "$position_percent"; then
+                restart_containers "$symbol" "$interval" "$position_percent"
                 cleanup_old_vm_images "$symbol"
                 print_success "Deployment completed successfully on $SELECTED_INSTANCE instance!"
             else
@@ -831,7 +871,7 @@ execute_deployment() {
             fi
             ;;
         "restart")
-            restart_containers "$symbol" "$optimization"
+            restart_containers "$symbol" "$interval" "$position_percent"
             ;;
     esac
     
@@ -853,13 +893,13 @@ main() {
     eval "$(parse_arguments "$@")"
     
     # Validate inputs
-    validate_inputs "$symbol" "$action" "$optimization"
+    validate_inputs "$interval" "$symbol" "$action" "$position_percent"
     
     # Check prerequisites (SSH connectivity to selected instance)
     check_prerequisites
     
     # Execute deployment
-    execute_deployment "$symbol" "$action" "$optimization"
+    execute_deployment "$interval" "$symbol" "$action" "$position_percent"
 }
 
 # Run main function with all arguments
