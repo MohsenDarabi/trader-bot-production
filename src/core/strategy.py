@@ -347,7 +347,8 @@ class DailyRangeStrategy:
 
     def get_current_signal(self, market: str) -> Optional[TradingSignal]:
         """
-        Get current day's signal if exists, checking memory first then database
+        Get current period's signal if exists, checking memory first then database
+        Supports both hourly and daily intervals
         
         Args:
             market: Market symbol
@@ -355,29 +356,36 @@ class DailyRangeStrategy:
         Returns:
             Current signal or None
         """
-        today = datetime.now(timezone.utc).date().isoformat()
+        from config.settings import TRADING_INTERVAL
+        now = datetime.now(timezone.utc)
+        
+        if TRADING_INTERVAL == 'hourly':
+            current_period = now.strftime('%Y-%m-%d-%H')
+        else:
+            current_period = now.date().isoformat()
         
         # First check in-memory cache
         if market in self._current_signals:
             signal = self._current_signals[market]
-            if signal.date == today:
-                logger.debug(f"Found signal in memory for {market} on {today}")
+            if signal.date == current_period:
+                logger.debug(f"Found signal in memory for {market} on {current_period}")
                 return signal
         
         # If not in memory, try loading from database
         logger.debug(f"Signal not in memory for {market}, checking database...")
-        signal = self._load_signal_from_database(market, today)
+        signal = self._load_signal_from_database(market, current_period)
         
         if signal:
             # Cache it in memory for future access
             self._current_signals[market] = signal
-            logger.info(f"🔄 Loaded and cached signal from database: {market} on {today}")
+            logger.info(f"🔄 Loaded and cached signal from database: {market} on {current_period}")
             
-            # Enhanced daily signal display for loaded signals
-            logger.info(f"📊 Daily Trading Signals for {market}: Buy=${signal.buy_price:.4f} | Sell=${signal.sell_price:.4f} | Range=${signal.range_value:.4f}")
+            # Enhanced signal display for loaded signals (interval-aware)
+            interval_name = "Hourly" if TRADING_INTERVAL == 'hourly' else "Daily"
+            logger.info(f"📊 {interval_name} Trading Signals for {market}: Buy=${signal.buy_price:.4f} | Sell=${signal.sell_price:.4f} | Range=${signal.range_value:.4f}")
             return signal
         
-        logger.debug(f"No signal found for {market} on {today}")
+        logger.debug(f"No signal found for {market} on {current_period}")
         return None
     
     def should_place_buy_order(self, market: str, current_price: float) -> bool:
