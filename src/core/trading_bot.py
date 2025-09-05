@@ -802,12 +802,12 @@ class DailyRangeBot:
     
     async def _check_and_generate_signals(self, market: str):
         """Check if we need to generate new signals based on trading timeframe"""
-        from config.settings import TRADING_TIMEFRAME
+        from config.settings import TRADING_INTERVAL
         
         now = datetime.now(timezone.utc)
         signal = None
         
-        if TRADING_TIMEFRAME == 'hourly':
+        if TRADING_INTERVAL == 'hourly':
             # Hourly signal generation logic
             current_hour = now.strftime('%Y-%m-%d-%H')
             last_generation = self.last_signal_generation.get(market)
@@ -1004,8 +1004,8 @@ class DailyRangeBot:
         """Check buy order status for current period (day/hour) with stale order cleanup"""
         try:
             # Import and check trading timeframe
-            from config.settings import TRADING_TIMEFRAME
-            timeframe = TRADING_TIMEFRAME
+            from config.settings import TRADING_INTERVAL
+            timeframe = TRADING_INTERVAL
             # Force sync with exchange to ensure fresh data and cleanup stale orders
             log_trading_event('buy_status_sync', f"Forcing order sync with exchange for {market}")
             sync_count = self.order_manager.load_existing_orders(market)
@@ -1534,8 +1534,8 @@ class DailyRangeBot:
         """Buy order decision using fresh exchange data with period-start cancellation and funding fee protection"""
         
         # Import and check trading timeframe
-        from config.settings import TRADING_TIMEFRAME
-        timeframe = TRADING_TIMEFRAME
+        from config.settings import TRADING_INTERVAL
+        timeframe = TRADING_INTERVAL
         
         # Initialize period tracking if not exists
         if not hasattr(self, '_last_reset_period'):
@@ -3252,8 +3252,8 @@ class DailyRangeBot:
         """Check for completed sell orders and set cycle completion flags"""
         try:
             # Import and check trading timeframe
-            from config.settings import TRADING_TIMEFRAME
-            timeframe = TRADING_TIMEFRAME
+            from config.settings import TRADING_INTERVAL
+            timeframe = TRADING_INTERVAL
             
             # Set up period checking based on timeframe
             now = datetime.now(timezone.utc)
