@@ -179,7 +179,7 @@ calculate_retry_interval() {
     if [[ $attempt -le $INITIAL_FAST_ATTEMPTS ]]; then
         # Fast initial attempts (2 minutes)
         base_interval=$MIN_RETRY_INTERVAL
-        log_info "Using aggressive interval for attempt $attempt"
+        # Note: Log message moved outside function to avoid mixing with return value
     elif [[ $attempt -le $MEDIUM_ATTEMPTS ]]; then
         # Gradual increase for medium attempts (simple linear increase)
         local extra_attempts=$((attempt - INITIAL_FAST_ATTEMPTS))

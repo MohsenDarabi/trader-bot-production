@@ -1164,6 +1164,64 @@ class DailyRangeBot:
                 'total_buy_orders': 0
             }
     
+    def _check_today_filled_buy_orders(self, market: str) -> bool:
+        """
+        Check if any buy orders were filled today for the given market
+        
+        This prevents the startup bug where filled orders disappear from pending orders,
+        making the bot think no buys happened today and triggering multiple "startup" buys.
+        
+        Returns:
+            True if any buy orders were filled today, False otherwise
+        """
+        try:
+            from datetime import datetime, timezone
+            from src.utils.safe_conversions import safe_float
+            today = datetime.now(timezone.utc).date()
+            
+            # Method 1: Check order tracker for filled buy orders from today
+            if hasattr(self, 'order_tracker') and self.order_tracker:
+                try:
+                    tracked_orders = self.order_tracker.tracked_orders.values()
+                    for order in tracked_orders:
+                        if (order.market == market and 
+                            order.side.value == 'buy' and 
+                            order.status in ['filled', 'partial'] and
+                            order.created_at.date() == today):
+                            logger.debug(f"🔍 Found today's filled buy order: {order.client_order_id}")
+                            return True
+                except Exception as e:
+                    logger.debug(f"Error checking order tracker for filled buys: {e}")
+            
+            # Method 2: Check recent transactions via API (if order tracker fails)
+            try:
+                # Get today's transactions from the exchange
+                # Note: This is a fallback method - order tracker is more reliable
+                transactions = self.client.get_order_fills(market)
+                if transactions and transactions.get('data'):
+                    for fill in transactions['data']:
+                        if fill.get('side') == 'buy':
+                            # Parse fill timestamp with full precision
+                            fill_time = safe_float(fill.get('time', 0))
+                            if fill_time > 0:
+                                if fill_time > 1e12:  # Milliseconds
+                                    fill_date = datetime.fromtimestamp(fill_time / 1000, timezone.utc).date()
+                                else:  # Seconds
+                                    fill_date = datetime.fromtimestamp(fill_time, timezone.utc).date()
+                                
+                                if fill_date == today:
+                                    logger.debug(f"🔍 Found today's filled buy via API: {fill.get('id', 'unknown')}")
+                                    return True
+            except Exception as e:
+                logger.debug(f"Error checking API for today's filled buy orders: {e}")
+            
+            logger.debug(f"🔍 No filled buy orders found for {market} today")
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Error checking today's filled buy orders for {market}: {e}")
+            # On error, assume no filled buys (conservative approach)
+            return False
     
     def _calculate_position_sell_balance(self, market: str) -> Dict[str, Any]:
         """Calculate position vs sell order balance using proven endpoints with exchange-aware counting"""
@@ -1802,13 +1860,21 @@ class DailyRangeBot:
             log_trading_event('emergency_block', f"🚨 Critical safety check blocked buy - {pending_sells_today} today's pending sells for {market}")
             return False
         
-        has_today_buy = len(fresh_today_buy_orders) > 0
+        # CRITICAL FIX: Check if ANY buy orders were placed today (pending OR filled)
+        # Previous bug: Only checked pending orders, which become empty after filling
+        # This caused "startup" logic to trigger repeatedly after each filled order
+        has_today_buy_pending = len(fresh_today_buy_orders) > 0
+        has_today_buy_filled = self._check_today_filled_buy_orders(market)
+        has_today_buy = has_today_buy_pending or has_today_buy_filled
+        
+        logger.info(f"🔍 Today's buy status for {market}: pending={has_today_buy_pending}, filled={has_today_buy_filled}, total={has_today_buy}")
         
         # Log fresh data decision details  
         logger.info(f"🔄 Fresh exchange data for {market}: today_buys={len(fresh_today_buy_orders)}, "
                    f"today_sells={len(fresh_today_sell_orders)} (pending_regular={pending_sells_today}), "
                    f"old_sells={len(fresh_old_sell_orders)}, cycle_complete={cycle_complete_flag}, "
                    f"consistency={'✅' if is_consistent else '🚨'}")
+        logger.info(f"🎯 Final buy decision for {market}: has_today_buy={has_today_buy} (pending: {has_today_buy_pending}, filled: {has_today_buy_filled})")
         
         # Decision logic using fresh data
         if cycle_complete_flag:
