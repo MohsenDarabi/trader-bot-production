@@ -24,11 +24,13 @@ SIMULATE_ORDERS = os.getenv('SIMULATE_ORDERS', 'true').lower() == 'true'
 
 # Trading Strategy Parameters
 RANGE_DIVISOR = 4  # (High - Low) / 4 formula
-POSITION_SIZE_PERCENT = 1.0  # 1% of available capital per trade
-LEVERAGE = 2.0  # 2x leverage on positions
+POSITION_SIZE_PERCENT = float(os.getenv('POSITION_SIZE_PERCENT', '1.0'))  # Default 1% of available capital per trade
+MAX_POSITION_SIZE_PERCENT = float(os.getenv('MAX_POSITION_SIZE_PERCENT', '2.5'))  # Maximum position size
+MIN_POSITION_SIZE_PERCENT = float(os.getenv('MIN_POSITION_SIZE_PERCENT', '0.5'))  # Minimum position size
+LEVERAGE = float(os.getenv('LEVERAGE', '2.0'))  # Default 2x leverage on positions
 MAKER_FEE = 0.0005  # 0.05% maker fee (conservative approach)
 TAKER_FEE = 0.0005  # 0.05% taker fee (actual CoinEx rate)
-MIN_PROFIT_PERCENT = 0.8  # 0.8% minimum profit after fees (reduced due to correct fee rates)
+MIN_PROFIT_PERCENT = float(os.getenv('MIN_PROFIT_PERCENT', '0.8'))  # Default 0.8% minimum profit after fees
 
 # Risk Management
 TRADING_MODE = os.getenv('TRADING_MODE', 'TEST')  # TEST or NORMAL

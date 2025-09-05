@@ -7,7 +7,7 @@ set -e  # Exit on any error
 
 # Instance Configuration
 VM_USER="ubuntu"
-SSH_KEY="/Users/mohsendarabi/Desktop/workspace/trader-bot-hourly/ssh-key-2025-07-27.key"
+SSH_KEY="/Users/mohsendarabi/Desktop/workspace/trader-bot-production/ssh-key-2025-07-27.key"
 VM_DIR="/home/ubuntu/trader-bot-production"
 
 # Global variables set by parse_arguments
