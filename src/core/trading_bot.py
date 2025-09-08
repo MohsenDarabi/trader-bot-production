@@ -2180,22 +2180,39 @@ class DailyRangeBot:
             if not is_profitable.is_profitable:
                 logger.warning(f"Order not profitable: {is_profitable.reason}")
                 
-                # Try to optimize prices for profitability using existing range expansion logic
+                # Try to expand range for profitability - simplified approach
                 if side == 'buy':
-                    optimized_buy, optimized_sell, was_optimized = validator.optimize_prices_for_profit(
-                        signal.buy_price, signal.sell_price, signal.range_value, 
-                        position_size.size_usdt, signal.previous_high, signal.previous_low
-                    )
+                    # Calculate how much we need to expand the range to achieve min profit
+                    current_spread_pct = ((signal.sell_price - signal.buy_price) / signal.buy_price) * 100
+                    required_spread_pct = validator.min_profit_percent + 0.2  # Add small buffer
                     
-                    if was_optimized:
-                        # Update signal with optimized prices
-                        logger.info(f"📈 Range expanded for profitability: Buy ${signal.buy_price:.6f} → ${optimized_buy:.6f}, Sell ${signal.sell_price:.6f} → ${optimized_sell:.6f}")
-                        price = optimized_buy  # Use optimized buy price for this order
-                        # Note: The signal object is used for sell orders later, but this adjustment is for immediate use
-                        log_trading_event('range_expansion', f"Range expanded for {market}: Buy=${optimized_buy:.6f}, Sell=${optimized_sell:.6f}")
+                    if current_spread_pct < required_spread_pct:
+                        # Calculate expansion needed
+                        spread_increase_needed = required_spread_pct - current_spread_pct
+                        logger.info(f"📊 Current spread: {current_spread_pct:.2f}%, Required: {required_spread_pct:.2f}%")
+                        
+                        # Expand range symmetrically to achieve minimum profit
+                        price_expansion = signal.buy_price * (spread_increase_needed / 200)  # Divide by 2 for symmetric expansion
+                        expanded_buy = signal.buy_price - price_expansion
+                        expanded_sell = signal.sell_price + price_expansion
+                        
+                        # Validate the expanded prices are reasonable
+                        if expanded_buy > 0 and expanded_sell > expanded_buy:
+                            # Verify this achieves profitability
+                            test_result = validator.is_signal_profitable(expanded_buy, expanded_sell, position_size.size_usdt)
+                            if test_result.is_profitable:
+                                logger.info(f"📈 Range expanded for profitability: Buy ${signal.buy_price:.6f} → ${expanded_buy:.6f}, Sell ${signal.sell_price:.6f} → ${expanded_sell:.6f}")
+                                logger.info(f"💰 Expected profit: {test_result.profit_percent:.2f}%")
+                                price = expanded_buy  # Use expanded buy price for this order
+                                log_trading_event('range_expansion', f"Range expanded for {market}: Buy=${expanded_buy:.6f}, Sell=${expanded_sell:.6f}, Profit={test_result.profit_percent:.2f}%")
+                            else:
+                                logger.warning(f"❌ Range expansion didn't achieve profitability: {test_result.profit_percent:.2f}% - skipping")
+                                return
+                        else:
+                            logger.warning(f"❌ Invalid expanded prices: Buy=${expanded_buy:.6f}, Sell=${expanded_sell:.6f} - skipping")
+                            return
                     else:
-                        logger.warning(f"❌ Could not optimize prices for profitability - skipping order")
-                        return
+                        logger.info(f"✅ Spread sufficient: {current_spread_pct:.2f}% >= {required_spread_pct:.2f}%")
                 else:
                     # For sell orders, can't optimize since we're exiting at current signal
                     return
