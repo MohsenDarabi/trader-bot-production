@@ -2229,9 +2229,22 @@ class DailyRangeBot:
                         midpoint = safe_float((signal.buy_price + signal.sell_price) / 2)
                         half_spread_pct = safe_float(required_spread_pct / 2)
                         
-                        # Expand symmetrically from midpoint
-                        expanded_buy = safe_float(midpoint / (1 + half_spread_pct/100))
-                        expanded_sell = safe_float(expanded_buy * (1 + required_spread_pct/100))
+                        # Expand symmetrically from midpoint (raw calculation)
+                        expanded_buy_raw = safe_float(midpoint / (1 + half_spread_pct/100))
+                        expanded_sell_raw = safe_float(expanded_buy_raw * (1 + required_spread_pct/100))
+                        
+                        # Apply exchange precision using tick_size
+                        market_info = self.market_data.get_market_info(market)
+                        tick_size = safe_float(market_info.get('tick_size', 0.0001))
+                        
+                        # Round prices to exchange precision
+                        from decimal import Decimal, ROUND_HALF_UP
+                        buy_decimal = Decimal(str(safe_float(expanded_buy_raw)))
+                        tick_decimal = Decimal(str(safe_float(tick_size)))
+                        expanded_buy = safe_float((buy_decimal / tick_decimal).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_decimal)
+                        
+                        sell_decimal = Decimal(str(safe_float(expanded_sell_raw)))
+                        expanded_sell = safe_float((sell_decimal / tick_decimal).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_decimal)
                         
                         # Validate the expanded prices are reasonable
                         if expanded_buy > 0 and expanded_sell > expanded_buy:
