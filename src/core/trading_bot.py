@@ -1796,6 +1796,7 @@ class DailyRangeBot:
         # Continue with remaining safety checks from original code
         exchange_state = self._get_exchange_position_and_orders_direct(market)
         pending_buy_orders = exchange_state['today_buy_orders']
+        pending_sell_orders = exchange_state['today_sell_orders'] + exchange_state['old_sell_orders']
         
         # Final safety check for pending buy orders
         if pending_buy_orders:
