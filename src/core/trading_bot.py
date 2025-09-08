@@ -1743,7 +1743,11 @@ class DailyRangeBot:
         position_size = balance.get('position_size', 0)
         uncovered = balance.get('uncovered_position', 0)
         
-        if position_size > 0 and uncovered > self.min_order_size:
+        # Get dynamic minimum order size for this market
+        current_price = self.market_data.get_current_price(market)
+        min_order_size = self.market_data.get_minimum_order_value(market, current_price)
+        
+        if position_size > 0 and uncovered > min_order_size:
             logger.info(f"⚠️ Position {position_size} not fully covered. Uncovered: {uncovered}")
             # Place sell order for uncovered amount
             self._place_missing_sell_order(market, uncovered)
@@ -2001,7 +2005,11 @@ class DailyRangeBot:
         position_size_final = balance.get('position_size', 0)
         uncovered_final = balance.get('missing_sell', 0)  # Use 'missing_sell' key from the method
 
-        if uncovered_final > self.min_order_size:
+        # Get dynamic minimum order size for this market
+        current_price = self.market_data.get_current_price(market)  
+        min_order_size_final = self.market_data.get_minimum_order_value(market, current_price)
+        
+        if uncovered_final > min_order_size_final:
             logger.warning(f"⚠️ FINAL CHECK: Uncovered position detected: {uncovered_final:.6f} for {market}")
             logger.warning(f"   Position size: {position_size_final:.6f}")
             # Try to place sell order for uncovered amount
