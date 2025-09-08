@@ -239,6 +239,10 @@ class OrderManager:
             # Store in active orders
             self.active_orders[client_id] = order
             
+            # Track in recent order tracker to prevent duplicates
+            if hasattr(self, 'recent_order_tracker') and self.recent_order_tracker:
+                self.recent_order_tracker.track_order_placed(market, client_id, exchange_amount)
+            
             # UNIFIED IMMEDIATE PAIRING: Coordinate with tracking system
             filled_amount = exchange_filled
             unfilled_amount = exchange_unfilled
@@ -520,6 +524,10 @@ class OrderManager:
             
             # Store in active orders
             self.active_orders[client_id] = order
+            
+            # Track in recent order tracker to prevent duplicates  
+            if hasattr(self, 'recent_order_tracker') and self.recent_order_tracker:
+                self.recent_order_tracker.track_order_placed(market, client_id, exchange_amount)
             
             # Enhanced validation: verify order exists on exchange with retry logic
             validation_success = False

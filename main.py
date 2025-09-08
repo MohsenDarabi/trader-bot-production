@@ -51,7 +51,7 @@ def parse_command_line_args():
     # Position percentage argument
     parser.add_argument('--position-percent', type=float, 
                        default=None,
-                       help='Position size percentage (e.g. 1.5 for 1.5%)')
+                       help='Position size percentage (e.g. 1.5 for 1.5 percent)')
     
     args = parser.parse_args()
     

@@ -28,6 +28,7 @@ from config.settings import (
     MIN_PROFIT_PERCENT
 )
 from src.utils.safe_conversions import safe_float, safe_int, safe_str_format
+from src.core.recent_order_tracker import RecentOrderTracker
 
 
 logger = get_logger(__name__)
@@ -333,6 +334,9 @@ class DailyRangeBot:
         # Cycle completion tracking for continuous trading
         self._cycle_completion_flags = {}  # market -> bool (allows immediate new buy after cycle complete)
         
+        # Recent order tracking to prevent duplicates and handle phantom orders
+        self.recent_order_tracker = RecentOrderTracker(grace_period_seconds=30)
+        
         # Daily reset tracking to ensure it's only done once per day
         self._daily_reset_completed = {}  # market -> date of last reset
         self._last_reset_date = {}  # market -> date when reset was done
@@ -369,6 +373,9 @@ class DailyRangeBot:
             validator = ProfitabilityValidator()
             self.order_manager = OrderManager(self.client, validator)
             self.position_sizer = PositionSizer(self.market_data, self.position_manager)
+            
+            # Link recent order tracker to order manager
+            self.order_manager.recent_order_tracker = self.recent_order_tracker
             
             # Initialize WebSocket and order tracking components
             self.websocket_client = CoinExWebSocketClient()
@@ -1123,12 +1130,31 @@ class DailyRangeBot:
                     logger.warning(f"  Manager orders: {[o.client_id for o in current_period_buy_orders]}")
                     logger.warning(f"  Exchange orders: {[o.get('client_id', o.get('order_id')) for o in current_period_exchange_buys]}")
                     
-                    # CRITICAL FIX: Clean phantom buy orders (orders manager has but exchange doesn't)
+                    # ENHANCED PHANTOM CLEANUP: Clean phantom buy orders with grace period
                     exchange_client_ids = {o.get('client_id') for o in current_period_exchange_buys if o.get('client_id')}
                     phantom_orders = []
                     for order in current_period_buy_orders:
                         if order.client_id not in exchange_client_ids:
-                            phantom_orders.append(order)
+                            # Check order age before marking as phantom
+                            order_age = (datetime.now(timezone.utc) - order.created_at).total_seconds()
+                            
+                            if order_age < 30:
+                                # Too young - keep it (exchange visibility delay)
+                                logger.info(f"👻 Keeping recent order {order.client_id} ({order_age:.1f}s old) - waiting for exchange visibility")
+                                continue
+                                
+                            elif order_age < 60:
+                                # Track as phantom candidate for verification
+                                self.recent_order_tracker.mark_as_phantom_candidate(
+                                    market, order.client_id, order.amount
+                                )
+                                logger.warning(f"👻 Marking phantom candidate: {order.client_id} ({order_age:.1f}s old)")
+                                # Still add to phantom_orders for cleanup
+                                phantom_orders.append(order)
+                            else:
+                                # Old enough - safe to remove
+                                logger.warning(f"👻 Old phantom order: {order.client_id} ({order_age:.1f}s old)")
+                                phantom_orders.append(order)
                     
                     if phantom_orders:
                         logger.warning(f"Cleaning {len(phantom_orders)} phantom buy orders for {market}")
@@ -1941,7 +1967,63 @@ class DailyRangeBot:
         if market in self._logged_states:
             self._logged_states[market] = {}  # Clear logged states for fresh start
         
-        log_trading_event('buy_decision', f"✅ All checks passed - ready to place buy order for {market}")
+        # FINAL VALIDATION LAYER: Multi-source cross-check to prevent duplicate orders
+        # This happens AFTER all other checks pass and provides additional protection
+        
+        # Check 1: Recent Order Protection (30-second cooldown)
+        has_recent, recent_client_id = self.recent_order_tracker.has_recent_order(market)
+        if has_recent:
+            logger.info(f"🛡️ Recent order protection: {recent_client_id} placed within 30s for {market}")
+            log_trading_event('recent_order_block', f"Buy blocked - recent order {recent_client_id} for {market}")
+            return False
+
+        # Check 2: Phantom Order Verification 
+        # If we removed a "phantom" order recently, check if position might have increased
+        phantom_candidates = self.recent_order_tracker.get_phantom_candidates(market)
+        if phantom_candidates:
+            # Get current position
+            current_position = self.position_manager.get_position(market)
+            current_size = current_position.size if current_position else 0
+            
+            for phantom_time, phantom_client_id, phantom_amount in phantom_candidates:
+                age = (datetime.now(timezone.utc) - phantom_time).total_seconds()
+                if age < 60:  # Within 1 minute
+                    logger.warning(f"⚠️ Phantom order {phantom_client_id} verification pending (age: {age:.1f}s)")
+                    logger.warning(f"   Current position: {current_size:.6f}, Phantom amount: {phantom_amount:.6f}")
+                    # Block buy for safety until phantom is verified
+                    log_trading_event('phantom_verification_block', 
+                                    f"Buy blocked - phantom order {phantom_client_id} verification pending for {market}")
+                    return False
+
+        # Check 3: Enhanced Position Coverage (FINAL RE-CHECK with fresh data)
+        # Re-check position coverage to catch any race conditions
+        balance = self._calculate_position_sell_balance(market)
+        position_size_final = balance.get('position_size', 0)
+        uncovered_final = balance.get('missing_sell', 0)  # Use 'missing_sell' key from the method
+
+        if uncovered_final > self.min_order_size:
+            logger.warning(f"⚠️ FINAL CHECK: Uncovered position detected: {uncovered_final:.6f} for {market}")
+            logger.warning(f"   Position size: {position_size_final:.6f}")
+            # Try to place sell order for uncovered amount
+            self._place_missing_sell_order(market, uncovered_final)
+            log_trading_event('final_position_check_block', 
+                            f"Buy blocked - uncovered position {uncovered_final:.6f} for {market}")
+            return False
+
+        # Check 4: Order Visibility Grace Period
+        # Even if order manager shows an order, wait for exchange visibility
+        manager_orders = self.order_manager.get_pending_orders(market)
+        for order in manager_orders:
+            if order.side.value == 'buy':  # Check OrderSide enum value
+                order_age = (datetime.now(timezone.utc) - order.created_at).total_seconds()
+                if order_age < 30:
+                    logger.info(f"⏳ Buy order {order.client_id} waiting for exchange visibility ({order_age:.1f}s)")
+                    log_trading_event('order_visibility_wait', 
+                                    f"Buy blocked - order {order.client_id} waiting for visibility for {market}")
+                    return False
+
+        # All enhanced checks passed
+        log_trading_event('buy_decision', f"✅ All checks passed including enhanced validation - ready to place buy order for {market}")
         log_trading_event('order_details', f"💰 Order details: ${signal.buy_price:.2f} x {position_size.quantity:.6f} = ${position_size.size_usdt:.2f} for {market}")
         return True
     
