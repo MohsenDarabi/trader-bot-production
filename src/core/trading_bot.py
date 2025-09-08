@@ -2179,7 +2179,26 @@ class DailyRangeBot:
             is_profitable = validator.is_signal_profitable(price, exit_price, position_size.size_usdt)
             if not is_profitable.is_profitable:
                 logger.warning(f"Order not profitable: {is_profitable.reason}")
-                return
+                
+                # Try to optimize prices for profitability using existing range expansion logic
+                if side == 'buy':
+                    optimized_buy, optimized_sell, was_optimized = validator.optimize_prices_for_profit(
+                        signal.buy_price, signal.sell_price, signal.range_value, 
+                        position_size.size_usdt, signal.previous_high, signal.previous_low
+                    )
+                    
+                    if was_optimized:
+                        # Update signal with optimized prices
+                        logger.info(f"📈 Range expanded for profitability: Buy ${signal.buy_price:.6f} → ${optimized_buy:.6f}, Sell ${signal.sell_price:.6f} → ${optimized_sell:.6f}")
+                        price = optimized_buy  # Use optimized buy price for this order
+                        # Note: The signal object is used for sell orders later, but this adjustment is for immediate use
+                        log_trading_event('range_expansion', f"Range expanded for {market}: Buy=${optimized_buy:.6f}, Sell=${optimized_sell:.6f}")
+                    else:
+                        logger.warning(f"❌ Could not optimize prices for profitability - skipping order")
+                        return
+                else:
+                    # For sell orders, can't optimize since we're exiting at current signal
+                    return
             
             # Apply price adjustments for better entries/exits
             adjusted_price = price
