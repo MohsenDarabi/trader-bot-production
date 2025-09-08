@@ -2218,9 +2218,9 @@ class DailyRangeBot:
                     # Calculate current spread percentage using safe_float
                     current_spread_pct = safe_float(((signal.sell_price - signal.buy_price) / signal.buy_price) * 100)
                     
-                    # For 0.8% net profit, we need exactly 0.4752% price spread (calculated from leverage formula)
+                    # For 0.8% net profit, we need ~0.4760% price spread (with small buffer for exchange precision)
                     target_profit_pct = safe_float(0.8)  # 0.8% target profit
-                    required_spread_pct = safe_float(0.4752)  # Exact spread needed for 0.8% profit with 2x leverage
+                    required_spread_pct = safe_float(0.4760)  # Exact spread needed for 0.8% profit with 2x leverage + precision buffer
                     
                     if current_spread_pct < required_spread_pct:
                         logger.info(f"📊 Current spread: {safe_str_format(safe_float(current_spread_pct), '.4f')}%, Required: {safe_str_format(safe_float(required_spread_pct), '.4f')}% for {safe_str_format(safe_float(target_profit_pct), '.1f')}% profit")
