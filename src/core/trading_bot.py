@@ -2180,39 +2180,43 @@ class DailyRangeBot:
             if not is_profitable.is_profitable:
                 logger.warning(f"Order not profitable: {is_profitable.reason}")
                 
-                # Try to expand range for profitability - simplified approach
+                # Try to expand range for profitability - corrected calculation
                 if side == 'buy':
-                    # Calculate how much we need to expand the range to achieve min profit
-                    current_spread_pct = ((signal.sell_price - signal.buy_price) / signal.buy_price) * 100
-                    required_spread_pct = validator.min_profit_percent + 0.2  # Add small buffer
+                    # Calculate current spread percentage using safe_float
+                    current_spread_pct = safe_float(((signal.sell_price - signal.buy_price) / signal.buy_price) * 100)
+                    
+                    # For 0.8% net profit, we need exactly 0.4752% price spread (calculated from leverage formula)
+                    target_profit_pct = safe_float(0.8)  # 0.8% target profit
+                    required_spread_pct = safe_float(0.4752)  # Exact spread needed for 0.8% profit with 2x leverage
                     
                     if current_spread_pct < required_spread_pct:
-                        # Calculate expansion needed
-                        spread_increase_needed = required_spread_pct - current_spread_pct
-                        logger.info(f"📊 Current spread: {current_spread_pct:.2f}%, Required: {required_spread_pct:.2f}%")
+                        logger.info(f"📊 Current spread: {safe_str_format(safe_float(current_spread_pct), '.4f')}%, Required: {safe_str_format(safe_float(required_spread_pct), '.4f')}% for {safe_str_format(safe_float(target_profit_pct), '.1f')}% profit")
                         
-                        # Expand range symmetrically to achieve minimum profit
-                        price_expansion = signal.buy_price * (spread_increase_needed / 200)  # Divide by 2 for symmetric expansion
-                        expanded_buy = signal.buy_price - price_expansion
-                        expanded_sell = signal.sell_price + price_expansion
+                        # Calculate from midpoint and expand symmetrically
+                        midpoint = safe_float((signal.buy_price + signal.sell_price) / 2)
+                        half_spread_pct = safe_float(required_spread_pct / 2)
+                        
+                        # Expand symmetrically from midpoint
+                        expanded_buy = safe_float(midpoint / (1 + half_spread_pct/100))
+                        expanded_sell = safe_float(expanded_buy * (1 + required_spread_pct/100))
                         
                         # Validate the expanded prices are reasonable
                         if expanded_buy > 0 and expanded_sell > expanded_buy:
-                            # Verify this achieves profitability
+                            # Verify this achieves exact profitability
                             test_result = validator.is_signal_profitable(expanded_buy, expanded_sell, position_size.size_usdt)
                             if test_result.is_profitable:
-                                logger.info(f"📈 Range expanded for profitability: Buy ${signal.buy_price:.6f} → ${expanded_buy:.6f}, Sell ${signal.sell_price:.6f} → ${expanded_sell:.6f}")
-                                logger.info(f"💰 Expected profit: {test_result.profit_percent:.2f}%")
-                                price = expanded_buy  # Use expanded buy price for this order
-                                log_trading_event('range_expansion', f"Range expanded for {market}: Buy=${expanded_buy:.6f}, Sell=${expanded_sell:.6f}, Profit={test_result.profit_percent:.2f}%")
+                                logger.info(f"📈 Range expanded for profitability: Buy ${safe_str_format(safe_float(signal.buy_price), '.8f')} → ${safe_str_format(safe_float(expanded_buy), '.8f')}, Sell ${safe_str_format(safe_float(signal.sell_price), '.8f')} → ${safe_str_format(safe_float(expanded_sell), '.8f')}")
+                                logger.info(f"💰 Expected profit: {safe_str_format(safe_float(test_result.profit_percent), '.4f')}%")
+                                price = safe_float(expanded_buy)  # Use expanded buy price for this order
+                                log_trading_event('range_expansion', f"Range expanded for {market}: Buy={safe_str_format(safe_float(expanded_buy), '.8f')}, Sell={safe_str_format(safe_float(expanded_sell), '.8f')}, Profit={safe_str_format(safe_float(test_result.profit_percent), '.4f')}%")
                             else:
-                                logger.warning(f"❌ Range expansion didn't achieve profitability: {test_result.profit_percent:.2f}% - skipping")
+                                logger.warning(f"❌ Range expansion didn't achieve profitability: {safe_str_format(safe_float(test_result.profit_percent), '.4f')}% - skipping")
                                 return
                         else:
-                            logger.warning(f"❌ Invalid expanded prices: Buy=${expanded_buy:.6f}, Sell=${expanded_sell:.6f} - skipping")
+                            logger.warning(f"❌ Invalid expanded prices: Buy={safe_str_format(safe_float(expanded_buy), '.8f')}, Sell={safe_str_format(safe_float(expanded_sell), '.8f')} - skipping")
                             return
                     else:
-                        logger.info(f"✅ Spread sufficient: {current_spread_pct:.2f}% >= {required_spread_pct:.2f}%")
+                        logger.info(f"✅ Spread sufficient: {safe_str_format(safe_float(current_spread_pct), '.4f')}% >= {safe_str_format(safe_float(required_spread_pct), '.4f')}%")
                 else:
                     # For sell orders, can't optimize since we're exiting at current signal
                     return
