@@ -1641,19 +1641,38 @@ class DailyRangeBot:
         current_minute = now.minute
         
         if timeframe == 'hourly':
-            # Hourly reset logic
+            # Hourly reset logic - check if hour changed
             current_period = now.strftime('%Y-%m-%d-%H')
+            
+            if not hasattr(self, '_last_reset_period'):
+                self._last_reset_period = {}
+            
             last_reset = self._last_reset_period.get(market)
-            is_new_period = self.market_data.is_new_trading_hour(market)
-            needs_reset = (last_reset != current_period and is_new_period)
+            
+            # Check if hour changed (regardless of funding windows)
+            is_new_period = (last_reset != current_period)
+            
+            # Skip reset ONLY if currently IN funding window (not just detecting new hour)
+            in_funding_window = (current_hour in [0, 8, 16] and 
+                                current_minute == 0 and 
+                                now.second <= 60)
+            
+            needs_reset = is_new_period and not in_funding_window
             reset_type = "hourly"
         else:
-            # Daily reset logic (existing)
+            # Daily reset logic - check if it's a new day
             today = now.date()
             current_period = today
-            last_reset = self._last_reset_date.get(market) if hasattr(self, '_last_reset_date') else None
-            is_new_period = current_hour == 0 and current_minute >= 4
-            needs_reset = (last_reset != today and is_new_period)
+            
+            # Check if we've moved to a new day
+            if not hasattr(self, '_last_reset_date'):
+                self._last_reset_date = {}
+            
+            last_reset = self._last_reset_date.get(market)
+            
+            # New day if date changed (not time-window based)
+            is_new_period = (last_reset != today)
+            needs_reset = is_new_period
             reset_type = "daily"
         
         if needs_reset:
@@ -1711,13 +1730,27 @@ class DailyRangeBot:
         pending_sells_today = self._get_today_pending_sell_orders(market)  # Already excludes orphaned
         
         # Check period and buy conditions based on timeframe
+        current_time = datetime.now(timezone.utc)
+        
         if timeframe == 'hourly':
-            is_new_period = self.market_data.is_new_trading_hour(market)
+            # For hourly: Check if we're in a new hour (not in funding window)
+            current_hour = current_time.hour
+            current_minute = current_time.minute
+            current_second = current_time.second
+            
+            # Not in funding window means we can trade
+            in_funding_window = (current_hour in [0, 8, 16] and 
+                               current_minute == 0 and 
+                               current_second <= 60)
+            is_new_period = not in_funding_window
+            
             buy_status = self._check_daily_buy_status(market)  # Reuse existing method - it checks recent buy activity
             has_period_buy = buy_status.get('has_today_buy', False)
             period_name = "hour"
         else:
-            is_new_period = self.market_data.is_new_trading_day(market)
+            # For daily: Always allow trading (not time-window restricted)
+            is_new_period = True
+            
             buy_status = self._check_daily_buy_status(market)
             has_period_buy = buy_status.get('has_today_buy', False)
             period_name = "day"
