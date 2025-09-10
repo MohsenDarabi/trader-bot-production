@@ -114,14 +114,15 @@ class ProfitabilityValidator:
         # Calculate minimum required spread for profitability
         # NO LIMITS - optimize prices with unlimited range
         
-        # Calculate required price increase percentage for profitability
-        # Total fees as percentage: taker fee + maker fee  
-        total_fee_percent = (self.taker_fee + self.maker_fee) * 100
+        # Calculate the required sell/buy price ratio (multiplier) for profitability.
+        # The formula accounts for leverage and separate buy/sell fees.
+        # Formula: sell_price = buy_price * (1 + buy_fee + (min_profit / leverage)) / (1 - sell_fee)
+        min_profit_decimal = self.min_profit_percent / 100  # Convert from 1.0 to 0.01
         
-        # Required price increase including fees and profit (adjusted for leverage)
-        required_price_increase = (self.min_profit_percent + total_fee_percent) / self.leverage
-        min_spread_factor = 1 + (required_price_increase / 100)
-        
+        # We assume the entry (buy) is a TAKER order and the exit (sell) is a MAKER order.
+        required_multiplier = (1 + self.taker_fee + (min_profit_decimal / self.leverage)) / (1 - self.maker_fee)
+        min_spread_factor = required_multiplier  # Use a consistent name with the old code
+
         # Calculate minimum sell price needed for profitability
         min_sell_price = buy_price * min_spread_factor
         

@@ -30,7 +30,7 @@ MIN_POSITION_SIZE_PERCENT = float(os.getenv('MIN_POSITION_SIZE_PERCENT', '0.5'))
 LEVERAGE = float(os.getenv('LEVERAGE', '2.0'))  # Default 2x leverage on positions
 MAKER_FEE = 0.0005  # 0.05% maker fee (conservative approach)
 TAKER_FEE = 0.0005  # 0.05% taker fee (actual CoinEx rate)
-MIN_PROFIT_PERCENT = float(os.getenv('MIN_PROFIT_PERCENT', '0.8'))  # Default 0.8% minimum profit after fees
+MIN_PROFIT_PERCENT = float(os.getenv('MIN_PROFIT_PERCENT', '1.0'))  # Default 1.0% minimum profit after fees
 
 # Risk Management
 TRADING_MODE = os.getenv('TRADING_MODE', 'TEST')  # TEST or NORMAL
