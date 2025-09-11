@@ -812,52 +812,53 @@ class DailyRangeBot:
     
     async def _check_and_generate_signals(self, market: str):
         """Check if we need to generate new signals based on trading timeframe"""
-        from config.settings import TRADING_INTERVAL
+        from config.settings import TRADING_INTERVAL, SIGNAL_GENERATION_TIME
+        from datetime import time
         
         now = datetime.now(timezone.utc)
         signal = None
-        
+        generation_attempted = False
+
         if TRADING_INTERVAL == 'hourly':
-            # Hourly signal generation logic
             current_hour = now.strftime('%Y-%m-%d-%H')
             last_generation = self.last_signal_generation.get(market)
-            
-            # Check if we need to generate a signal for this hour
-            needs_signal = (not last_generation or 
-                          (hasattr(last_generation, 'hour') and 
-                           last_generation.strftime('%Y-%m-%d-%H') != current_hour))
-            
-            if needs_signal:
+            if (not last_generation or
+                (hasattr(last_generation, 'hour') and
+                 last_generation.strftime('%Y-%m-%d-%H') != current_hour)):
+                
                 logger.info(f"Generating new hourly signal for {market} (hour: {current_hour})")
+                generation_attempted = True
                 signal = self.strategy.generate_hourly_signal(market)
-        else:
-            # Daily signal generation logic (existing)
+        else:  # Daily
             signal_time = time.fromisoformat(SIGNAL_GENERATION_TIME)
             today_signal_time = datetime.combine(now.date(), signal_time, timezone.utc)
-            
-            # If it's past signal time and we haven't generated today's signal
             last_generation = self.last_signal_generation.get(market)
-            if (now >= today_signal_time and 
+            if (now >= today_signal_time and
                 (not last_generation or last_generation.date() < now.date())):
                 
                 logger.info(f"Generating new daily signal for {market}")
+                generation_attempted = True
                 signal = self.strategy.generate_daily_signal(market)
+
+        if signal:
+            # If signal was generated successfully, record the time and update pairing rules
+            self.last_signal_generation[market] = now
+            self.status.last_signal_time = now
+            log_trading_event('signal_generation', f"Generated signal for {market}: Buy=${signal.buy_price:.2f}, Sell=${signal.sell_price:.2f}")
             
-            if signal:
-                self.last_signal_generation[market] = now
-                self.status.last_signal_time = now
-                log_trading_event('signal_generation', f"Generated signal for {market}: Buy=${signal.buy_price:.2f}, Sell=${signal.sell_price:.2f}")
-                
-                # Update pairing rule with new signal's sell price
-                if self.pairing_manager:
-                    self.pairing_manager.configure_pairing_rule(
-                        market=market,
-                        sell_price_levels=[signal.sell_price],  # Use new signal's sell price
-                        min_fill_amount=0.001  # Minimum fill to trigger sell orders
-                    )
-                    logger.info(f"Updated pairing rule for {market} with new sell price ${signal.sell_price:.2f}")
-            else:
-                logger.warning(f"Failed to generate signal for {market}")
+            if self.pairing_manager:
+                self.pairing_manager.configure_pairing_rule(
+                    market=market,
+                    sell_price_levels=[signal.sell_price],
+                    min_fill_amount=0.001
+                )
+                logger.info(f"Updated pairing rule for {market} with new sell price ${signal.sell_price:.2f}")
+        elif generation_attempted:
+            # If we tried to generate a signal but failed, log it.
+            # This structure prevents repeated generation attempts on failure.
+            logger.warning(f"Failed to generate signal for {market}, will not retry until next period.")
+            # We still update the timestamp to prevent rapid retries within the same period
+            self.last_signal_generation[market] = now
     
     async def _check_exit_opportunities(self, market: str, signal: TradingSignal):
         """Check for profitable exit opportunities"""
@@ -914,7 +915,11 @@ class DailyRangeBot:
             # Check if position is fully covered
             uncovered_amount = position.size - total_sell_amount
             
-            if uncovered_amount > 0.000001:  # Small tolerance for rounding
+            # Get minimum order amount for the market to use as tolerance
+            market_info = self.market_data.get_market_info(market)
+            min_amount = safe_float(market_info.get('min_amount', 0.000001))
+
+            if uncovered_amount > min_amount:
                 logger.warning(f"🔧 ORPHANED POSITION DETECTED: {market}")
                 logger.warning(f"   Position size: {position.size:.6f}")
                 logger.warning(f"   Sell orders total: {total_sell_amount:.6f}")
@@ -1294,7 +1299,12 @@ class DailyRangeBot:
             
             # Calculate missing sell amount
             missing_sell = max(0, position_size - total_sell_amount)
-            is_balanced = missing_sell < 0.000001  # Allow tiny rounding differences
+            
+            # Get minimum order amount for tolerance
+            market_info = self.market_data.get_market_info(market)
+            min_amount = safe_float(market_info.get('min_amount', 0.000001))
+
+            is_balanced = missing_sell < min_amount  # Allow tiny rounding differences
             
             result = {
                 'position_size': position_size,
@@ -1368,9 +1378,13 @@ class DailyRangeBot:
                 logger.error(f"🚨 Cannot place sell order - no position exists for {market}")
                 return False
             
+            # Get min_amount for tolerance
+            market_info = self.market_data.get_market_info(market)
+            min_amount = safe_float(market_info.get('min_amount', 0.000001))
+
             # Check if adding this sell order would exceed position size
             total_sells_after = current_balance['total_sells'] + missing_amount
-            if total_sells_after > current_balance['position_size'] + 0.000001:  # Small tolerance for rounding
+            if total_sells_after > current_balance['position_size'] + min_amount:  # Small tolerance for rounding
                 logger.error(f"🚨 OVER-SELLING PREVENTED: Sell order would exceed position size!")
                 logger.error(f"   Position: {current_balance['position_size']:.6f}")
                 logger.error(f"   Current sells: {current_balance['total_sells']:.6f}")
@@ -1845,8 +1859,12 @@ class DailyRangeBot:
             # Position exists but only with old sells - can start new daily cycle
             logger.info(f"Position exists ({position_size:.6f}) with only old sells - allowing new daily buy cycle for {market}")
             
+            # Get min_amount for tolerance
+            market_info = self.market_data.get_market_info(market)
+            min_amount = safe_float(market_info.get('min_amount', 0.000001))
+
             # Check for uncovered amount and handle if needed
-            if uncovered_amount > 0.000001:
+            if uncovered_amount > min_amount:
                 logger.warning(f"⚠️ Uncovered position detected: {uncovered_amount:.6f} for {market}")
                 # Don't block buy but log for monitoring
                 log_trading_event('uncovered_detected', 
@@ -2208,7 +2226,7 @@ class DailyRangeBot:
             
             # Validate profitability before placing order
             validator = ProfitabilityValidator()
-            exit_price = signal.sell_price if side == 'buy' else signal.buy_price
+            exit_price = signal.sell_price #if side == 'buy' else signal.buy_price
             
             is_profitable = validator.is_signal_profitable(price, exit_price, position_size.size_usdt)
             if not is_profitable.is_profitable:
