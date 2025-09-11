@@ -277,17 +277,17 @@ class OrderPairingManager:
             logger.error(f"Error processing unmatched fills: {e}")
             return 0
     
-    async def verify_position_balance(self, market: str) -> Dict[str, float]:
+    async def verify_position_balance(self, market: str) -> Dict[str, any]:
         """
-        Verify that buy and sell orders are balanced for a market
-        
-        Args:
-            market: Market to verify
-            
-        Returns:
-            Dictionary with balance information
+        Verify that buy and sell orders are balanced for a market.
+        Forces a sync to ensure data is fresh, especially after a restart.
         """
         try:
+            # Force a sync of the order tracker before performing the check
+            # to ensure we have the latest data, preventing a race condition after restarts.
+            logger.info(f"Syncing order tracker for {market} before balance verification...")
+            await self.order_tracker.sync_existing_orders(market)
+
             # Get current position from exchange
             positions_response = self.rest_client.get_positions(market=market)
             positions = positions_response.get("data", [])
@@ -298,7 +298,7 @@ class OrderPairingManager:
                 from src.utils.safe_conversions import safe_float
                 current_position = safe_float(positions[0].get("open_interest", 0))
             
-            # Calculate total buy and sell amounts from tracked orders
+            # Calculate total buy and sell amounts from the now-synced tracked orders
             total_buy_filled = 0.0
             total_sell_filled = 0.0
             

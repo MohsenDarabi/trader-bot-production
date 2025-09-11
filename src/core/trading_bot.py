@@ -2903,49 +2903,46 @@ class DailyRangeBot:
                 'cancelled_stale': 0
             }
     
-    def _classify_orders_by_date(self, orders: List[Dict], today_utc) -> tuple:
+    def _classify_orders_by_date(self, orders: List[Dict], now_utc: datetime) -> tuple:
         """
-        Classify orders into today's vs old orders based on created_at timestamp
-        
-        Args:
-            orders: List of order dictionaries from exchange
-            today_utc: Today's date in UTC for comparison
-            
-        Returns:
-            Tuple of (today_orders, old_orders)
+        Classify orders into current period vs old orders based on the TRADING_INTERVAL.
         """
-        from datetime import datetime, timezone
-        
-        today_orders = []
+        from config.settings import TRADING_INTERVAL
+        from datetime import timezone
+
+        current_period_orders = []
         old_orders = []
-        
+
+        if TRADING_INTERVAL == 'hourly':
+            current_period_key = now_utc.strftime('%Y-%m-%d-%H')
+            logger.debug(f"Classifying orders against current hour: {current_period_key}")
+        else:  # daily
+            current_period_key = now_utc.date()
+            logger.debug(f"Classifying orders against current date: {current_period_key}")
+
         for order in orders:
             try:
-                created_at = safe_int(order.get('created_at', 0))
-                if created_at:
-                    # Handle both millisecond and second timestamps
-                    if created_at > 1e10:  # Millisecond timestamp
-                        order_date = datetime.fromtimestamp(created_at/1000, timezone.utc).date()
-                    else:  # Second timestamp
-                        order_date = datetime.fromtimestamp(created_at, timezone.utc).date()
+                created_at_ts = safe_int(order.get('created_at', 0))
+                if created_at_ts:
+                    order_datetime = datetime.fromtimestamp(created_at_ts / 1000, timezone.utc)
                     
-                    if order_date == today_utc:
-                        today_orders.append(order)
-                        logger.debug(f"📅 Today's order: {order.get('client_id', 'N/A')} from {order_date}")
+                    if TRADING_INTERVAL == 'hourly':
+                        order_period_key = order_datetime.strftime('%Y-%m-%d-%H')
+                    else:  # daily
+                        order_period_key = order_datetime.date()
+
+                    if order_period_key == current_period_key:
+                        current_period_orders.append(order)
                     else:
                         old_orders.append(order)
-                        logger.debug(f"📅 Old order: {order.get('client_id', 'N/A')} from {order_date}")
                 else:
-                    # No timestamp - treat as old for safety
                     old_orders.append(order)
-                    logger.warning(f"⚠️ Order without timestamp treated as old: {order.get('client_id', 'N/A')}")
             except Exception as e:
                 logger.warning(f"Failed to parse order timestamp for {order.get('client_id', 'N/A')}: {e}")
-                # On error, treat as old for safety
                 old_orders.append(order)
         
-        logger.info(f"📊 Date classification: {len(today_orders)} today, {len(old_orders)} old orders")
-        return today_orders, old_orders
+        logger.info(f"📊 Period classification ({TRADING_INTERVAL}): {len(current_period_orders)} current, {len(old_orders)} old orders")
+        return current_period_orders, old_orders
 
     def _validate_position_order_consistency(self, market: str, position_size: float, 
                                            all_sell_orders: List[Dict]) -> bool:
@@ -3060,11 +3057,8 @@ class DailyRangeBot:
 
     def _get_exchange_position_and_orders_direct(self, market: str) -> Dict[str, Any]:
         """
-        Query exchange directly for position and order state - TRUE single source of truth
-        This bypasses all caches and WebSocket data to get the real state
-        
-        Returns:
-            Dict with position_size, pending_buy_orders, pending_sell_orders, and amounts
+        Query exchange directly for position and order state - TRUE single source of truth.
+        This bypasses all caches and WebSocket data to get the real state.
         """
         try:
             # Direct query to exchange for positions
@@ -3073,7 +3067,6 @@ class DailyRangeBot:
             
             if positions_response and positions_response.get('data'):
                 positions_data = positions_response['data']
-                # Handle both list and dict response formats
                 if isinstance(positions_data, list):
                     for pos in positions_data:
                         if pos.get('market') == market:
@@ -3096,37 +3089,34 @@ class DailyRangeBot:
                         elif order.get('side') == 'sell':
                             sell_orders.append(order)
             
-            # CRITICAL FIX: Implement proper date classification
+            # Use the new interval-aware classifier
             from datetime import datetime, timezone
-            today_utc = datetime.now(timezone.utc).date()
+            now_utc = datetime.now(timezone.utc)
             
-            # Classify buy orders by date
-            today_buy_orders, old_buy_orders = self._classify_orders_by_date(buy_orders, today_utc)
-            
-            # Classify sell orders by date  
-            today_sell_orders, old_sell_orders = self._classify_orders_by_date(sell_orders, today_utc)
+            current_period_buy_orders, old_buy_orders = self._classify_orders_by_date(buy_orders, now_utc)
+            current_period_sell_orders, old_sell_orders = self._classify_orders_by_date(sell_orders, now_utc)
             
             # CRITICAL: Validate position-order consistency
-            all_sell_orders = today_sell_orders + old_sell_orders
+            all_sell_orders = current_period_sell_orders + old_sell_orders
             is_consistent = self._validate_position_order_consistency(market, position_size, all_sell_orders)
             
             logger.info(f"📡 Direct exchange query for {market}:")
             logger.info(f"   Position: {position_size:.6f}")
-            logger.info(f"   Today buy orders: {len(today_buy_orders)}")
-            logger.info(f"   Today sell orders: {len(today_sell_orders)}")
-            logger.info(f"   Old buy orders: {len(old_buy_orders)}")
-            logger.info(f"   Old sell orders: {len(old_sell_orders)}")
+            logger.info(f"   Current Period Buy Orders: {len(current_period_buy_orders)}")
+            logger.info(f"   Current Period Sell Orders: {len(current_period_sell_orders)}")
+            logger.info(f"   Old Buy Orders: {len(old_buy_orders)}")
+            logger.info(f"   Old Sell Orders: {len(old_sell_orders)}")
             logger.info(f"   Position-Order Consistency: {'✅ SAFE' if is_consistent else '🚨 DANGEROUS'}")
             
-            # FIXED: Return proper date-classified orders with consistency flag
+            # Return dictionary with old keys for compatibility with calling functions
             return {
                 'position_size': position_size,
-                'today_buy_orders': today_buy_orders,    # REAL today's buy orders
-                'today_sell_orders': today_sell_orders,  # REAL today's sell orders
-                'old_sell_orders': old_sell_orders,      # REAL old sell orders
-                'is_consistent': is_consistent,          # Position-order consistency flag
-                'total_buy_amount': sum(safe_float(o.get('amount', 0)) for o in today_buy_orders),
-                'total_sell_amount': sum(safe_float(o.get('amount', 0)) for o in today_sell_orders + old_sell_orders)
+                'today_buy_orders': current_period_buy_orders,    # Mapped to old key
+                'today_sell_orders': current_period_sell_orders, # Mapped to old key
+                'old_sell_orders': old_sell_orders,
+                'is_consistent': is_consistent,
+                'total_buy_amount': sum(safe_float(o.get('amount', 0)) for o in current_period_buy_orders),
+                'total_sell_amount': sum(safe_float(o.get('amount', 0)) for o in all_sell_orders)
             }
             
         except Exception as e:

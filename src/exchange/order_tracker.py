@@ -356,25 +356,19 @@ class OrderTracker:
     
     async def sync_existing_orders(self, market: Optional[str] = None) -> None:
         """
-        Sync with existing pending orders from the exchange
-        
-        Args:
-            market: Optional market filter
+        Sync with existing orders from the exchange, including both pending and recently filled orders.
         """
         try:
-            logger.info("Syncing existing orders from exchange...")
-            
-            # Get pending orders from API
-            response = self.rest_client.get_pending_orders(market=market)
-            orders = response.get("data", [])
-            
-            for order_data in orders:
+            logger.info(f"Syncing existing orders from exchange for market: {market or 'all'}...")
+
+            # --- Sync PENDING orders ---
+            pending_response = self.rest_client.get_pending_orders(market=market)
+            pending_orders = pending_response.get("data", [])
+
+            for order_data in pending_orders:
                 order_id = str(order_data.get("order_id"))
-                
-                # Only track if not already tracking
                 if order_id not in self.tracked_orders:
                     side = OrderSide(order_data.get("side"))
-                    
                     self.track_order(
                         order_id=order_id,
                         client_id=order_data.get("client_id"),
@@ -383,12 +377,30 @@ class OrderTracker:
                         amount=safe_float(order_data.get("amount")),
                         price=safe_float(order_data.get("price"))
                     )
-                    
-                    # Update with current status
                     self._update_order_from_data(order_id, order_data, "sync")
-            
-            logger.info(f"Synced {len(orders)} existing orders")
-            
+
+            # --- Sync FILLED orders (deals) from the last few hours ---
+            from config.settings import TRADING_INTERVAL
+            lookback_hours = 2 if TRADING_INTERVAL == 'hourly' else 24  # 2 hours for hourly, 24 for daily
+
+            now_ms = int(time.time() * 1000)
+            start_time_ms = now_ms - (lookback_hours * 60 * 60 * 1000)
+
+            # This needs to be awaited as it's a coroutine
+            deals_response = await asyncio.to_thread(
+                self.rest_client.get_user_deals,
+                market=market,
+                start_time=start_time_ms,
+                limit=1000
+            )
+            deals = deals_response.get("data", [])
+
+            for deal_data in deals:
+                # The deal processing logic will automatically add the fill to the correct tracked order
+                self._process_deal(deal_data)
+
+            logger.info(f"Synced {len(pending_orders)} pending orders and {len(deals)} recent fills for {market or 'all'}.")
+
         except Exception as e:
             logger.error(f"Error syncing existing orders: {e}")
     
