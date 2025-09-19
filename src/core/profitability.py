@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from config.settings import (
     MAKER_FEE, TAKER_FEE, MIN_PROFIT_PERCENT, LEVERAGE
 )
+from src.utils.safe_conversions import safe_float
 from src.utils.logger import get_logger
 
 
@@ -33,10 +34,10 @@ class ProfitabilityValidator:
     """Validates profitability at three layers"""
     
     def __init__(self):
-        self.min_profit_percent = MIN_PROFIT_PERCENT
-        self.maker_fee = MAKER_FEE
-        self.taker_fee = TAKER_FEE
-        self.leverage = LEVERAGE
+        self.min_profit_percent = safe_float(MIN_PROFIT_PERCENT)
+        self.maker_fee = safe_float(MAKER_FEE)
+        self.taker_fee = safe_float(TAKER_FEE)
+        self.leverage = safe_float(LEVERAGE)
     
     # Layer 1: Signal Profitability
     def is_signal_profitable(self, buy_price: float, sell_price: float,
@@ -121,7 +122,7 @@ class ProfitabilityValidator:
         # Calculate the required sell/buy price ratio (multiplier) for profitability.
         # The formula accounts for leverage and separate buy/sell fees.
         # Formula: sell_price = buy_price * (1 + buy_fee + (min_profit / leverage)) / (1 - sell_fee)
-        min_profit_decimal = self.min_profit_percent / 100  # Convert from 1.0 to 0.01
+        min_profit_decimal = self.min_profit_percent / 100  # Convert from percent to decimal
 
         # Minimum multiplier needed so that sell price covers fees + desired profit
         required_multiplier = (1 + self.taker_fee + min_profit_decimal) / (1 - self.maker_fee)
@@ -238,6 +239,14 @@ class ProfitabilityValidator:
         """Return the minimum sell price that satisfies fees + min profit for a long entry."""
         min_profit_decimal = self.min_profit_percent / 100
         return buy_price * (1 + self.taker_fee + min_profit_decimal) / (1 - self.maker_fee)
+
+    def calculate_max_profitable_buy(self, sell_price: float) -> float:
+        """Return the highest buy price that still meets profit requirements for a given sell price."""
+        min_profit_decimal = self.min_profit_percent / 100
+        denominator = 1 + self.taker_fee + min_profit_decimal
+        if denominator <= 0:
+            raise ValueError("Invalid profitability configuration")
+        return sell_price * (1 - self.maker_fee) / denominator
     
     def validate_range_prices(self, high: float, low: float, 
                             buy_price: float, sell_price: float) -> bool:

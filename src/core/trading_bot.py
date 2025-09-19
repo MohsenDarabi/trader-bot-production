@@ -2607,11 +2607,11 @@ class DailyRangeBot:
             position_size = self.position_sizer.calculate_position_size(
                 market, price, account_balance
             )
-            
+
             if not position_size.is_valid:
                 logger.warning(f"Cannot place {side} order for {market}: {position_size.reason}")
                 return
-            
+
             # Validate profitability before placing order
             validator = ProfitabilityValidator()
             exit_price = signal.sell_price #if side == 'buy' else signal.buy_price
@@ -2622,54 +2622,51 @@ class DailyRangeBot:
                 
                 # Try to expand range for profitability - corrected calculation
                 if side == 'buy':
-                    # Calculate current spread percentage using safe_float
-                    current_spread_pct = safe_float(((signal.sell_price - signal.buy_price) / signal.buy_price) * 100)
-                    
-                    # Target 0.9% net profit (vs required 0.8%) with 0.45% expansion on each side to safely pass minimum
-                    target_profit_pct = safe_float(0.9)  # 0.9% target profit 
-                    required_spread_pct = safe_float(0.9)  # 0.9% total spread (0.45% expansion on each side)
-                    
-                    if current_spread_pct < required_spread_pct:
-                        logger.info(f"📊 Current spread: {safe_str_format(safe_float(current_spread_pct), '.4f')}%, Required: {safe_str_format(safe_float(required_spread_pct), '.4f')}% for {safe_str_format(safe_float(target_profit_pct), '.1f')}% profit")
-                        
-                        # Calculate from midpoint and expand symmetrically
-                        midpoint = safe_float((signal.buy_price + signal.sell_price) / 2)
-                        half_spread_pct = safe_float(required_spread_pct / 2)
-                        
-                        # Expand symmetrically from midpoint (raw calculation)
-                        expanded_buy_raw = safe_float(midpoint / (1 + half_spread_pct/100))
-                        expanded_sell_raw = safe_float(expanded_buy_raw * (1 + required_spread_pct/100))
-                        
-                        # Apply exchange precision using tick_size
+                    min_sell_required = validator.calculate_min_profitable_price(price)
+                    if exit_price >= min_sell_required:
+                        logger.debug("Exit price already meets minimum profitable threshold after fees")
+                    else:
+                        max_profitable_buy = validator.calculate_max_profitable_buy(exit_price)
+
                         market_info = self.market_data.get_market_info(market)
                         tick_size = safe_float(market_info.get('tick_size', 0.0001))
-                        
-                        # Round prices to exchange precision
-                        from decimal import Decimal, ROUND_HALF_UP
-                        buy_decimal = Decimal(str(safe_float(expanded_buy_raw)))
-                        tick_decimal = Decimal(str(safe_float(tick_size)))
-                        expanded_buy = safe_float((buy_decimal / tick_decimal).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_decimal)
-                        
-                        sell_decimal = Decimal(str(safe_float(expanded_sell_raw)))
-                        expanded_sell = safe_float((sell_decimal / tick_decimal).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_decimal)
-                        
-                        # Validate the expanded prices are reasonable
-                        if expanded_buy > 0 and expanded_sell > expanded_buy:
-                            # Verify this achieves exact profitability
-                            test_result = validator.is_signal_profitable(expanded_buy, expanded_sell, position_size.size_usdt)
-                            if test_result.is_profitable:
-                                logger.info(f"📈 Range expanded for profitability: Buy ${safe_str_format(safe_float(signal.buy_price), '.8f')} → ${safe_str_format(safe_float(expanded_buy), '.8f')}, Sell ${safe_str_format(safe_float(signal.sell_price), '.8f')} → ${safe_str_format(safe_float(expanded_sell), '.8f')}")
-                                logger.info(f"💰 Expected profit: {safe_str_format(safe_float(test_result.profit_percent), '.4f')}%")
-                                price = safe_float(expanded_buy)  # Use expanded buy price for this order
-                                log_trading_event('range_expansion', f"Range expanded for {market}: Buy={safe_str_format(safe_float(expanded_buy), '.8f')}, Sell={safe_str_format(safe_float(expanded_sell), '.8f')}, Profit={safe_str_format(safe_float(test_result.profit_percent), '.4f')}%")
-                            else:
-                                logger.warning(f"❌ Range expansion didn't achieve profitability: {safe_str_format(safe_float(test_result.profit_percent), '.4f')}% - skipping")
-                                return
-                        else:
-                            logger.warning(f"❌ Invalid expanded prices: Buy={safe_str_format(safe_float(expanded_buy), '.8f')}, Sell={safe_str_format(safe_float(expanded_sell), '.8f')} - skipping")
+
+                        from decimal import Decimal, ROUND_DOWN
+                        tick_decimal = Decimal(str(tick_size))
+                        adjusted_buy_decimal = Decimal(str(min(price, max_profitable_buy))) / tick_decimal
+                        adjusted_buy = float((adjusted_buy_decimal.quantize(Decimal('1'), rounding=ROUND_DOWN)) * tick_decimal)
+
+                        if adjusted_buy <= 0 or adjusted_buy >= price:
+                            logger.warning("❌ Unable to adjust buy price to meet profitability requirements - skipping")
                             return
-                    else:
-                        logger.info(f"✅ Spread sufficient: {safe_str_format(safe_float(current_spread_pct), '.4f')}% >= {safe_str_format(safe_float(required_spread_pct), '.4f')}%")
+
+                        signal.buy_price = adjusted_buy
+                        price = adjusted_buy
+
+                        # Recalculate position size with new buy price
+                        position_size = self.position_sizer.calculate_position_size(
+                            market, price, account_balance
+                        )
+
+                        if not position_size.is_valid:
+                            logger.warning(f"Cannot place {side} order for {market} after expansion: {position_size.reason}")
+                            return
+
+                        is_profitable = validator.is_signal_profitable(price, exit_price, position_size.size_usdt)
+
+                        if not is_profitable.is_profitable:
+                            logger.warning(f"❌ Range expansion didn't achieve profitability: {safe_str_format(safe_float(is_profitable.profit_percent), '.4f')}% - skipping")
+                            return
+
+                        logger.info(
+                            f"📈 Adjusted buy price for profitability: {safe_str_format(safe_float(price), '.8f')} "
+                            f"(target profit ≥ {safe_str_format(validator.min_profit_percent, '.2f')}%)"
+                        )
+                        log_trading_event(
+                            'range_expansion',
+                            f"Buy price tightened for {market}: {safe_str_format(safe_float(signal.buy_price), '.8f')} "
+                            f"with expected profit {safe_str_format(safe_float(is_profitable.profit_percent), '.4f')}%"
+                        )
                 else:
                     # For sell orders, can't optimize since we're exiting at current signal
                     return
