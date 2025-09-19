@@ -3251,19 +3251,35 @@ class DailyRangeBot:
             pending_orders = self.order_manager.get_pending_orders(market)
             buy_orders = [o for o in pending_orders if o.side.value == 'buy']
             
-            # Filter for today's orders
-            today = datetime.now(timezone.utc).date()
-            today_buy_orders = []
-            
+            from config.settings import TRADING_INTERVAL
+            timeframe = (TRADING_INTERVAL or '').lower()
+            now_utc = datetime.now(timezone.utc)
+
+            if timeframe == 'hourly':
+                current_period = now_utc.strftime('%Y-%m-%d-%H')
+            else:
+                current_period = now_utc.date()
+
+            period_buy_orders = []
+
             for order in buy_orders:
-                if order.created_at.date() == today:
-                    today_buy_orders.append(order)
-            
+                created_at = getattr(order, 'created_at', None)
+                if not created_at:
+                    continue
+
+                if timeframe == 'hourly':
+                    order_period = created_at.strftime('%Y-%m-%d-%H')
+                else:
+                    order_period = created_at.date()
+
+                if order_period == current_period:
+                    period_buy_orders.append(order)
+
             # Return consistent format for buy status
             return {
                 'total_buy_orders': len(buy_orders),
                 'all_buy_orders': buy_orders,
-                'today_orders': today_buy_orders,
+                'today_orders': period_buy_orders,
                 'cancelled_stale': 0  # Always 0 with direct exchange queries
             }
             

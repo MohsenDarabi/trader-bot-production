@@ -405,7 +405,12 @@ class OrderTracker:
                     start_time=start_time_ms,
                     limit=1000
                 )
-                all_deals = deals_response.get("data", [])
+                if isinstance(deals_response, dict):
+                    all_deals = deals_response.get("data", [])
+                elif isinstance(deals_response, list):
+                    all_deals = deals_response
+                else:
+                    all_deals = []
                 deals = [d for d in all_deals if d.get('market') == market]
 
                 for deal_data in deals:
