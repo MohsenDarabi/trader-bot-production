@@ -2897,28 +2897,18 @@ class DailyRangeBot:
                         
                         # Create sell order for the missing amount
                         try:
-                            recovery_order = self.order_manager.place_sell_order(
+                            recovery_order = self.order_manager.place_tracked_sell(
                                 market=market,
                                 amount=missing_sell,
                                 price=signal.sell_price,
                                 position_size=missing_sell * signal.sell_price,
-                                is_hide=True,
-                                is_orphaned=False  # This is a recovery sell, not orphaned
+                                source='recovery'
                             )
-                            
+
                             if recovery_order:
-                                logger.info(f"✅ Recovery sell order created: {missing_sell:.6f} {market} @ ${signal.sell_price:.2f}")
-                                
-                                # Track the recovery order
-                                if self.order_tracker:
-                                    self.order_tracker.track_order(
-                                        order_id=str(recovery_order.exchange_order_id),
-                                        client_id=recovery_order.client_id,
-                                        market=market,
-                                        side=OrderSide.SELL,
-                                        amount=missing_sell,
-                                        price=signal.sell_price
-                                    )
+                                logger.info(
+                                    f"✅ Recovery sell order created: {missing_sell:.6f} {market} @ ${signal.sell_price:.2f}"
+                                )
                             else:
                                 logger.error(f"❌ Failed to create recovery sell order for {market}")
                                 

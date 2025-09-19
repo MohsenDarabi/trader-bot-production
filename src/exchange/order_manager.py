@@ -632,6 +632,26 @@ class OrderManager:
         is_orphaned = source == 'orphaned'
         is_paired = source == 'paired'
 
+        if hasattr(self, '_trading_bot_ref') and self._trading_bot_ref:
+            try:
+                # Ensure freshest position data before checking uncovered amount
+                self._trading_bot_ref.position_manager.sync_with_exchange(market)
+                balance = self._trading_bot_ref._calculate_position_sell_balance(market)
+                max_allowed = max(0.0, balance['position_size'] - balance['total_sells'])
+
+                if max_allowed <= 0.000001:
+                    logger.info(f"ℹ️ Sell coverage already satisfied for {market} (source={source}) - skipping tracked sell")
+                    return None
+
+                if amount > max_allowed:
+                    logger.info(
+                        f"⚖️ Clamping sell amount for {market} from {amount:.6f} to {max_allowed:.6f} to avoid over-coverage"
+                    )
+                    amount = max_allowed
+                    position_size = amount * price
+            except Exception as coverage_error:
+                logger.debug(f"Coverage pre-check failed for {market}: {coverage_error} - proceeding with original amount")
+
         sell_order = self.place_sell_order(
             market=market,
             amount=amount,

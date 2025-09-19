@@ -194,6 +194,15 @@ class OrderPairingManager:
                         sell_orders_created.append(sell_order)
                         self.total_sell_orders_placed += 1
                         logger.info(f"Created sell order: {amount_per_level} {fill.market} @ {sell_price}")
+                    else:
+                        logger.info(
+                            f"No sell order created for fill {fill.order_id} at {sell_price} (coverage already satisfied)."
+                        )
+                        pair = self.order_tracker.get_order_pair(fill.order_id)
+                        if pair:
+                            pair.total_sell_amount = pair.buy_order.filled_amount
+                            pair.is_complete = True
+                            logger.debug(f"Marked order pair {fill.order_id} as complete (coverage satisfied).")
 
                 except Exception as e:
                     logger.error(f"Failed to create sell order at price {sell_price}: {e}")
