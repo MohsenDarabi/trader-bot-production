@@ -7445,3 +7445,27 @@ Out of host capacity
 
 **Attempt 37** (2025-09-19 07:07:39 UTC): Clau:EU-FRANKFURT-1-AD-1 - ❌ FAILED
 Out of host capacity
+
+**Attempt 37** (2025-09-19 07:09:31 UTC): Clau:EU-FRANKFURT-1-AD-2 - ❌ FAILED
+Out of host capacity
+
+**Attempt 37** (2025-09-19 07:11:21 UTC): Clau:EU-FRANKFURT-1-AD-3 - ❌ FAILED
+Connection timeout
+
+**Attempt 38** (2025-09-19 07:22:46 UTC): Clau:EU-FRANKFURT-1-AD-1 - ❌ FAILED
+Out of host capacity
+
+**Attempt 38** (2025-09-19 07:24:38 UTC): Clau:EU-FRANKFURT-1-AD-2 - ❌ FAILED
+Out of host capacity
+
+**Attempt 38** (2025-09-19 07:26:31 UTC): Clau:EU-FRANKFURT-1-AD-3 - ❌ FAILED
+Out of host capacity
+
+**Attempt 39** (2025-09-19 07:38:17 UTC): Clau:EU-FRANKFURT-1-AD-1 - ❌ FAILED
+Out of host capacity
+
+**Attempt 39** (2025-09-19 07:40:10 UTC): Clau:EU-FRANKFURT-1-AD-2 - ❌ FAILED
+Out of host capacity
+
+**Attempt 39** (2025-09-19 07:42:03 UTC): Clau:EU-FRANKFURT-1-AD-3 - ❌ FAILED
+Out of host capacity

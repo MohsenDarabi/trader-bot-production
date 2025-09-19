@@ -1396,7 +1396,8 @@ class DailyRangeBot:
                 'missing_sell': missing_sell,
                 'is_balanced': is_balanced,
                 'sell_orders': bot_sell_orders,
-                'position_exists': position is not None
+                'position_exists': position is not None,
+                'exchange_error': False
             }
             
             if position_size > 0:
@@ -1416,7 +1417,8 @@ class DailyRangeBot:
                 'missing_sell': 0.0,
                 'is_balanced': True,
                 'sell_orders': [],
-                'position_exists': False
+                'position_exists': False,
+                'exchange_error': True
             }
     
     def _calculate_optimal_sell_price(self, market: str, position, current_price: float) -> Dict[str, float]:
@@ -1474,6 +1476,11 @@ class DailyRangeBot:
             current_balance = self._calculate_position_sell_balance(market)
             if current_balance['position_size'] <= 0:
                 logger.error(f"🚨 Cannot place sell order - no position exists for {market}")
+                return False
+
+            if current_balance.get('exchange_error'):
+                logger.warning(f"⚠️ Skipping orphaned sell placement for {market} - exchange data unavailable")
+                log_trading_event('orphaned_skip', f"Skipped orphaned sell for {market} due to pending order API error")
                 return False
             
             # Determine precise uncovered amount using freshest balance data
