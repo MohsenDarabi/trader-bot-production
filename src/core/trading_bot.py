@@ -2051,12 +2051,17 @@ class DailyRangeBot:
         
         # CONDITION 1: Either (new period + first buy) OR cycle complete
         can_proceed = (is_new_period and not has_period_buy) or cycle_complete
-        
+
+        logger.info(
+            f"🧭 Buy state for {market}: period={period_name}, is_new_period={is_new_period}, "
+            f"has_period_buy={has_period_buy}, cycle_complete={cycle_complete}, "
+            f"pending_sells={pending_sells_today} ({sell_period_label})"
+        )
+
         if not can_proceed:
             logger.info(f"❌ Cannot buy - not new {period_name} first buy and cycle not complete for {market}")
-            logger.info(f"   is_new_period: {is_new_period}, has_period_buy: {has_period_buy}, cycle_complete: {cycle_complete}")
             return False
-        
+
         # If pending sells from current period exist, cannot buy
         if pending_sells_today > 0 and not cycle_complete:
             logger.info(
@@ -2109,38 +2114,52 @@ class DailyRangeBot:
             uncovered_amount = position_size - total_sell_amount
             
             # Check for today's pending sells to determine if cycle is in progress
-            today = datetime.now(timezone.utc).date()
-            today_sells = []
-            
+            from config.settings import TRADING_INTERVAL
+            timeframe = (TRADING_INTERVAL or '').lower()
+            now_utc = datetime.now(timezone.utc)
+
+            if timeframe == 'hourly':
+                current_period_key = now_utc.strftime('%Y-%m-%d-%H')
+            else:
+                current_period_key = now_utc.date()
+
+            period_sells = []
+
             for sell in pending_sell_orders:
                 created_str = sell.get('created_at', '')
                 client_id = sell.get('client_id', '')
-                
+
                 try:
                     # Parse timestamp (handle different formats)
                     if isinstance(created_str, (int, float)):
                         created_at = datetime.fromtimestamp(created_str/1000, timezone.utc)
                     else:
                         created_at = datetime.fromisoformat(str(created_str).replace('Z', '+00:00'))
-                    
-                    # Check if from today and not orphaned
-                    if created_at.date() == today and '_OS_' not in client_id:
-                        today_sells.append(sell)
+                
+                    if timeframe == 'hourly':
+                        sell_period_key = created_at.strftime('%Y-%m-%d-%H')
+                    else:
+                        sell_period_key = created_at.date()
+
+                    # Check if from current period and not orphaned
+                    if sell_period_key == current_period_key and '_OS_' not in client_id:
+                        period_sells.append(sell)
                 except Exception as e:
                     logger.debug(f"Could not parse sell order date: {e}")
-            
-            if today_sells:
+
+            if period_sells:
                 # Today's cycle in progress - wait for completion
-                if self._should_log_state_change(market, 'today_cycle_pending', True):
-                    logger.warning(f"❌ Cannot place buy - today's cycle in progress for {market}")
+                state_key = 'period_cycle_pending'
+                if self._should_log_state_change(market, state_key, True):
+                    logger.warning(f"❌ Cannot place buy - {period_label}'s cycle in progress for {market}")
                     logger.info(f"   Position size: {position_size:.6f}")
-                    logger.info(f"   Today's pending sells: {len(today_sells)}")
+                    logger.info(f"   Pending sells this {period_label}: {len(period_sells)}")
                     log_trading_event('cycle_pending', 
-                                    f"Buy blocked - today's cycle pending: {len(today_sells)} sells for {market}")
+                                    f"Buy blocked - current {period_label} cycle pending: {len(period_sells)} sells for {market}")
                 return False
-            
+
             # Position exists but only with old sells - can start new daily cycle
-            logger.info(f"Position exists ({position_size:.6f}) with only old sells - allowing new daily buy cycle for {market}")
+            logger.info(f"Position exists ({position_size:.6f}) with only old sells - allowing new {period_label} buy cycle for {market}")
             
             # Get min_amount for tolerance
             market_info = self.market_data.get_market_info(market)
@@ -2256,6 +2275,10 @@ class DailyRangeBot:
         # This caused "startup" logic to trigger repeatedly after each filled order
         has_today_buy_pending = len(fresh_today_buy_orders) > 0
         has_today_buy_filled = self._check_today_filled_buy_orders(market)
+        logger.info(
+            f"🧾 Current-period buy coverage for {market}: pending={has_today_buy_pending}, "
+            f"uncovered_fills={has_today_buy_filled}"
+        )
         has_today_buy = has_today_buy_pending or has_today_buy_filled
         logger.info(f"🔍 Current {period_label} buy status for {market}: pending={has_today_buy_pending}, filled={has_today_buy_filled}, total={has_today_buy}")
         
@@ -2388,8 +2411,9 @@ class DailyRangeBot:
                     return False
 
         # All enhanced checks passed
+        logger.info(f"🚀 All buy checks passed for {market} - proceeding to order placement")
         log_trading_event('buy_decision', f"✅ All checks passed including enhanced validation - ready to place buy order for {market}")
-        log_trading_event('order_details', f"💰 Order details: ${signal.buy_price:.2f} x {position_size.quantity:.6f} = ${position_size.size_usdt:.2f} for {market}")
+        log_trading_event('order_details', f"💰 Order details: ${signal.buy_price:.4f} x {position_size.quantity:.6f} = ${position_size.size_usdt:.4f} for {market}")
         return True
     
     async def _ensure_single_buy_order(self, market: str) -> None:
