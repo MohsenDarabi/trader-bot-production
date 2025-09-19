@@ -4,12 +4,10 @@ Orchestrates all trading components and executes the strategy
 Supports both hourly and daily trading intervals
 """
 import asyncio
-import os
 from datetime import datetime, timezone, time, timedelta
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
-from src.exchange.coinex_client import CoinExClient
 from src.exchange.exchange_factory import ExchangeFactory
 from src.exchange.order_manager import OrderManager, OrderStatus
 from src.exchange.websocket_client import CoinExWebSocketClient
@@ -22,11 +20,7 @@ from src.data.websocket_market_data import WebSocketMarketDataProvider
 from src.core.strategy import DailyRangeStrategy, TradingSignal
 from src.core.position_sizing import PositionSizer
 from src.utils.logger import get_logger
-from src.utils.smart_logging import log_trading_event, force_log_summaries
-from config.settings import (
-    SIGNAL_GENERATION_TIME, TIMEZONE, is_test_mode, 
-    MIN_PROFIT_PERCENT
-)
+from src.utils.smart_logging import log_trading_event
 from src.utils.safe_conversions import safe_float, safe_int, safe_str_format
 from src.core.recent_order_tracker import RecentOrderTracker
 
@@ -327,15 +321,18 @@ class DailyRangeBot:
         
         # State tracking for logging optimization
         self._logged_states = {}  # market -> {state_type -> last_logged_value}
-        
+
         # Circuit breaker for order placement
         self._order_circuit_breaker = TradingCircuitBreaker()
-        
+
         # Cycle completion tracking for continuous trading
         self._cycle_completion_flags = {}  # market -> bool (allows immediate new buy after cycle complete)
-        
+
         # Recent order tracking to prevent duplicates and handle phantom orders
         self.recent_order_tracker = RecentOrderTracker(grace_period_seconds=30)
+
+        # Track orphaned sells that are covering current-period buy fills
+        self._tracked_orphaned_sells: Dict[str, Dict[str, Any]] = {}  # market -> {'sell_order_id': str, 'client_id': str, 'period_key': str, 'buy_fill_time': datetime, 'target_amount': float}
         
         # Daily reset tracking to ensure it's only done once per day
         self._daily_reset_completed = {}  # market -> date of last reset
@@ -387,10 +384,14 @@ class DailyRangeBot:
             # Connect OrderManager to OrderTracker events for synchronized order cleanup
             self.order_tracker.add_order_complete_handler(self.order_manager.handle_order_completion)
             logger.info("✓ Connected OrderManager to OrderTracker for automatic order cleanup")
-            
+
             # Establish unified coordination for immediate pairing
             self.order_manager.set_tracking_coordination(self.order_tracker, self.pairing_manager, self)
             logger.info("✓ Unified pairing coordination established between OrderManager and tracking system")
+
+            # Track orphaned sell completion events so restart coverage is respected
+            self.order_tracker.add_order_complete_handler(self._handle_order_completion_for_orphan_tracking)
+            logger.info("✓ Registered orphaned sell tracking handler")
             
             # Initialize WebSocket state tracking for reconnection detection
             self._ws_connection_state = {
@@ -569,7 +570,7 @@ class DailyRangeBot:
                 
                 if bot_orders:
                     logger.info(f"📌 Found {len(bot_orders)} existing bot order(s) for {market}")
-                    logger.info(f"🛡️ Skipping leverage adjustment - trusting bot orders have correct settings")
+                    logger.info("🛡️ Skipping leverage adjustment - trusting bot orders have correct settings")
                     logger.info(f"✅ Bot orders trusted: {[order.client_id for order in bot_orders]}")
                     
                     # Skip leverage adjustment entirely - bot orders are trusted
@@ -741,6 +742,9 @@ class DailyRangeBot:
             
             
             # Display current trading strategy every cycle for observation (exact prices)
+            from config.settings import TRADING_INTERVAL
+            timeframe_label = 'HOURLY' if TRADING_INTERVAL == 'hourly' else 'DAILY'
+
             for market in self.trading_markets:
                 signal = self.strategy.get_current_signal(market)
                 if signal:
@@ -752,9 +756,15 @@ class DailyRangeBot:
                     if position_size.is_valid:
                         # Enhanced fixed-position daily signal summary for easy monitoring
                         current_time = now.strftime("%H:%M:%S")
-                        logger.info(f"📊 DAILY SIGNAL | {market} | Buy=${signal.buy_price:.8f} | "
-                                   f"Sell=${signal.sell_price:.8f} | Amount={position_size.quantity:.8f} | "
-                                   f"Size=${position_size.size_usdt:.2f} USDT | Updated: {current_time}")
+                        buy_price_str = safe_str_format(safe_float(signal.buy_price), '.8f')
+                        sell_price_str = safe_str_format(safe_float(signal.sell_price), '.8f')
+                        amount_str = safe_str_format(safe_float(position_size.quantity), '.8f')
+                        size_str = safe_str_format(safe_float(position_size.size_usdt), '.2f')
+                        logger.info(
+                            f"📊 {timeframe_label} SIGNAL | {market} | Buy=${buy_price_str} | "
+                            f"Sell=${sell_price_str} | Amount={amount_str} | "
+                            f"Size=${size_str} USDT | Updated: {current_time}"
+                        )
             
             # Update account and positions periodically with enhanced frequencies for better state consistency
             # Account update every 2 minutes (reduced from 5 min) for better balance tracking
@@ -813,7 +823,6 @@ class DailyRangeBot:
     async def _check_and_generate_signals(self, market: str):
         """Check if we need to generate new signals based on trading timeframe"""
         from config.settings import TRADING_INTERVAL, SIGNAL_GENERATION_TIME
-        from datetime import time
         
         now = datetime.now(timezone.utc)
         signal = None
@@ -844,7 +853,13 @@ class DailyRangeBot:
             # If signal was generated successfully, record the time and update pairing rules
             self.last_signal_generation[market] = now
             self.status.last_signal_time = now
-            log_trading_event('signal_generation', f"Generated signal for {market}: Buy=${signal.buy_price:.2f}, Sell=${signal.sell_price:.2f}")
+            timeframe_label = 'hourly' if TRADING_INTERVAL == 'hourly' else 'daily'
+            buy_price_str = safe_str_format(safe_float(signal.buy_price), '.8f')
+            sell_price_str = safe_str_format(safe_float(signal.sell_price), '.8f')
+            log_trading_event(
+                'signal_generation',
+                f"Generated {timeframe_label} signal for {market}: Buy=${buy_price_str}, Sell=${sell_price_str}"
+            )
             
             if self.pairing_manager:
                 self.pairing_manager.configure_pairing_rule(
@@ -852,7 +867,9 @@ class DailyRangeBot:
                     sell_price_levels=[signal.sell_price],
                     min_fill_amount=0.001
                 )
-                logger.info(f"Updated pairing rule for {market} with new sell price ${signal.sell_price:.2f}")
+                logger.info(
+                    f"Updated pairing rule for {market} with new sell price ${safe_str_format(safe_float(signal.sell_price), '.8f')}"
+                )
         elif generation_attempted:
             # If we tried to generate a signal but failed, log it.
             # This structure prevents repeated generation attempts on failure.
@@ -932,13 +949,17 @@ class DailyRangeBot:
                     return
                 
                 # Place sell order for uncovered amount at strategy sell price
-                logger.info(f"📍 Placing sell order to cover orphaned position: {uncovered_amount:.6f} @ ${signal.sell_price:.2f}")
+                sell_price_value = safe_float(signal.sell_price)
+                logger.info(
+                    f"📍 Placing sell order to cover orphaned position: {safe_str_format(uncovered_amount, '.8f')} "
+                    f"@ ${safe_str_format(sell_price_value, '.8f')}"
+                )
                 
                 sell_order = self.order_manager.place_sell_order(
                     market=market,
                     amount=uncovered_amount,
-                    price=signal.sell_price,
-                    position_size=uncovered_amount * signal.sell_price,
+                    price=sell_price_value,
+                    position_size=uncovered_amount * sell_price_value,
                     is_hide=True,
                     is_orphaned=True  # Mark as orphaned position sell
                 )
@@ -946,7 +967,9 @@ class DailyRangeBot:
                 if sell_order:
                     logger.info(f"✅ Orphaned position covered with sell order: {sell_order.client_id}")
                     log_trading_event('orphaned_position_covered', 
-                                    f"Placed sell order for uncovered position: {uncovered_amount:.6f} {market} @ ${signal.sell_price:.2f}")
+                                    f"Placed sell order for uncovered position: {safe_str_format(uncovered_amount, '.8f')} "
+                                    f"{market} @ ${safe_str_format(sell_price_value, '.8f')}")
+                    self._track_orphaned_sell_if_needed(market, sell_order, uncovered_amount)
                 else:
                     logger.error(f"❌ Failed to place sell order for orphaned position in {market}")
                     log_trading_event('orphaned_position_failed', 
@@ -955,6 +978,65 @@ class DailyRangeBot:
         except Exception as e:
             logger.error(f"Error checking orphaned positions for {market}: {e}")
             # Don't crash the bot on error - log and continue
+
+    def _track_orphaned_sell_if_needed(self, market: str, sell_order, uncovered_amount: float) -> None:
+        """Track orphaned sell if it matches a current-period buy fill"""
+        try:
+            from config.settings import TRADING_INTERVAL
+            timeframe = TRADING_INTERVAL
+            now = datetime.now(timezone.utc)
+            period_key = self._get_period_key(now, timeframe)
+
+            tolerance = self._get_market_amount_tolerance(market)
+
+            unmatched_pairs = self.order_tracker.get_unmatched_buy_fills()
+            matching_pair = None
+
+            for pair in unmatched_pairs:
+                if pair.buy_order.market != market:
+                    continue
+                buy_period_key = self._get_period_key(pair.buy_order.created_at, timeframe)
+                if buy_period_key != period_key:
+                    continue
+                remaining_amount = pair.get_remaining_buy_amount()
+                if abs(remaining_amount - uncovered_amount) <= tolerance:
+                    matching_pair = pair
+                    break
+
+            if not matching_pair:
+                logger.debug(f"No current-period unmatched buy fill matched orphaned sell for {market}")
+                return
+
+            self._tracked_orphaned_sells[market] = {
+                'sell_order_id': str(sell_order.exchange_order_id),
+                'client_id': sell_order.client_id,
+                'period_key': period_key,
+                'buy_fill_time': matching_pair.buy_order.updated_at,
+                'target_amount': uncovered_amount
+            }
+
+            period_label = 'hour' if timeframe == 'hourly' else 'day'
+            logger.info(f"📌 Tracking orphaned sell {sell_order.client_id} as exit for current {period_label} buy in {market}")
+            log_trading_event('orphaned_sell_tracked', 
+                              f"Tracking orphaned sell {sell_order.client_id} as exit for current {period_label} buy in {market}")
+
+        except Exception as e:
+            logger.debug(f"Unable to track orphaned sell for {market}: {e}")
+
+    def _get_period_key(self, dt: datetime, timeframe: str) -> str:
+        """Return normalized period key for datetime based on timeframe"""
+        if timeframe == 'hourly':
+            return dt.strftime('%Y-%m-%d-%H')
+        return dt.date().isoformat()
+
+    def _get_market_amount_tolerance(self, market: str) -> float:
+        """Get tolerance for comparing order amounts based on market settings"""
+        try:
+            market_info = self.market_data.get_market_info(market)
+            min_amount = safe_float(market_info.get('min_amount', 0.000001))
+        except Exception:
+            min_amount = 0.000001
+        return max(min_amount, 0.000001)
     
     async def _check_entry_opportunities(self, market: str, signal: TradingSignal):
         """Check for new entry opportunities and manage existing positions"""
@@ -1340,32 +1422,48 @@ class DailyRangeBot:
     def _calculate_optimal_sell_price(self, market: str, position, current_price: float) -> Dict[str, float]:
         """Calculate optimal sell price for bot restart scenario"""
         try:
-            # Calculate base sell price (1.5% profit minimum)
-            base_sell_price = position.avg_entry_price * 1.015
-            
-            # If current market price is higher, use current price for more profit
-            if current_price > base_sell_price:
+            entry_price = safe_float(position.avg_entry_price)
+            current_price = safe_float(current_price)
+
+            # Safety floor: ensure we target at least 1% profit over average entry
+            base_sell_price = safe_float(entry_price * 1.01)
+
+            strategy_price = None
+            try:
+                if self.strategy:
+                    signal = self.strategy.get_current_signal(market)
+                    if signal and getattr(signal, 'sell_price', None):
+                        strategy_price = safe_float(signal.sell_price)
+            except Exception as signal_error:
+                logger.debug(f"Could not load strategy sell price for {market}: {signal_error}")
+
+            # Always respect the higher of strategy or base sell price
+            minimum_target = base_sell_price
+            if strategy_price is not None:
+                minimum_target = safe_float(max(minimum_target, strategy_price))
+
+            if current_price and current_price > minimum_target:
                 optimal_price = current_price
-                improvement = current_price - base_sell_price
-                reason = "market_higher_than_calculated"
+                improvement = safe_float(current_price - minimum_target)
+                reason = "market_higher_than_minimum"
             else:
-                optimal_price = base_sell_price
-                improvement = 0
-                reason = "minimum_profit_1.5%"
-            
+                optimal_price = minimum_target
+                improvement = 0.0
+                reason = "minimum_profit_floor"
+
             return {
                 'price': optimal_price,
-                'base_price': base_sell_price,
+                'base_price': minimum_target,
                 'improvement': improvement,
                 'reason': reason
             }
         except Exception as e:
             logger.error(f"Error calculating optimal sell price for {market}: {e}")
-            fallback_price = position.avg_entry_price * 1.015
+            fallback_price = safe_float(safe_float(position.avg_entry_price) * 1.01)
             return {
                 'price': fallback_price,
                 'base_price': fallback_price,
-                'improvement': 0,
+                'improvement': 0.0,
                 'reason': 'fallback_error'
             }
     
@@ -1378,14 +1476,22 @@ class DailyRangeBot:
                 logger.error(f"🚨 Cannot place sell order - no position exists for {market}")
                 return False
             
-            # Get min_amount for tolerance
-            market_info = self.market_data.get_market_info(market)
-            min_amount = safe_float(market_info.get('min_amount', 0.000001))
+            # Determine precise uncovered amount using freshest balance data
+            tolerance = self._get_market_amount_tolerance(market)
+            uncovered_amount = max(0.0, current_balance['position_size'] - current_balance['total_sells'])
+
+            if uncovered_amount <= tolerance:
+                logger.debug(f"No meaningful uncovered amount remaining for {market} (<= tolerance)")
+                return False
+
+            if abs(missing_amount - uncovered_amount) > tolerance:
+                logger.debug(f"Adjusting requested missing amount for {market}: {missing_amount:.6f} -> {uncovered_amount:.6f}")
+            missing_amount = uncovered_amount
 
             # Check if adding this sell order would exceed position size
             total_sells_after = current_balance['total_sells'] + missing_amount
-            if total_sells_after > current_balance['position_size'] + min_amount:  # Small tolerance for rounding
-                logger.error(f"🚨 OVER-SELLING PREVENTED: Sell order would exceed position size!")
+            if total_sells_after > current_balance['position_size'] + tolerance:
+                logger.error("🚨 OVER-SELLING PREVENTED: Sell order would exceed position size!")
                 logger.error(f"   Position: {current_balance['position_size']:.6f}")
                 logger.error(f"   Current sells: {current_balance['total_sells']:.6f}")
                 logger.error(f"   Requested sell: {missing_amount:.6f}")
@@ -1422,35 +1528,47 @@ class DailyRangeBot:
             optimal_sell_price = self._calculate_optimal_sell_price(market, position, current_price)
             
             logger.info(f"💡 Bot restart sell pricing for {market}:")
-            logger.info(f"📊 Entry: ${position.avg_entry_price:.2f} | Current: ${current_price:.2f}")
-            logger.info(f"📊 Base sell (1.5%): ${optimal_sell_price['base_price']:.2f}")
-            logger.info(f"✅ Optimal sell price: ${optimal_sell_price['price']:.2f} ({optimal_sell_price['reason']})")
-            if optimal_sell_price['improvement'] > 0:
-                logger.info(f"💰 Profit improvement: +${optimal_sell_price['improvement']:.2f}")
+            logger.info(
+                f"📊 Entry: ${safe_str_format(safe_float(position.avg_entry_price), '.8f')} | "
+                f"Current: ${safe_str_format(safe_float(current_price), '.8f')}"
+            )
+            logger.info(
+                f"📊 Minimum target (≥1% profit & strategy): "
+                f"${safe_str_format(safe_float(optimal_sell_price['base_price']), '.8f')}"
+            )
+            logger.info(
+                f"✅ Optimal sell price: ${safe_str_format(safe_float(optimal_sell_price['price']), '.8f')} "
+                f"({optimal_sell_price['reason']})"
+            )
+            if safe_float(optimal_sell_price['improvement']) > 0:
+                logger.info(
+                    f"💰 Profit improvement: +${safe_str_format(safe_float(optimal_sell_price['improvement']), '.8f')}"
+                )
             
             # Place the missing sell order using optimal price with orphaned marker
             order = self.order_manager.place_sell_order(
                 market=market,
                 amount=missing_amount,
-                price=optimal_sell_price['price'],
-                position_size=missing_amount * optimal_sell_price['price'],
+                price=safe_float(optimal_sell_price['price']),
+                position_size=missing_amount * safe_float(optimal_sell_price['price']),
                 is_hide=True,
                 is_orphaned=True  # Mark as orphaned position sell order
             )
             
             if order:
                 logger.info(f"✅ Missing sell order placed: {order.client_id}")
-                logger.info(f"📌 Orphaned sell order marked - will not block new buy orders")
+                logger.info("📌 Orphaned sell order marked - will not block new buy orders")
                 
                 # CRITICAL: Immediately recalculate position balance with fresh exchange data
                 updated_balance = self._calculate_position_sell_balance(market)
-                logger.info(f"🔄 Position balance updated after order placement:")
+                logger.info("🔄 Position balance updated after order placement:")
                 logger.info(f"   Position: {updated_balance['position_size']:.6f}, "
                            f"Total sells: {updated_balance['total_sells']:.6f}, "
                            f"Missing: {updated_balance['missing_sell']:.6f}")
                 
                 # Warn if still missing sell coverage (indicates potential issue)
-                if updated_balance['missing_sell'] > 0.000001:
+                coverage_tolerance = self._get_market_amount_tolerance(market)
+                if updated_balance['missing_sell'] > coverage_tolerance:
                     logger.warning(f"⚠️ Position still partially uncovered after sell placement: "
                                  f"{updated_balance['missing_sell']:.6f} {market} remaining")
                 
@@ -1556,7 +1674,7 @@ class DailyRangeBot:
             
             if orphaned_sell_count > 0:
                 logger.info(f"📊 Today's sell orders: {sell_count} total, {orphaned_sell_count} orphaned (ignored), {regular_sell_count} blocking")
-                logger.info(f"✅ Orphaned sell orders do not block new buy orders")
+                logger.info("✅ Orphaned sell orders do not block new buy orders")
             
             # Handle edge case of multiple pending sells from today
             if regular_sell_count > 1:
@@ -1564,7 +1682,7 @@ class DailyRangeBot:
                 logger.warning("This indicates a previous bug occurred - blocking new buy orders")
                 log_trading_event('multiple_sells_detected', f"Found {regular_sell_count} today's pending sells - blocking new buys for {market}")
             elif regular_sell_count == 1:
-                logger.info(f"ℹ️ Found 1 pending sell order from today - blocking new buy orders")
+                logger.info("ℹ️ Found 1 pending sell order from today - blocking new buy orders")
             
             return regular_sell_count  # Only regular sells block new buys
             
@@ -1579,6 +1697,7 @@ class DailyRangeBot:
         # Import and check trading timeframe
         from config.settings import TRADING_INTERVAL
         timeframe = TRADING_INTERVAL
+        period_label = 'hour' if timeframe == 'hourly' else 'day'
         
         # Initialize period tracking if not exists
         if not hasattr(self, '_last_reset_period'):
@@ -1928,6 +2047,21 @@ class DailyRangeBot:
         fresh_today_sell_orders = fresh_data['today_sell_orders']
         fresh_old_sell_orders = fresh_data['old_sell_orders']
         is_consistent = fresh_data['is_consistent']
+        period_label = 'hour' if timeframe == 'hourly' else 'day'
+
+        # Block if an orphaned sell is actively covering the current-period buy
+        orphan_tracking = self._tracked_orphaned_sells.get(market)
+        if orphan_tracking:
+            current_period_key = self._get_period_key(datetime.now(timezone.utc), timeframe)
+            if orphan_tracking.get('period_key') == current_period_key:
+                if self._should_log_state_change(market, 'orphan_sell_pending', True):
+                    logger.info(f"⏳ Waiting for tracked orphaned sell to fill before new buy in {market}")
+                log_trading_event('orphaned_sell_pending',
+                                  f"Buy blocked - orphaned sell covering current {period_label} still pending for {market}")
+                return False
+            else:
+                # Period rolled over - drop stale tracking entry
+                self._tracked_orphaned_sells.pop(market, None)
         # CRITICAL: Block trading if position-order state is inconsistent
         if not is_consistent:
             if self._should_log_state_change(market, 'inconsistent_state', True):
@@ -1941,7 +2075,7 @@ class DailyRangeBot:
         
         if pending_sells_today > 0:
             logger.error(f"🚨 EMERGENCY BLOCK: {pending_sells_today} pending sell orders from today - CANNOT PLACE BUY for {market}")
-            logger.error(f"   This prevents duplicate buy orders when bot restarts mid-day with existing sells")
+            logger.error("   This prevents duplicate buy orders when bot restarts mid-day with existing sells")
             log_trading_event('emergency_block', f"🚨 Critical safety check blocked buy - {pending_sells_today} today's pending sells for {market}")
             return False
         
@@ -1951,8 +2085,7 @@ class DailyRangeBot:
         has_today_buy_pending = len(fresh_today_buy_orders) > 0
         has_today_buy_filled = self._check_today_filled_buy_orders(market)
         has_today_buy = has_today_buy_pending or has_today_buy_filled
-        
-        logger.info(f"🔍 Today's buy status for {market}: pending={has_today_buy_pending}, filled={has_today_buy_filled}, total={has_today_buy}")
+        logger.info(f"🔍 Current {period_label} buy status for {market}: pending={has_today_buy_pending}, filled={has_today_buy_filled}, total={has_today_buy}")
         
         # Log fresh data decision details  
         logger.info(f"🔄 Fresh exchange data for {market}: today_buys={len(fresh_today_buy_orders)}, "
@@ -1986,14 +2119,14 @@ class DailyRangeBot:
             # Redundant safety check (already handled by emergency check above, but kept for explicit clarity)
             if pending_sells_today > 0:
                 # This should never be reached due to emergency check above, but keeping for safety
-                logger.error(f"🚨 CRITICAL: Startup safety check triggered - this should have been caught by emergency check!")
+                logger.error("🚨 CRITICAL: Startup safety check triggered - this should have been caught by emergency check!")
                 logger.error(f"❌ Cannot place first buy - {pending_sells_today} pending sell orders from today for {market}")
                 log_trading_event('startup_safety_block', f"🚨 Startup safety check blocked buy - {pending_sells_today} today's sells for {market}")
                 return False
             
             # Startup scenario: No pending sells from today - allow first buy of day
-            logger.info(f"🌅 STARTUP: First buy order of the day allowed for {market} - no pending sells detected")
-            log_trading_event('startup_buy', f"🌅 STARTUP: Placing first buy order of the day for {market}")
+            logger.info(f"🌅 STARTUP: First buy order of the {period_label} allowed for {market} - no pending sells detected")
+            log_trading_event('startup_buy', f"🌅 STARTUP: Placing first buy order of the {period_label} for {market}")
             
         else:
             # Normal operation: ONLY cycle completion allows new buys
@@ -2839,7 +2972,7 @@ class DailyRangeBot:
             
         except Exception as e:
             logger.error(f"Error reconciling state after {side} fill for {market}: {e}")
-    
+
     async def _reconcile_trading_cycle_completion(self, market: str):
         """Comprehensive state reconciliation after trading cycle completion"""
         try:
@@ -2869,6 +3002,44 @@ class DailyRangeBot:
             
         except Exception as e:
             logger.error(f"Error reconciling trading cycle completion for {market}: {e}")
+
+    def _handle_order_completion_for_orphan_tracking(self, tracked_order) -> None:
+        """Handle tracked orphaned sell completion events"""
+        try:
+            if tracked_order.side != OrderSide.SELL:
+                return
+
+            market = tracked_order.market
+            tracking = self._tracked_orphaned_sells.get(market)
+            if not tracking:
+                return
+
+            sell_order_match = False
+            if tracking.get('sell_order_id') and str(tracked_order.order_id) == str(tracking['sell_order_id']):
+                sell_order_match = True
+            elif tracking.get('client_id') and tracked_order.client_id == tracking['client_id']:
+                sell_order_match = True
+
+            if not sell_order_match:
+                return
+
+            from config.settings import TRADING_INTERVAL
+            timeframe = TRADING_INTERVAL
+            current_period_key = self._get_period_key(datetime.now(timezone.utc), timeframe)
+
+            # Remove tracking regardless of period match to avoid stale entries
+            self._tracked_orphaned_sells.pop(market, None)
+
+            if tracking.get('period_key') == current_period_key:
+                self._cycle_completion_flags[market] = True
+                logger.info(f"🔄 Orphaned sell {tracked_order.client_id} filled for {market} - cycle completion flagged")
+                log_trading_event('orphaned_cycle_complete',
+                                  f"Cycle completion detected after orphaned sell fill for {market}")
+            else:
+                logger.info(f"ℹ️ Orphaned sell {tracked_order.client_id} filled for {market} from previous period")
+
+        except Exception as e:
+            logger.debug(f"Error handling orphaned sell completion for {tracked_order.client_id}: {e}")
     
     def _get_exchange_buy_status(self, market: str) -> Dict[str, Any]:
         """Get buy status directly from exchange - single source of truth"""
@@ -3179,7 +3350,6 @@ class DailyRangeBot:
                     # Get today's buy fills from the API
                     start_time = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
                     deals_response = self.client.get_user_deals(
-                        market=market,
                         side='buy',
                         start_time=start_time,
                         limit=100
@@ -3187,6 +3357,8 @@ class DailyRangeBot:
                     
                     if deals_response and deals_response.get('data'):
                         for deal in deals_response['data']:
+                            if deal.get('market') != market:
+                                continue
                             deal_amount = safe_float(deal.get('amount', 0))
                             if abs(deal_amount - uncovered_amount) < 0.000001:
                                 logger.info(f"✓ Found matching buy fill from user_deals: {safe_str_format(deal_amount, '.6f')} @ ${safe_str_format(safe_float(deal.get('price', 0)), '.4f')}")
@@ -3250,6 +3422,11 @@ class DailyRangeBot:
             if self._startup_cleanup_completed:
                 logger.debug("Startup cleanup already completed - skipping")
                 return
+
+            # Force a position sync right before cleanup to prevent race conditions
+            logger.info("Force syncing positions before startup cleanup...")
+            self.position_manager.sync_with_exchange()
+            await asyncio.sleep(1)  # Brief pause to allow data to settle
             
             from src.utils.settlement_handler import settlement_retry_async
             logger.info("🧹 Starting one-time startup order cleanup...")

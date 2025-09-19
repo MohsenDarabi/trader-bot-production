@@ -89,9 +89,10 @@ class CoinExClient:
         return session
     
     def _request(self, method: str, endpoint: str, 
-                params: Optional[Dict] = None,
-                data: Optional[Dict] = None,
-                auth_required: bool = True) -> Dict[str, Any]:
+                 params: Optional[Dict] = None,
+                 data: Optional[Dict] = None,
+                 auth_required: bool = True,
+                 return_full: bool = False) -> Any:
         """
         Make HTTP request to CoinEx API
         
@@ -237,7 +238,7 @@ class CoinExClient:
                 logger.error(f"API error: {error_msg}")
                 raise ValueError(f"CoinEx API error: {error_msg}")
             
-            return response_data.get('data', {})
+            return response_data if return_full else response_data.get('data', {})
             
         except requests.RequestException as e:
             context = {
@@ -521,50 +522,29 @@ class CoinExClient:
             Dictionary with orders list and pagination info
         """
         params = {
-            'market_type': 'FUTURES',
-            'page': page
+            'market_type': 'FUTURES'
         }
-        
-        # Only add limit if specified (causes signature issues when set to default value)
-        if limit is not None:
-            params['limit'] = limit
-        
-        # NOTE: The 'market' parameter causes signature issues with CoinEx API
-        # We'll fetch all orders and filter client-side if market is specified
-        
-        # Wait for rate limiter
-        self.rate_limiter.wait_if_needed()
-        
-        # Construct full URL
-        url = urljoin(self.base_url, '/v2/futures/pending-order')
-        
-        # Add authentication headers
-        headers = self.auth.get_auth_headers('GET', '/v2/futures/pending-order', params=params)
-        
-        try:
-            response = self.session.request('GET', url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
-            response_data = response.json()
-            
-            # Check for API errors
-            if response_data.get('code') != 0:
-                error_msg = response_data.get('message', 'Unknown error')
-                logger.error(f"API error: {error_msg}")
-                raise ValueError(f"CoinEx API error: {error_msg}")
-            
-            # Apply client-side market filter if specified
-            if market and response_data.get('data'):
-                filtered_orders = [order for order in response_data['data'] if order.get('market') == market]
-                response_data['data'] = filtered_orders
-                # Update pagination count
-                if 'pagination' in response_data:
-                    response_data['pagination']['total'] = len(filtered_orders)
-            
-            # Return full response for pending orders (includes pagination)
-            return response_data
-            
-        except Exception as e:
-            logger.error(f"Pending orders request failed: {e}")
-            raise
+
+        response = self._request(
+            method='GET',
+            endpoint='/v2/futures/pending-order',
+            params=params,
+            return_full=True
+        )
+
+        if isinstance(response, dict):
+            orders = response.get('data', [])
+        else:
+            orders = response if isinstance(response, list) else []
+            response = {'data': orders}
+
+        if market:
+            filtered_orders = [order for order in orders if order.get('market') == market]
+            response['data'] = filtered_orders
+            if 'pagination' in response:
+                response['pagination']['total'] = len(filtered_orders)
+
+        return response
     
     def get_order_status(self, market: str, order_id: Optional[int] = None,
                         client_id: Optional[str] = None) -> Dict:
@@ -653,7 +633,7 @@ class CoinExClient:
         """
         return self._request('GET', '/v2/assets/futures/balance')
     
-    def get_user_deals(self, market: str, side: Optional[str] = None,
+    def get_user_deals(self, market: Optional[str] = None, side: Optional[str] = None,
                       start_time: Optional[int] = None, end_time: Optional[int] = None,
                       page: int = 1, limit: int = 100) -> Dict:
         """
@@ -671,11 +651,13 @@ class CoinExClient:
             Dictionary with user deals/fills data
         """
         params = {
-            'market': market,
             'market_type': 'FUTURES',
             'page': page,
             'limit': min(limit, 500)  # API max is 500
         }
+
+        if market:
+            params['market'] = market
         
         if side:
             params['side'] = side
@@ -894,7 +876,7 @@ class CoinExClient:
             logger.info(f"  Position: {'Yes' if analysis['has_position'] else 'No'} "
                        f"({analysis['open_interest']} open_interest)")
             if leverage_info.get('leverage_unknown'):
-                logger.info(f"  Current leverage: Unknown (no position data)")
+                logger.info("  Current leverage: Unknown (no position data)")
             else:
                 logger.info(f"  Current leverage: {analysis['current_leverage']}x {analysis['margin_mode']}")
             
@@ -1063,7 +1045,7 @@ class CoinExClient:
             client_id = buy_order.get('client_id')
             order_id = buy_order.get('order_id')
             
-            logger.info(f"Verifying order status before cancellation...")
+            logger.info("Verifying order status before cancellation...")
             
             try:
                 # Check current order status

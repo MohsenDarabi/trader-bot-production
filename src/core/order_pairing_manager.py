@@ -4,14 +4,13 @@ Automatically manages buy-sell order pairing to prevent unintended short positio
 """
 import time
 import asyncio
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from src.exchange.order_tracker import OrderTracker, OrderFill, TrackedOrder, OrderPair, OrderSide
-from src.exchange.order_manager import OrderManager
+from src.exchange.order_tracker import OrderTracker, OrderFill, TrackedOrder, OrderSide
+from src.exchange.order_manager import OrderManager, OrderStatus
 from src.exchange.coinex_client import CoinExClient
-from src.core.position_manager import Position
 from src.utils.logger import get_logger
 
 
@@ -110,14 +109,14 @@ class OrderPairingManager:
             logger.info(f"✅ Processing buy fill for automatic pairing: {fill.amount} {fill.market}")
                 
             if not self.auto_pairing_enabled:
-                logger.warning(f"Auto pairing disabled - skipping fill processing")
+                logger.warning("Auto pairing disabled - skipping fill processing")
                 return
             
             # Check if we have pairing rules for this market
             if fill.market not in self.pairing_rules:
                 logger.error(f"❌ PAIRING FAILED: No pairing rule configured for market {fill.market}")
                 logger.error(f"   Available pairing rules: {list(self.pairing_rules.keys())}")
-                logger.error(f"   This buy fill will NOT create corresponding sell orders!")
+                logger.error("   This buy fill will NOT create corresponding sell orders!")
                 return
             
             # Check if fill meets minimum amount threshold
@@ -130,7 +129,7 @@ class OrderPairingManager:
                 
             if not rule.sell_price_levels:
                 logger.error(f"❌ PAIRING FAILED: Empty sell_price_levels for {fill.market}")
-                logger.error(f"   This buy fill will NOT create corresponding sell orders!")
+                logger.error("   This buy fill will NOT create corresponding sell orders!")
                 return
             
             logger.info(f"✅ Buy fill qualifies for pairing - creating sell orders with rule: {len(rule.sell_price_levels)} price levels")

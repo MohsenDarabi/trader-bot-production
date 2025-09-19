@@ -12,7 +12,7 @@ from src.exchange.coinex_client import CoinExClient
 from src.exchange.order_tracker import OrderSide
 from src.core.profitability import ProfitabilityValidator
 from src.utils.logger import get_logger
-from src.utils.safe_conversions import safe_float
+from src.utils.safe_conversions import safe_float, safe_str_format
 from config.settings import ENABLE_REST_API_STATUS_CHECKS, ORDER_STATUS_CHECK_INTERVAL
 from src.utils.settlement_handler import settlement_retry
 
@@ -262,35 +262,61 @@ class OrderManager:
             
             # Handle immediate fills with unified coordination
             if filled_amount > 0:
-                logger.info(f"🔄 Immediate fill detected: {filled_amount} {market} @ {last_filled_price} - using unified pairing")
-                
-                # Use the pairing manager's configured sell price if available
-                sell_price = price * 1.015  # Default 1.5% profit fallback
-                strategy_price_used = False
-                
+                logger.info(
+                    f"🔄 Immediate fill detected: {safe_str_format(safe_float(filled_amount), '.8f')} "
+                    f"{market} @ {safe_str_format(safe_float(last_filled_price), '.8f')} - using unified pairing"
+                )
+
+                sell_price = None
+                price_method = ""
+
                 if self.pairing_manager and market in self.pairing_manager.pairing_rules:
                     rule = self.pairing_manager.pairing_rules[market]
                     if rule.sell_price_levels:
-                        # Use the strategy-configured absolute sell price
-                        sell_price = rule.sell_price_levels[0]
-                        strategy_price_used = True
-                        logger.info(f"📊 Using strategy sell price: ${sell_price:.2f} for {market}")
+                        sell_price = safe_float(rule.sell_price_levels[0])
+                        price_method = "strategy absolute price"
+                        logger.info(
+                            f"📊 Using strategy sell price: ${safe_str_format(sell_price, '.8f')} for {market}"
+                        )
                     else:
-                        logger.warning(f"⚠️ Empty pairing rule for {market} - using fallback price: ${sell_price:.2f}")
+                        logger.warning(
+                            f"⚠️ Empty pairing rule for {market} - falling back to minimum profit price"
+                        )
                 else:
-                    logger.warning(f"⚠️ No pairing rule for {market} - using fallback price: ${sell_price:.2f}")
-                
-                # Log the price calculation method for debugging
-                price_method = "strategy absolute price" if strategy_price_used else f"fallback (buy price * 1.015)"
-                logger.info(f"🔢 Sell price calculation: {price_method} = ${sell_price:.2f}")
+                    logger.warning(
+                        f"⚠️ No pairing rule for {market} - falling back to minimum profit price"
+                    )
+
+                if sell_price is None:
+                    fallback_price = safe_float(safe_float(price) * 1.01)
+                    price_method = "fallback (max(strategy, 1.01× buy))"
+
+                    strategy_price = None
+                    if hasattr(self, '_trading_bot_ref') and self._trading_bot_ref and \
+                            hasattr(self._trading_bot_ref, 'strategy') and self._trading_bot_ref.strategy:
+                        try:
+                            strategy_signal = self._trading_bot_ref.strategy.get_current_signal(market)
+                            if strategy_signal and getattr(strategy_signal, 'sell_price', None):
+                                strategy_price = safe_float(strategy_signal.sell_price)
+                        except Exception as signal_error:
+                            logger.debug(f"Could not load strategy price during fallback for {market}: {signal_error}")
+
+                    if strategy_price is not None and strategy_price > fallback_price:
+                        fallback_price = strategy_price
+
+                    sell_price = fallback_price
+
+                logger.info(
+                    f"🔢 Sell price calculation: {price_method} = ${safe_str_format(safe_float(sell_price), '.8f')}"
+                )
                 
                 try:
                     # Place coordinated immediate paired sell order
                     paired_sell = self.place_sell_order(
                         market=market,
                         amount=filled_amount,
-                        price=sell_price,
-                        position_size=filled_amount * sell_price,
+                        price=safe_float(sell_price),
+                        position_size=safe_float(filled_amount * safe_float(sell_price)),
                         is_hide=True,
                         is_paired=True  # Mark as immediate pair
                     )
@@ -303,7 +329,7 @@ class OrderManager:
                             market=market,
                             side=OrderSide.SELL,
                             amount=filled_amount,
-                            price=sell_price
+                            price=safe_float(sell_price)
                         )
                         
                         # Link sell order to buy order for coordinated tracking
@@ -312,7 +338,12 @@ class OrderManager:
                             buy_order_id=str(order.exchange_order_id)
                         )
                         
-                        logger.info(f"✅ Unified pairing completed: {filled_amount} @ {last_filled_price:.2f} → sell @ {sell_price:.2f}")
+                        logger.info(
+                            "✅ Unified pairing completed: "
+                            f"{safe_str_format(safe_float(filled_amount), '.8f')} @ "
+                            f"{safe_str_format(safe_float(last_filled_price), '.8f')} → sell @ "
+                            f"{safe_str_format(safe_float(sell_price), '.8f')}"
+                        )
                         logger.info(f"🔗 Paired orders linked: buy {order.exchange_order_id} ↔ sell {paired_sell.exchange_order_id}")
                     else:
                         logger.error(f"❌ Failed to place or track immediate paired sell for {filled_amount} {market}")
@@ -365,7 +396,7 @@ class OrderManager:
             # Handle validation failure
             if not validation_success:
                 logger.error(f"🚨 Order validation completely failed - order {client_id} could not be verified on exchange")
-                logger.error(f"🔄 Removing unverified order from tracking - WebSocket events will detect if order actually exists")
+                logger.error("🔄 Removing unverified order from tracking - WebSocket events will detect if order actually exists")
                 
                 # Remove from tracking since we can't verify it exists
                 del self.active_orders[client_id]
@@ -425,7 +456,7 @@ class OrderManager:
                 # Check if adding this sell order would exceed position size
                 total_sells_after = total_sells_current + amount
                 if total_sells_after > position_size_actual + 0.000001:  # Small tolerance for rounding
-                    logger.error(f"🚨 OVER-SELLING PREVENTED: Sell order would exceed position size!")
+                    logger.error("🚨 OVER-SELLING PREVENTED: Sell order would exceed position size!")
                     logger.error(f"   Position: {position_size_actual:.6f} {market}")
                     logger.error(f"   Current sells: {total_sells_current:.6f}")  
                     logger.error(f"   Requested sell: {amount:.6f}")
@@ -437,7 +468,7 @@ class OrderManager:
                         logger.warning(f"🔧 Adjusting sell amount from {amount:.6f} to {max_allowed:.6f} to prevent over-selling")
                         amount = max_allowed
                     else:
-                        logger.error(f"❌ Cannot place sell order - position fully covered or no position exists")
+                        logger.error("❌ Cannot place sell order - position fully covered or no position exists")
                         return None
                         
                 logger.info(f"✅ Over-selling check passed: {amount:.6f} sell + {total_sells_current:.6f} existing = {amount + total_sells_current:.6f} <= {position_size_actual:.6f} position")
@@ -570,7 +601,7 @@ class OrderManager:
             # Handle validation failure
             if not validation_success:
                 logger.error(f"🚨 Sell order validation completely failed - order {client_id} could not be verified on exchange")
-                logger.error(f"🔄 Removing unverified sell order from tracking - WebSocket events will detect if order actually exists")
+                logger.error("🔄 Removing unverified sell order from tracking - WebSocket events will detect if order actually exists")
                 
                 # Remove from tracking since we can't verify it exists
                 del self.active_orders[client_id]
@@ -787,7 +818,6 @@ class OrderManager:
         """
         orders = []
         now = datetime.now(timezone.utc)
-        stale_orders_to_remove = []
         
         for order in self.active_orders.values():
             if market and order.market != market:
@@ -968,7 +998,7 @@ class OrderManager:
             
             if order_to_remove:
                 # Remove from active orders (order is completed)
-                removed_order = self.active_orders.pop(order_to_remove)
+                self.active_orders.pop(order_to_remove)
                 
                 # Clean up status check timestamp
                 self._last_status_check.pop(order_to_remove, None)
@@ -1102,14 +1132,14 @@ class OrderManager:
                         timestamp=datetime.now(timezone.utc)
                     )
                     
-                    logger.info(f"📢 Notifying pairing system about REST-discovered buy fill")
+                    logger.info("📢 Notifying pairing system about REST-discovered buy fill")
                     logger.info(f"   Market: {order_market}, Amount: {filled_amount}, Price: ${avg_price}")
                     
                     # Notify all fill handlers
                     for handler in self.order_tracker.fill_handlers:
                         try:
                             handler(fill)
-                            logger.info(f"✅ Handler notified - sell order should be created at signal price")
+                            logger.info("✅ Handler notified - sell order should be created at signal price")
                         except Exception as e:
                             logger.error(f"Error notifying fill handler: {e}")
             else:

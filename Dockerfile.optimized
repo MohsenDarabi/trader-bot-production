@@ -30,7 +30,7 @@ COPY --from=builder --chown=botuser:botuser /root/.local /home/botuser/.local
 
 # Add local bin to PATH and Python path
 ENV PATH=/home/botuser/.local/bin:$PATH
-ENV PYTHONPATH=/home/botuser/.local/lib/python3.12/site-packages:${PYTHONPATH:-}
+ENV PYTHONPATH=/home/botuser/.local/lib/python3.12/site-packages
 
 # Copy only necessary application files (leveraging .dockerignore)
 COPY main.py .

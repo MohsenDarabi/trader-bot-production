@@ -3,7 +3,6 @@ CoinEx WebSocket Client
 Handles real-time data streams for order monitoring and market data
 """
 import json
-import time
 import asyncio
 import threading
 import gzip
@@ -12,7 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 import websockets
-from websockets.exceptions import ConnectionClosed, InvalidMessage
+from websockets.exceptions import ConnectionClosed
 
 from config.settings import COINEX_WS_URL, WS_RECONNECT_DELAY, WS_HEARTBEAT_INTERVAL
 from src.exchange.auth import CoinExAuth

@@ -363,7 +363,7 @@ class OrderTracker:
 
             # --- Sync PENDING orders ---
             pending_response = self.rest_client.get_pending_orders(market=market)
-            pending_orders = pending_response.get("data", [])
+            pending_orders = pending_response.get("data", pending_response if isinstance(pending_response, list) else [])
 
             for order_data in pending_orders:
                 order_id = str(order_data.get("order_id"))
@@ -387,13 +387,16 @@ class OrderTracker:
             start_time_ms = now_ms - (lookback_hours * 60 * 60 * 1000)
 
             # This needs to be awaited as it's a coroutine
+            # Per TROUBLESHOOTING.md, do not pass optional 'market' param to avoid signature errors.
             deals_response = await asyncio.to_thread(
                 self.rest_client.get_user_deals,
-                market=market,
                 start_time=start_time_ms,
                 limit=1000
             )
-            deals = deals_response.get("data", [])
+            all_deals = deals_response.get("data", [])
+
+            # Filter deals manually if a market was specified
+            deals = [d for d in all_deals if d.get('market') == market] if market else all_deals
 
             for deal_data in deals:
                 # The deal processing logic will automatically add the fill to the correct tracked order
