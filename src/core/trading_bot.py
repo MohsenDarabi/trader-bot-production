@@ -2620,75 +2620,67 @@ class DailyRangeBot:
             if not is_profitable.is_profitable:
                 logger.warning(f"Order not profitable: {is_profitable.reason}")
 
-                if side == 'buy':
-                    required_ratio = validator.calculate_min_profitable_price(price) / price
-                    current_ratio = exit_price / price if price > 0 else 0
-                    target_ratio = max(required_ratio, current_ratio)
-
-                    if target_ratio <= current_ratio + 1e-6:
-                        logger.debug("Profitability satisfied without expansion")
-                    else:
-                        midpoint = safe_float((price + exit_price) / 2)
-                        if midpoint <= 0:
-                            logger.warning("❌ Invalid midpoint for range expansion - skipping")
-                            return
-
-                        delta = midpoint * (target_ratio - 1) / (target_ratio + 1)
-                        proposed_buy = midpoint - delta
-                        proposed_sell = midpoint + delta
-
-                        if proposed_buy <= 0 or proposed_sell <= proposed_buy:
-                            logger.warning("❌ Symmetric expansion produced invalid prices - skipping")
-                            return
-
-                        market_info = self.market_data.get_market_info(market)
-                        tick_size = safe_float(market_info.get('tick_size', 0.0001))
-
-                        from decimal import Decimal, ROUND_DOWN, ROUND_UP
-                        tick_decimal = Decimal(str(tick_size))
-
-                        buy_decimal = Decimal(str(proposed_buy)) / tick_decimal
-                        sell_decimal = Decimal(str(proposed_sell)) / tick_decimal
-
-                        adjusted_buy = float((buy_decimal.quantize(Decimal('1'), rounding=ROUND_DOWN)) * tick_decimal)
-                        adjusted_sell = float((sell_decimal.quantize(Decimal('1'), rounding=ROUND_UP)) * tick_decimal)
-
-                        if adjusted_buy <= 0 or adjusted_sell <= adjusted_buy:
-                            logger.warning("❌ Rounded prices invalid after expansion - skipping")
-                            return
-
-                        signal.buy_price = adjusted_buy
-                        signal.sell_price = adjusted_sell
-                        price = adjusted_buy
-                        exit_price = adjusted_sell
-
-                        position_size = self.position_sizer.calculate_position_size(
-                            market, price, account_balance
-                        )
-
-                        if not position_size.is_valid:
-                            logger.warning(f"Cannot place {side} order for {market} after expansion: {position_size.reason}")
-                            return
-
-                        is_profitable = validator.is_signal_profitable(price, exit_price, position_size.size_usdt)
-                        if not is_profitable.is_profitable:
-                            logger.warning(
-                                f"❌ Symmetric range expansion didn't achieve profitability: "
-                                f"{safe_str_format(safe_float(is_profitable.profit_percent), '.4f')}% - skipping"
-                            )
-                            return
-
-                        logger.info(
-                            f"📈 Range expanded symmetrically for profitability: Buy {safe_str_format(price, '.8f')} | "
-                            f"Sell {safe_str_format(exit_price, '.8f')} (target ≥ {validator.min_profit_percent:.2f}%)"
-                        )
-                        log_trading_event(
-                            'range_expansion',
-                            f"Symmetric expansion for {market}: Buy={safe_str_format(price, '.8f')}, "
-                            f"Sell={safe_str_format(exit_price, '.8f')}, Profit={safe_str_format(safe_float(is_profitable.profit_percent), '.4f')}%"
-                        )
-                else:
+                if side != 'buy':
                     return
+
+                optimized_buy, optimized_sell, was_optimized = validator.optimize_prices_for_profit(
+                    signal.buy_price,
+                    signal.sell_price,
+                    signal.range_value,
+                    position_size.size_usdt,
+                    signal.previous_high,
+                    signal.previous_low
+                )
+
+                if not was_optimized:
+                    logger.warning("❌ Profitability adjustments unavailable; skipping buy placement")
+                    return
+
+                market_info = self.market_data.get_market_info(market)
+                tick_size = safe_float(market_info.get('tick_size', 0.0001))
+
+                from decimal import Decimal, ROUND_DOWN, ROUND_UP
+                tick_decimal = Decimal(str(tick_size))
+
+                buy_decimal = Decimal(str(optimized_buy)) / tick_decimal
+                sell_decimal = Decimal(str(optimized_sell)) / tick_decimal
+
+                adjusted_buy = float((buy_decimal.quantize(Decimal('1'), rounding=ROUND_DOWN)) * tick_decimal)
+                adjusted_sell = float((sell_decimal.quantize(Decimal('1'), rounding=ROUND_UP)) * tick_decimal)
+
+                if adjusted_buy <= 0 or adjusted_sell <= adjusted_buy:
+                    logger.warning("❌ Rounded prices invalid after expansion - skipping")
+                    return
+
+                signal.buy_price = adjusted_buy
+                signal.sell_price = adjusted_sell
+                price = adjusted_buy
+                exit_price = adjusted_sell
+
+                position_size = self.position_sizer.calculate_position_size(
+                    market, price, account_balance
+                )
+
+                if not position_size.is_valid:
+                    logger.warning(f"Cannot place {side} order for {market} after expansion: {position_size.reason}")
+                    return
+
+                is_profitable = validator.is_signal_profitable(price, exit_price, position_size.size_usdt)
+                if not is_profitable.is_profitable:
+                    logger.warning(
+                        f"❌ Range expansion still below profitability: {safe_str_format(safe_float(is_profitable.profit_percent), '.4f')}% - skipping"
+                    )
+                    return
+
+                logger.info(
+                    f"📈 Range expanded symmetrically for profitability: Buy {safe_str_format(price, '.8f')} | "
+                    f"Sell {safe_str_format(exit_price, '.8f')} (target ≥ {validator.min_profit_percent:.2f}%)"
+                )
+                log_trading_event(
+                    'range_expansion',
+                    f"Symmetric expansion for {market}: Buy={safe_str_format(price, '.8f')}, "
+                    f"Sell={safe_str_format(exit_price, '.8f')}, Profit={safe_str_format(safe_float(is_profitable.profit_percent), '.4f')}%"
+                )
             
             # Apply price adjustments for better entries/exits
             adjusted_price = price

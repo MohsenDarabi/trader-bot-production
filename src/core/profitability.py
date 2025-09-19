@@ -116,72 +116,36 @@ class ProfitabilityValidator:
             logger.debug("Prices already profitable, no optimization needed")
             return buy_price, sell_price, False
         
-        # Calculate minimum required spread for profitability
-        # NO LIMITS - optimize prices with unlimited range
-        
-        # Calculate the required sell/buy price ratio (multiplier) for profitability.
-        # The formula accounts for leverage and separate buy/sell fees.
-        # Formula: sell_price = buy_price * (1 + buy_fee + (min_profit / leverage)) / (1 - sell_fee)
-        min_profit_decimal = self.min_profit_percent / 100  # Convert from percent to decimal
-
-        # Minimum multiplier needed so that sell price covers fees + desired profit
+        min_profit_decimal = self.min_profit_percent / 100
         required_multiplier = (1 + self.taker_fee + min_profit_decimal) / (1 - self.maker_fee)
-        min_spread_factor = required_multiplier  # Use a consistent name with the old code
 
-        # Calculate minimum sell price needed for profitability
-        min_sell_price = buy_price * min_spread_factor
-        
-        if sell_price >= min_sell_price:
-            # Already profitable - no optimization needed
+        current_ratio = sell_price / buy_price if buy_price > 0 else 0
+        target_ratio = max(current_ratio, required_multiplier)
+
+        if target_ratio <= current_ratio + 1e-6:
             return buy_price, sell_price, False
-        
-        # Need to optimize - calculate options with NO LIMITS
-        # Option 1: Keep buy price, increase sell price
-        option1_buy = buy_price
-        option1_sell = min_sell_price
-        
-        # Option 2: Keep sell price, decrease buy price
-        option2_sell = sell_price
-        option2_buy = sell_price / min_spread_factor
-        
-        # Option 3: Symmetric adjustment - expand both directions
-        current_spread = sell_price - buy_price
-        required_spread = buy_price * (min_spread_factor - 1)
-        expansion_needed = (required_spread - current_spread) / 2
-        
-        option3_buy = buy_price - expansion_needed
-        option3_sell = sell_price + expansion_needed
-        
-        # Choose the option that minimizes deviation from original prices
-        # Calculate total deviation for each option
-        dev1 = abs(option1_sell - sell_price)
-        dev2 = abs(option2_buy - buy_price) 
-        dev3 = abs(option3_buy - buy_price) + abs(option3_sell - sell_price)
-        
-        if dev1 <= dev2 and dev1 <= dev3:
-            # Option 1: Keep buy, adjust sell
-            best_buy, best_sell = option1_buy, option1_sell
-            adjustment_type = "increased sell price"
-        elif dev2 <= dev3:
-            # Option 2: Adjust buy, keep sell
-            best_buy, best_sell = option2_buy, option2_sell
-            adjustment_type = "decreased buy price"
-        else:
-            # Option 3: Symmetric adjustment
-            best_buy, best_sell = option3_buy, option3_sell
-            adjustment_type = "symmetric adjustment"
-        
-        # Final validation
-        final_result = self.is_signal_profitable(best_buy, best_sell, margin)
+
+        midpoint = (buy_price + sell_price) / 2
+        if midpoint <= 0:
+            return buy_price, sell_price, False
+
+        delta = midpoint * (target_ratio - 1) / (target_ratio + 1)
+        new_buy = midpoint - delta
+        new_sell = midpoint + delta
+
+        if new_buy <= 0 or new_sell <= new_buy:
+            return buy_price, sell_price, False
+
+        final_result = self.is_signal_profitable(new_buy, new_sell, margin)
         if final_result.is_profitable:
-            logger.info(f"✅ Optimized prices for profitability ({adjustment_type}):")
+            logger.info("✅ Optimized prices for profitability (symmetric):")
             logger.info(f"   Original: Buy=${buy_price:.2f}, Sell=${sell_price:.2f}")
-            logger.info(f"   Optimized: Buy=${best_buy:.2f}, Sell=${best_sell:.2f}")
+            logger.info(f"   Optimized: Buy=${new_buy:.2f}, Sell=${new_sell:.2f}")
             logger.info(f"   Expected profit: {final_result.profit_percent:.2f}%")
-            return best_buy, best_sell, True
-        else:
-            logger.error(f"❌ Optimization failed - calculation error")
-            return buy_price, sell_price, False
+            return new_buy, new_sell, True
+
+        logger.debug("Symmetric optimization could not reach profitability after rounding; keeping original prices.")
+        return buy_price, sell_price, False
     
     # Layer 3: Position Exit Validation
     def is_position_profitable(self, entry_price: float, quantity: float,
