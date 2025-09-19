@@ -362,6 +362,10 @@ class OrderTracker:
             logger.info(f"Syncing existing orders from exchange for market: {market or 'all'}...")
 
             # --- Sync PENDING orders ---
+            logger.debug(
+                "[order_sync] Fetching pending orders via REST | market=%s",
+                market
+            )
             pending_response = self.rest_client.get_pending_orders(market=market)
             pending_orders = pending_response.get("data", pending_response if isinstance(pending_response, list) else [])
 
@@ -383,24 +387,32 @@ class OrderTracker:
             from config.settings import TRADING_INTERVAL
             lookback_hours = 2 if TRADING_INTERVAL == 'hourly' else 24  # 2 hours for hourly, 24 for daily
 
-            now_ms = int(time.time() * 1000)
-            start_time_ms = now_ms - (lookback_hours * 60 * 60 * 1000)
+            deals = []
+            if market:
+                now_ms = int(time.time() * 1000)
+                start_time_ms = now_ms - (lookback_hours * 60 * 60 * 1000)
 
-            # This needs to be awaited as it's a coroutine
-            # Per TROUBLESHOOTING.md, do not pass optional 'market' param to avoid signature errors.
-            deals_response = await asyncio.to_thread(
-                self.rest_client.get_user_deals,
-                start_time=start_time_ms,
-                limit=1000
-            )
-            all_deals = deals_response.get("data", [])
+                logger.debug(
+                    "[order_sync] Fetching user deals via REST | market=%s start=%s limit=%s",
+                    market,
+                    start_time_ms,
+                    1000
+                )
 
-            # Filter deals manually if a market was specified
-            deals = [d for d in all_deals if d.get('market') == market] if market else all_deals
+                deals_response = await asyncio.to_thread(
+                    self.rest_client.get_user_deals,
+                    market=market,
+                    start_time=start_time_ms,
+                    limit=1000
+                )
+                all_deals = deals_response.get("data", [])
+                deals = [d for d in all_deals if d.get('market') == market]
 
-            for deal_data in deals:
-                # The deal processing logic will automatically add the fill to the correct tracked order
-                self._process_deal(deal_data)
+                for deal_data in deals:
+                    # The deal processing logic will automatically add the fill to the correct tracked order
+                    self._process_deal(deal_data)
+            else:
+                logger.debug("[order_sync] Skipping user deals fetch without specific market (avoids invalid argument).")
 
             logger.info(f"Synced {len(pending_orders)} pending orders and {len(deals)} recent fills for {market or 'all'}.")
 

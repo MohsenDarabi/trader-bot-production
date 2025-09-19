@@ -3356,7 +3356,13 @@ class DailyRangeBot:
                 try:
                     # Get today's buy fills from the API
                     start_time = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+                    logger.debug(
+                        "[coverage_check] Fetching user deals | market=%s side=buy start=%s",
+                        market,
+                        start_time
+                    )
                     deals_response = self.client.get_user_deals(
+                        market=market,
                         side='buy',
                         start_time=start_time,
                         limit=100

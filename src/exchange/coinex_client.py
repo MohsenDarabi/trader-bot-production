@@ -123,23 +123,34 @@ class CoinExClient:
             'timeout': REQUEST_TIMEOUT
         }
         
-        # Add parameters
+        # Add parameters (filter out None values so signing matches actual request)
+        request_params = None
         if params:
-            kwargs['params'] = params
-        
+            if isinstance(params, dict):
+                filtered_items = [(k, v) for k, v in params.items() if v is not None]
+                if filtered_items:
+                    request_params = {k: v for k, v in filtered_items}
+            else:
+                filtered_items = [(k, v) for k, v in params if v is not None]
+                if filtered_items:
+                    request_params = filtered_items
+
+            if request_params:
+                kwargs['params'] = request_params
+
         # Add body data
         body_str = None
         if data:
             body_str = json.dumps(data)
             kwargs['data'] = body_str
-        
+
         # Add authentication headers if required
         if auth_required:
             logger.info("Generating authentication headers...")
             headers = self.auth.get_auth_headers(
                 method=method,
                 path=endpoint,
-                params=params,
+                params=request_params if request_params is not None else params,
                 body=body_str
             )
             kwargs['headers'] = headers
@@ -223,6 +234,15 @@ class CoinExClient:
             # Check for API errors
             if response_data.get('code') != 0:
                 error_msg = response_data.get('message', 'Unknown error')
+                sent_params = kwargs.get('params', params)
+                logger.error(
+                    "CoinEx API error (%s %s): %s | params=%s data=%s",
+                    method,
+                    endpoint,
+                    error_msg,
+                    sent_params,
+                    data
+                )
                 context = {
                     'method': method,
                     'url': url,
@@ -514,7 +534,7 @@ class CoinExClient:
         Get list of pending orders
         
         Args:
-            market: Optional market filter (applied client-side due to API signature issues)
+            market: Optional market filter (applied client-side for reliability)
             page: Page number
             limit: Results per page
             
@@ -526,6 +546,13 @@ class CoinExClient:
             'page': page,
             'limit': limit if limit is not None else 100
         }
+
+        logger.debug(
+            "REST pending orders request | market=%s page=%s limit=%s",
+            market,
+            page,
+            limit if limit is not None else 100
+        )
 
         response = self._request(
             method='GET',
@@ -667,7 +694,17 @@ class CoinExClient:
             params['start_time'] = start_time
         if end_time:
             params['end_time'] = end_time
-            
+        
+        logger.debug(
+            "REST user deals request | market=%s side=%s start=%s end=%s page=%s limit=%s",
+            market,
+            side,
+            start_time,
+            end_time,
+            page,
+            params['limit']
+        )
+
         return self._request('GET', '/v2/futures/user-deals', params=params)
     
     def get_order_deals(self, market: str, order_id: int,

@@ -53,9 +53,12 @@ class CoinExAuth:
         
         # Add query parameters for GET requests
         if params and method.upper() == 'GET':
-            # Sort parameters by key for consistent ordering
-            sorted_params = sorted(params.items())
-            query_string = urlencode(sorted_params)
+            # Preserve parameter ordering exactly as sent to the API
+            if isinstance(params, dict):
+                ordered_items = list(params.items())
+            else:
+                ordered_items = list(params)
+            query_string = urlencode(ordered_items, doseq=True)
             prepared_parts[1] = f"{path}?{query_string}"
         
         # Add body for POST/PUT requests
