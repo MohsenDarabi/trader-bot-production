@@ -1315,8 +1315,15 @@ class DailyRangeBot:
                 limit=200
             )
 
-            if transactions and transactions.get('data'):
-                for fill in transactions['data']:
+            if transactions:
+                if isinstance(transactions, dict):
+                    deals = transactions.get('data', [])
+                elif isinstance(transactions, list):
+                    deals = transactions
+                else:
+                    deals = []
+
+                for fill in deals:
                     fill_time_value = safe_float(fill.get('created_at', 0))
                     if fill_time_value <= 0:
                         continue
