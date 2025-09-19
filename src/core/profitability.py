@@ -240,13 +240,6 @@ class ProfitabilityValidator:
         min_profit_decimal = self.min_profit_percent / 100
         return buy_price * (1 + self.taker_fee + min_profit_decimal) / (1 - self.maker_fee)
 
-    def calculate_max_profitable_buy(self, sell_price: float) -> float:
-        """Return the highest buy price that still meets profit requirements for a given sell price."""
-        min_profit_decimal = self.min_profit_percent / 100
-        denominator = 1 + self.taker_fee + min_profit_decimal
-        if denominator <= 0:
-            raise ValueError("Invalid profitability configuration")
-        return sell_price * (1 - self.maker_fee) / denominator
     
     def validate_range_prices(self, high: float, low: float, 
                             buy_price: float, sell_price: float) -> bool:

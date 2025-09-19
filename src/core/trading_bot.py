@@ -2619,31 +2619,49 @@ class DailyRangeBot:
             is_profitable = validator.is_signal_profitable(price, exit_price, position_size.size_usdt)
             if not is_profitable.is_profitable:
                 logger.warning(f"Order not profitable: {is_profitable.reason}")
-                
-                # Try to expand range for profitability - corrected calculation
+
                 if side == 'buy':
-                    min_sell_required = validator.calculate_min_profitable_price(price)
-                    if exit_price >= min_sell_required:
-                        logger.debug("Exit price already meets minimum profitable threshold after fees")
+                    required_ratio = validator.calculate_min_profitable_price(price) / price
+                    current_ratio = exit_price / price if price > 0 else 0
+                    target_ratio = max(required_ratio, current_ratio)
+
+                    if target_ratio <= current_ratio + 1e-6:
+                        logger.debug("Profitability satisfied without expansion")
                     else:
-                        max_profitable_buy = validator.calculate_max_profitable_buy(exit_price)
+                        midpoint = safe_float((price + exit_price) / 2)
+                        if midpoint <= 0:
+                            logger.warning("❌ Invalid midpoint for range expansion - skipping")
+                            return
+
+                        delta = midpoint * (target_ratio - 1) / (target_ratio + 1)
+                        proposed_buy = midpoint - delta
+                        proposed_sell = midpoint + delta
+
+                        if proposed_buy <= 0 or proposed_sell <= proposed_buy:
+                            logger.warning("❌ Symmetric expansion produced invalid prices - skipping")
+                            return
 
                         market_info = self.market_data.get_market_info(market)
                         tick_size = safe_float(market_info.get('tick_size', 0.0001))
 
-                        from decimal import Decimal, ROUND_DOWN
+                        from decimal import Decimal, ROUND_DOWN, ROUND_UP
                         tick_decimal = Decimal(str(tick_size))
-                        adjusted_buy_decimal = Decimal(str(min(price, max_profitable_buy))) / tick_decimal
-                        adjusted_buy = float((adjusted_buy_decimal.quantize(Decimal('1'), rounding=ROUND_DOWN)) * tick_decimal)
 
-                        if adjusted_buy <= 0 or adjusted_buy >= price:
-                            logger.warning("❌ Unable to adjust buy price to meet profitability requirements - skipping")
+                        buy_decimal = Decimal(str(proposed_buy)) / tick_decimal
+                        sell_decimal = Decimal(str(proposed_sell)) / tick_decimal
+
+                        adjusted_buy = float((buy_decimal.quantize(Decimal('1'), rounding=ROUND_DOWN)) * tick_decimal)
+                        adjusted_sell = float((sell_decimal.quantize(Decimal('1'), rounding=ROUND_UP)) * tick_decimal)
+
+                        if adjusted_buy <= 0 or adjusted_sell <= adjusted_buy:
+                            logger.warning("❌ Rounded prices invalid after expansion - skipping")
                             return
 
                         signal.buy_price = adjusted_buy
+                        signal.sell_price = adjusted_sell
                         price = adjusted_buy
+                        exit_price = adjusted_sell
 
-                        # Recalculate position size with new buy price
                         position_size = self.position_sizer.calculate_position_size(
                             market, price, account_balance
                         )
@@ -2653,22 +2671,23 @@ class DailyRangeBot:
                             return
 
                         is_profitable = validator.is_signal_profitable(price, exit_price, position_size.size_usdt)
-
                         if not is_profitable.is_profitable:
-                            logger.warning(f"❌ Range expansion didn't achieve profitability: {safe_str_format(safe_float(is_profitable.profit_percent), '.4f')}% - skipping")
+                            logger.warning(
+                                f"❌ Symmetric range expansion didn't achieve profitability: "
+                                f"{safe_str_format(safe_float(is_profitable.profit_percent), '.4f')}% - skipping"
+                            )
                             return
 
                         logger.info(
-                            f"📈 Adjusted buy price for profitability: {safe_str_format(safe_float(price), '.8f')} "
-                            f"(target profit ≥ {safe_str_format(validator.min_profit_percent, '.2f')}%)"
+                            f"📈 Range expanded symmetrically for profitability: Buy {safe_str_format(price, '.8f')} | "
+                            f"Sell {safe_str_format(exit_price, '.8f')} (target ≥ {validator.min_profit_percent:.2f}%)"
                         )
                         log_trading_event(
                             'range_expansion',
-                            f"Buy price tightened for {market}: {safe_str_format(safe_float(signal.buy_price), '.8f')} "
-                            f"with expected profit {safe_str_format(safe_float(is_profitable.profit_percent), '.4f')}%"
+                            f"Symmetric expansion for {market}: Buy={safe_str_format(price, '.8f')}, "
+                            f"Sell={safe_str_format(exit_price, '.8f')}, Profit={safe_str_format(safe_float(is_profitable.profit_percent), '.4f')}%"
                         )
                 else:
-                    # For sell orders, can't optimize since we're exiting at current signal
                     return
             
             # Apply price adjustments for better entries/exits
