@@ -52,24 +52,28 @@ class ProfitabilityValidator:
         Returns:
             ProfitabilityResult with validation details
         """
-        # Calculate with leverage
-        notional_value = margin * self.leverage  # Total position value with leverage
+        # We evaluate profitability per-contract, independent of the account margin.
+        # Assume the entry executes as a taker order and the exit as a maker order.
+        if buy_price <= 0:
+            raise ValueError("buy_price must be positive")
+
+        # Derive quantity from margin for reporting purposes, but evaluate ratios directly.
+        notional_value = margin * self.leverage if margin > 0 else buy_price
         quantity = notional_value / buy_price
-        
-        # Calculate fees
-        buy_fees = margin * self.taker_fee  # Pay fee on margin
-        sell_revenue = quantity * sell_price
-        sell_fees = sell_revenue * self.maker_fee
-        total_fees = buy_fees + sell_fees
-        
-        # Calculate profit
-        gross_profit = sell_revenue - notional_value
-        net_profit = gross_profit - total_fees
-        profit_percent = (net_profit / margin) * 100
-        
+
+        # Net proceeds after closing the position
+        net_proceeds = sell_price * quantity * (1 - self.maker_fee)
+
+        # Total cost of opening the position (price + taker fee)
+        total_cost = buy_price * quantity * (1 + self.taker_fee)
+
+        net_profit = net_proceeds - total_cost
+        profit_percent = (net_profit / (buy_price * quantity)) * 100  # Relative to entry notional
+        total_fees = (buy_price * quantity * self.taker_fee) + (sell_price * quantity * self.maker_fee)
+
         # Check profitability
         is_profitable = profit_percent >= self.min_profit_percent
-        
+
         reason = None
         if not is_profitable:
             reason = (f"Signal profit {profit_percent:.2f}% is below "
@@ -118,9 +122,9 @@ class ProfitabilityValidator:
         # The formula accounts for leverage and separate buy/sell fees.
         # Formula: sell_price = buy_price * (1 + buy_fee + (min_profit / leverage)) / (1 - sell_fee)
         min_profit_decimal = self.min_profit_percent / 100  # Convert from 1.0 to 0.01
-        
-        # We assume the entry (buy) is a TAKER order and the exit (sell) is a MAKER order.
-        required_multiplier = (1 + self.taker_fee + (min_profit_decimal / self.leverage)) / (1 - self.maker_fee)
+
+        # Minimum multiplier needed so that sell price covers fees + desired profit
+        required_multiplier = (1 + self.taker_fee + min_profit_decimal) / (1 - self.maker_fee)
         min_spread_factor = required_multiplier  # Use a consistent name with the old code
 
         # Calculate minimum sell price needed for profitability
@@ -193,65 +197,47 @@ class ProfitabilityValidator:
         Returns:
             ProfitabilityResult with validation details
         """
-        # Calculate exit values
-        sell_revenue = quantity * sell_price
+        if entry_price <= 0 or quantity <= 0:
+            raise ValueError("entry_price and quantity must be positive for profitability checks")
+
+        # Entry cost should represent the notional exposure; however, on leveraged products the
+        # supplied `entry_cost` is often just the margin. Recompute using price & quantity to ensure
+        # we compare apples-to-apples.
+        entry_notional = entry_price * quantity
+
+        buy_fees = entry_notional * self.taker_fee
+        sell_revenue = sell_price * quantity
         sell_fees = sell_revenue * self.maker_fee
-        
-        # Net proceeds after selling
-        net_proceeds = sell_revenue - sell_fees
-        
-        # Calculate profit
-        net_profit = net_proceeds - entry_cost
-        profit_percent = (net_profit / entry_cost) * 100
-        
+
+        net_profit = (sell_revenue - sell_fees) - (entry_notional + buy_fees)
+        profit_percent = (net_profit / entry_notional) * 100
+        total_fees = buy_fees + sell_fees
+
         # Check profitability
         is_profitable = profit_percent >= self.min_profit_percent
-        
+
         reason = None
         if not is_profitable:
             reason = (f"Position profit {profit_percent:.2f}% is below "
                      f"minimum {self.min_profit_percent}%")
-            min_sell_price = self.calculate_min_profitable_price(
-                quantity, entry_cost
-            )
-            reason += f" (need price >= ${min_sell_price:.2f})"
-        
+            min_sell_price = self.calculate_min_profitable_price(entry_price)
+            reason += f" (need price >= ${min_sell_price:.4f})"
+
         logger.debug(f"Position validation: Entry=${entry_price:.2f}, "
                     f"Sell=${sell_price:.2f}, Profit={profit_percent:.2f}%")
-        
+
         return ProfitabilityResult(
             is_profitable=is_profitable,
             net_profit=net_profit,
             profit_percent=profit_percent,
-            total_fees=sell_fees,
+            total_fees=total_fees,
             reason=reason
         )
-    
-    def calculate_min_profitable_price(self, quantity: float, 
-                                     entry_cost: float) -> float:
-        """
-        Calculate minimum sell price needed for profitability
-        
-        Args:
-            quantity: Position quantity
-            entry_cost: Total entry cost including fees
-            
-        Returns:
-            Minimum profitable sell price
-        """
-        # Required net proceeds
-        required_proceeds = entry_cost * (1 + self.min_profit_percent / 100)
-        
-        # Account for sell fees
-        # net_proceeds = sell_revenue - (sell_revenue * maker_fee)
-        # net_proceeds = sell_revenue * (1 - maker_fee)
-        # sell_revenue = net_proceeds / (1 - maker_fee)
-        required_revenue = required_proceeds / (1 - self.maker_fee)
-        
-        # Calculate price
-        min_price = required_revenue / quantity
-        
-        return min_price
+
+    def calculate_min_profitable_price(self, buy_price: float) -> float:
+        """Return the minimum sell price that satisfies fees + min profit for a long entry."""
+        min_profit_decimal = self.min_profit_percent / 100
+        return buy_price * (1 + self.taker_fee + min_profit_decimal) / (1 - self.maker_fee)
     
     def validate_range_prices(self, high: float, low: float, 
                             buy_price: float, sell_price: float) -> bool:

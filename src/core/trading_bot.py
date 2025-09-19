@@ -890,21 +890,48 @@ class DailyRangeBot:
                 
                 # Determine exit price based on position side
                 exit_price = signal.sell_price if position.side.value == 'buy' else signal.buy_price
-                
-                # Validate profitability
+
                 validator = ProfitabilityValidator()
-                entry_cost = position.total_cost  # Use position's total cost
-                is_profitable = validator.is_position_profitable(
-                    position.avg_entry_price, position.size, exit_price, entry_cost
+
+                # Ensure the current signal's sell price clears the profit floor relative to the signal buy
+                min_sell_price = validator.calculate_min_profitable_price(signal.buy_price)
+
+                if exit_price < min_sell_price:
+                    logger.debug(
+                        f"Exit price ${exit_price:.4f} below minimum profitable price ${min_sell_price:.4f} for signal buy "
+                        f"${signal.buy_price:.4f} - skipping exit"
+                    )
+                    return
+
+                # Informational check against the aggregated position (long-only); do not block the exit,
+                # but surface the expected PnL for observability.
+                entry_cost = position.total_cost
+                position_profit = validator.is_position_profitable(
+                    position.avg_entry_price,
+                    position.size,
+                    exit_price,
+                    entry_cost
                 )
-                
-                if is_profitable.is_profitable:
-                    log_trading_event('profitable_exit', f"Profitable exit opportunity for {market} position: "
-                              f"Entry=${position.avg_entry_price:.2f}, Exit=${exit_price:.2f}, "
-                              f"Profit={is_profitable.profit_percent:.2f}%")
-                    
-                    # Place exit order
-                    await self._place_exit_order(position, exit_price)
+
+                if not position_profit.is_profitable:
+                    logger.debug(
+                        f"Aggregated position for {market} would exit at {position_profit.profit_percent:.2f}% "
+                        "(below target) – proceeding because current signal leg is profitable"
+                    )
+
+                incremental_profit_percent = (
+                    (exit_price * (1 - validator.maker_fee) - signal.buy_price * (1 + validator.taker_fee))
+                    / signal.buy_price
+                ) * 100
+
+                log_trading_event(
+                    'profitable_exit',
+                    f"Profitable exit opportunity for {market}: signal_buy=${signal.buy_price:.2f}, "
+                    f"exit=${exit_price:.2f}, profit={incremental_profit_percent:.2f}%"
+                )
+
+                # Place exit order
+                await self._place_exit_order(position, exit_price)
                 
             except Exception as e:
                 logger.error(f"Error checking exit for position {position.position_id}: {e}")
@@ -1097,8 +1124,8 @@ class DailyRangeBot:
         except Exception as e:
             logger.error(f"Error checking entry opportunities for {market}: {e}")
     
-    def _check_daily_buy_status(self, market: str) -> Dict[str, Any]:
-        """Check buy order status for current period (day/hour) with stale order cleanup"""
+    def _check_period_buy_status(self, market: str) -> Dict[str, Any]:
+        """Check buy order status for the active trading period (hour/day) with stale order cleanup"""
         try:
             # Import and check trading timeframe
             from config.settings import TRADING_INTERVAL
@@ -1131,7 +1158,7 @@ class DailyRangeBot:
                 stale_threshold = now - timedelta(hours=2)
             else:
                 current_period = now.date()
-                period_name = "today"
+                period_name = "current day"
                 # For daily: orders older than 1 day are stale
                 stale_threshold = now - timedelta(days=1)
             
@@ -1170,11 +1197,12 @@ class DailyRangeBot:
                         logger.error(f"Failed to cancel stale order {stale_order.client_id}: {e}")
             
             result = {
-                'has_today_buy': len(current_period_buy_orders) > 0,  # Keep existing key for compatibility
-                'today_orders': current_period_buy_orders,  # Keep existing key for compatibility
+                'has_current_interval_buy': len(current_period_buy_orders) > 0,
+                'current_interval_orders': current_period_buy_orders,
+                'interval_label': period_name,
                 'cancelled_stale': cancelled_count,
                 'total_buy_orders': len(buy_orders),
-                'all_buy_orders': buy_orders  # Return ALL orders for validation
+                'all_buy_orders': buy_orders
             }
             
             # Validation: Cross-check with exchange API to detect discrepancies
@@ -1253,17 +1281,17 @@ class DailyRangeBot:
                         
                         # Recalculate result after cleanup
                         remaining_period_buys = [o for o in current_period_buy_orders if o.client_id in exchange_client_ids]
-                        result['has_today_buy'] = len(remaining_period_buys) > 0
-                        result['today_orders'] = remaining_period_buys
+                        result['has_current_interval_buy'] = len(remaining_period_buys) > 0
+                        result['current_interval_orders'] = remaining_period_buys
                         result['total_buy_orders'] = len([o for o in buy_orders if o.client_id in exchange_client_ids])
-                        logger.info(f"✅ After phantom cleanup: has_{period_name.replace(' ', '_')}_buy={result['has_today_buy']}")
+                        logger.info(f"✅ After phantom cleanup: has_{period_name.replace(' ', '_')}_buy={result['has_current_interval_buy']}")
                     
                     # REMOVED: Cache clearing logic - now using direct exchange queries only
                 
             except Exception as validation_error:
                 logger.debug(f"Validation check failed for {market}: {validation_error}")
             
-            if result['has_today_buy']:
+            if result['has_current_interval_buy']:
                 log_trading_event('buy_status', f"Found {len(current_period_buy_orders)} buy order(s) from {period_name} for {market} ({timeframe} strategy)")
             
             if cancelled_count > 0:
@@ -1274,13 +1302,15 @@ class DailyRangeBot:
         except Exception as e:
             logger.error(f"Error checking daily buy status for {market}: {e}")
             return {
-                'has_today_buy': True,  # Conservative: assume we have buy to prevent multiple orders
-                'today_orders': [],
+                'has_current_interval_buy': True,  # Conservative: assume we have buy to prevent multiple orders
+                'current_interval_orders': [],
+                'interval_label': "current period",
                 'cancelled_stale': 0,
-                'total_buy_orders': 0
+                'total_buy_orders': 0,
+                'all_buy_orders': []
             }
     
-    def _check_today_filled_buy_orders(self, market: str) -> bool:
+    def _has_current_interval_uncovered_buy_fills(self, market: str) -> bool:
         """
         Determine whether the current trading period still has uncovered buy fills.
 
@@ -2042,26 +2072,26 @@ class DailyRangeBot:
                                current_second <= 60)
             is_new_period = not in_funding_window
             
-            buy_status = self._check_daily_buy_status(market)  # Reuse existing method - it checks recent buy activity
-            has_period_buy = buy_status.get('has_today_buy', False)
+            buy_status = self._check_period_buy_status(market)
+            has_interval_buy_status = buy_status.get('has_current_interval_buy', False)
             period_name = "hour"
         else:
             # For daily: Always allow trading (not time-window restricted)
             is_new_period = True
             
-            buy_status = self._check_daily_buy_status(market)
-            has_period_buy = buy_status.get('has_today_buy', False)
+            buy_status = self._check_period_buy_status(market)
+            has_interval_buy_status = buy_status.get('has_current_interval_buy', False)
             period_name = "day"
         
         # Check cycle completion flag
         cycle_complete = self._cycle_completion_flags.get(market, False)
         
         # CONDITION 1: Either (new period + first buy) OR cycle complete
-        can_proceed = (is_new_period and not has_period_buy) or cycle_complete
+        can_proceed = (is_new_period and not has_interval_buy_status) or cycle_complete
 
         logger.info(
             f"🧭 Buy state for {market}: period={period_name}, is_new_period={is_new_period}, "
-            f"has_period_buy={has_period_buy}, cycle_complete={cycle_complete}, "
+            f"has_buy_this_period={has_interval_buy_status}, cycle_complete={cycle_complete}, "
             f"pending_sells={pending_sells_today} ({sell_period_label})"
         )
 
@@ -2104,8 +2134,8 @@ class DailyRangeBot:
         
         # Continue with remaining safety checks from original code
         exchange_state = self._get_exchange_position_and_orders_direct(market)
-        pending_buy_orders = exchange_state['today_buy_orders']
-        pending_sell_orders = exchange_state['today_sell_orders'] + exchange_state['old_sell_orders']
+        pending_buy_orders = exchange_state['current_interval_buy_orders']
+        pending_sell_orders = exchange_state['current_interval_sell_orders'] + exchange_state['previous_interval_sell_orders']
         
         # Final safety check for pending buy orders
         if pending_buy_orders:
@@ -2233,9 +2263,9 @@ class DailyRangeBot:
         
         # Use FRESH exchange data for decision making (not cached)
         fresh_data = self._get_exchange_position_and_orders_direct(market)
-        fresh_today_buy_orders = fresh_data['today_buy_orders']
-        fresh_today_sell_orders = fresh_data['today_sell_orders']
-        fresh_old_sell_orders = fresh_data['old_sell_orders']
+        fresh_interval_buy_orders = fresh_data['current_interval_buy_orders']
+        fresh_interval_sell_orders = fresh_data['current_interval_sell_orders']
+        fresh_previous_sell_orders = fresh_data['previous_interval_sell_orders']
         is_consistent = fresh_data['is_consistent']
         period_label = 'hour' if timeframe == 'hourly' else 'day'
 
@@ -2280,21 +2310,23 @@ class DailyRangeBot:
         # CRITICAL FIX: Check if ANY buy orders were placed today (pending OR filled)
         # Previous bug: Only checked pending orders, which become empty after filling
         # This caused "startup" logic to trigger repeatedly after each filled order
-        has_today_buy_pending = len(fresh_today_buy_orders) > 0
-        has_today_buy_filled = self._check_today_filled_buy_orders(market)
+        interval_label = buy_status.get('interval_label', f"current {period_label}")
+
+        has_interval_buy_pending = len(fresh_interval_buy_orders) > 0
+        has_interval_uncovered_fill = self._has_current_interval_uncovered_buy_fills(market)
         logger.info(
-            f"🧾 Current-period buy coverage for {market}: pending={has_today_buy_pending}, "
-            f"uncovered_fills={has_today_buy_filled}"
+            f"🧾 {interval_label.capitalize()} buy coverage for {market}: pending={has_interval_buy_pending}, "
+            f"uncovered_fills={has_interval_uncovered_fill}"
         )
-        has_today_buy = has_today_buy_pending or has_today_buy_filled
-        logger.info(f"🔍 Current {period_label} buy status for {market}: pending={has_today_buy_pending}, filled={has_today_buy_filled}, total={has_today_buy}")
+        has_interval_buy = has_interval_buy_pending or has_interval_uncovered_fill
+        logger.info(f"🔍 Current {period_label} buy status for {market}: pending={has_interval_buy_pending}, uncovered_fills={has_interval_uncovered_fill}, total={has_interval_buy}")
         
         # Log fresh data decision details  
-        logger.info(f"🔄 Fresh exchange data for {market}: today_buys={len(fresh_today_buy_orders)}, "
-                   f"today_sells={len(fresh_today_sell_orders)} (pending_regular={pending_sells_today}), "
-                   f"old_sells={len(fresh_old_sell_orders)}, cycle_complete={cycle_complete_flag}, "
+        logger.info(f"🔄 Fresh exchange data for {market}: current_interval_buys={len(fresh_interval_buy_orders)}, "
+                   f"current_interval_sells={len(fresh_interval_sell_orders)} (pending_regular={pending_sells_today}), "
+                   f"previous_interval_sells={len(fresh_previous_sell_orders)}, cycle_complete={cycle_complete_flag}, "
                    f"consistency={'✅' if is_consistent else '🚨'}")
-        logger.info(f"🎯 Final buy decision for {market}: has_today_buy={has_today_buy} (pending: {has_today_buy_pending}, filled: {has_today_buy_filled})")
+        logger.info(f"🎯 Final buy decision for {market}: has_interval_buy={has_interval_buy} (pending: {has_interval_buy_pending}, uncovered_fills: {has_interval_uncovered_fill})")
         
         # Decision logic using fresh data
         if cycle_complete_flag:
@@ -2313,7 +2345,7 @@ class DailyRangeBot:
             
             # Flag will be cleared after successful buy order placement
             
-        elif not has_today_buy:
+        elif not has_interval_buy:
             # STARTUP SCENARIO: No buy order placed today
             # Note: Emergency check above already prevents this scenario if pending sells exist
             # This logic is now primarily for logging clarity and double-verification
@@ -2454,32 +2486,52 @@ class DailyRangeBot:
                 
             logger.warning(f"⚠️  Found {len(buy_orders)} buy order(s) for {market} - cleaning up...")
             
-            # Sort by creation time (keep the oldest/first one if from today)
+            from config.settings import TRADING_INTERVAL
+            timeframe = (TRADING_INTERVAL or '').lower()
+            now_utc = datetime.now(timezone.utc)
+
             buy_orders.sort(key=lambda x: x.created_at)
-            
-            today = datetime.now(timezone.utc).date()
-            today_orders = [o for o in buy_orders if o.created_at.date() == today]
-            old_orders = [o for o in buy_orders if o.created_at.date() < today]
-            
+
+            if timeframe == 'hourly':
+                period_key = now_utc.strftime('%Y-%m-%d-%H')
+                interval_label = 'current hour'
+            else:
+                period_key = now_utc.date()
+                interval_label = 'current day'
+
+            current_period_orders = []
+            previous_period_orders = []
+
+            for order in buy_orders:
+                created_at = order.created_at
+                if timeframe == 'hourly':
+                    order_period = created_at.strftime('%Y-%m-%d-%H')
+                else:
+                    order_period = created_at.date()
+
+                if order_period == period_key:
+                    current_period_orders.append(order)
+                elif created_at < now_utc:
+                    previous_period_orders.append(order)
+
             # Cancel ALL old orders
-            for order in old_orders:
+            for order in previous_period_orders:
                 try:
-                    logger.warning(f"🗑️  Cancelling old buy order: {order.client_id} from {order.created_at.date()}")
+                    logger.warning(f"🗑️  Cancelling buy order from previous period: {order.client_id} ({order.created_at})")
                     if self.order_manager.cancel_order(order.client_id):
-                        log_trading_event('cleanup', f"Cancelled old buy order {order.client_id}")
+                        log_trading_event('cleanup', f"Cancelled previous-period buy order {order.client_id}")
                 except Exception as e:
                     if "invalid argument" in str(e).lower():
                         logger.info(f"⚠️ Order {order.client_id} may already be filled/cancelled: {e}")
                         log_trading_event('order_gone', f"Order {order.client_id} not found - likely filled/cancelled")
                     else:
                         logger.error(f"Failed to cancel old order {order.client_id}: {e}")
-            
+
             # Handle today's orders - be more aggressive about old ones
-            if len(today_orders) > 1:
-                logger.warning(f"⚠️  Multiple buy orders from today detected! Keeping newest, cancelling {len(today_orders)-1} older ones")
-                # Sort by creation time, keep the newest (last one)
-                today_orders.sort(key=lambda x: x.created_at)
-                for order in today_orders[:-1]:  # Cancel all except the newest
+            if len(current_period_orders) > 1:
+                logger.warning(f"⚠️  Multiple buy orders from {interval_label} detected! Keeping newest, cancelling {len(current_period_orders)-1} older ones")
+                current_period_orders.sort(key=lambda x: x.created_at)
+                for order in current_period_orders[:-1]:  # Cancel all except the newest
                     try:
                         age_hours = (datetime.now(timezone.utc) - order.created_at).total_seconds() / 3600
                         logger.warning(f"🗑️  Cancelling older buy order: {order.client_id} from {order.created_at.time()} ({age_hours:.1f}h old)")
@@ -2498,12 +2550,12 @@ class DailyRangeBot:
                             log_trading_event('order_gone', f"Order {order.client_id} not found - likely filled/cancelled")
                         else:
                             logger.error(f"Failed to cancel older order {order.client_id}: {e}")
-            elif len(today_orders) == 1:
-                # Single order from today - KEEP IT (conservative approach)
-                order = today_orders[0]
+            elif len(current_period_orders) == 1:
+                # Single order from the current period - KEEP IT (conservative approach)
+                order = current_period_orders[0]
                 age_hours = (datetime.now(timezone.utc) - order.created_at).total_seconds() / 3600
-                logger.info(f"✅ Keeping single buy order from today: {order.client_id} ({age_hours:.1f}h old)")
-                logger.info("📋 Conservative approach: Respecting existing same-day order, letting order tracking handle fills")
+                logger.info(f"✅ Keeping single buy order from {interval_label}: {order.client_id} ({age_hours:.1f}h old)")
+                logger.info("📋 Conservative approach: Respecting existing current-period order, letting order tracking handle fills")
                         
             # REMOVED: Cache clearing - using direct exchange queries
                 
@@ -3276,10 +3328,13 @@ class DailyRangeBot:
                     period_buy_orders.append(order)
 
             # Return consistent format for buy status
+            interval_label = 'current hour' if timeframe == 'hourly' else 'current day'
+
             return {
                 'total_buy_orders': len(buy_orders),
                 'all_buy_orders': buy_orders,
-                'today_orders': period_buy_orders,
+                'current_interval_orders': period_buy_orders,
+                'interval_label': interval_label,
                 'cancelled_stale': 0  # Always 0 with direct exchange queries
             }
             
@@ -3289,7 +3344,8 @@ class DailyRangeBot:
             return {
                 'total_buy_orders': 0,
                 'all_buy_orders': [],
-                'today_orders': [],
+                'current_interval_orders': [],
+                'interval_label': 'current period',
                 'cancelled_stale': 0
             }
     
@@ -3495,15 +3551,15 @@ class DailyRangeBot:
             logger.info(f"   Current Period Buy Orders: {len(current_period_buy_orders)}")
             logger.info(f"   Current Period Sell Orders: {len(current_period_sell_orders)}")
             logger.info(f"   Old Buy Orders: {len(old_buy_orders)}")
-            logger.info(f"   Old Sell Orders: {len(old_sell_orders)}")
+            logger.info(f"   Previous Period Sell Orders: {len(old_sell_orders)}")
             logger.info(f"   Position-Order Consistency: {'✅ SAFE' if is_consistent else '🚨 DANGEROUS'}")
             
             # Return dictionary with old keys for compatibility with calling functions
             return {
                 'position_size': position_size,
-                'today_buy_orders': current_period_buy_orders,    # Mapped to old key
-                'today_sell_orders': current_period_sell_orders, # Mapped to old key
-                'old_sell_orders': old_sell_orders,
+                'current_interval_buy_orders': current_period_buy_orders,
+                'current_interval_sell_orders': current_period_sell_orders,
+                'previous_interval_sell_orders': old_sell_orders,
                 'is_consistent': is_consistent,
                 'total_buy_amount': sum(safe_float(o.get('amount', 0)) for o in current_period_buy_orders),
                 'total_sell_amount': sum(safe_float(o.get('amount', 0)) for o in all_sell_orders)
@@ -3514,10 +3570,10 @@ class DailyRangeBot:
             # Return safe defaults on error
             return {
                 'position_size': 0.0,
-                'today_buy_orders': [],
-                'today_sell_orders': [],
-                'old_sell_orders': [],
-                'is_consistent': True,  # Assume safe on error
+                'current_interval_buy_orders': [],
+                'current_interval_sell_orders': [],
+                'previous_interval_sell_orders': [],
+                'is_consistent': True,
                 'total_buy_amount': 0.0,
                 'total_sell_amount': 0.0
             }
