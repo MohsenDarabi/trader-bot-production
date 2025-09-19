@@ -193,7 +193,7 @@ class OrderPairingManager:
                     if sell_order:
                         # Track the sell order
                         self.order_tracker.track_order(
-                            order_id=str(sell_order.order_id),
+                            order_id=str(sell_order.exchange_order_id),
                             client_id=sell_order.client_id,
                             market=fill.market,
                             side=OrderSide.SELL,
@@ -203,7 +203,7 @@ class OrderPairingManager:
                         
                         # Link sell order to buy order
                         self.order_tracker.link_sell_order_to_buy(
-                            sell_order_id=str(sell_order.order_id),
+                            sell_order_id=str(sell_order.exchange_order_id),
                             buy_order_id=fill.order_id
                         )
                         
