@@ -1282,61 +1282,65 @@ class DailyRangeBot:
     
     def _check_today_filled_buy_orders(self, market: str) -> bool:
         """
-        Check if any buy orders were filled today for the given market
-        
-        This prevents the startup bug where filled orders disappear from pending orders,
-        making the bot think no buys happened today and triggering multiple "startup" buys.
-        
-        Returns:
-            True if any buy orders were filled today, False otherwise
+        Determine whether the current trading period still has uncovered buy fills.
+
+        Returns True when a buy fill in the active period exists without a completed sell,
+        which should block placement of another buy for the same cycle.
         """
         try:
-            from datetime import datetime, timezone
+            uncovered = self._get_current_period_uncovered_buy_fills(market)
+            if uncovered:
+                return True
+
+            # Fallback: use REST fills when tracker data is unavailable or empty
+            from config.settings import TRADING_INTERVAL
             from src.utils.safe_conversions import safe_float
-            today = datetime.now(timezone.utc).date()
-            
-            # Method 1: Check order tracker for filled buy orders from today
-            if hasattr(self, 'order_tracker') and self.order_tracker:
-                try:
-                    tracked_orders = self.order_tracker.tracked_orders.values()
-                    for order in tracked_orders:
-                        if (order.market == market and 
-                            order.side.value == 'buy' and 
-                            order.status in ['filled', 'partial'] and
-                            order.created_at.date() == today):
-                            logger.debug(f"🔍 Found today's filled buy order: {order.client_order_id}")
-                            return True
-                except Exception as e:
-                    logger.debug(f"Error checking order tracker for filled buys: {e}")
-            
-            # Method 2: Check recent transactions via API (if order tracker fails)
-            try:
-                # Get today's transactions from the exchange
-                # Note: This is a fallback method - order tracker is more reliable
-                transactions = self.client.get_order_fills(market)
-                if transactions and transactions.get('data'):
-                    for fill in transactions['data']:
-                        if fill.get('side') == 'buy':
-                            # Parse fill timestamp with full precision
-                            fill_time = safe_float(fill.get('time', 0))
-                            if fill_time > 0:
-                                if fill_time > 1e12:  # Milliseconds
-                                    fill_date = datetime.fromtimestamp(fill_time / 1000, timezone.utc).date()
-                                else:  # Seconds
-                                    fill_date = datetime.fromtimestamp(fill_time, timezone.utc).date()
-                                
-                                if fill_date == today:
-                                    logger.debug(f"🔍 Found today's filled buy via API: {fill.get('id', 'unknown')}")
-                                    return True
-            except Exception as e:
-                logger.debug(f"Error checking API for today's filled buy orders: {e}")
-            
-            logger.debug(f"🔍 No filled buy orders found for {market} today")
+
+            timeframe = (TRADING_INTERVAL or '').lower()
+            now_utc = datetime.now(timezone.utc)
+            if timeframe == 'hourly':
+                current_period_key = now_utc.strftime('%Y-%m-%d-%H')
+            else:
+                current_period_key = now_utc.date()
+
+            if timeframe == 'hourly':
+                period_start = now_utc.replace(minute=0, second=0, microsecond=0)
+            else:
+                period_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+            transactions = self.client.get_user_deals(
+                market=market,
+                side='buy',
+                start_time=int(period_start.timestamp() * 1000),
+                limit=200
+            )
+
+            if transactions and transactions.get('data'):
+                for fill in transactions['data']:
+                    fill_time_value = safe_float(fill.get('created_at', 0))
+                    if fill_time_value <= 0:
+                        continue
+
+                    fill_dt = datetime.fromtimestamp(fill_time_value / 1000, timezone.utc)
+
+                    if timeframe == 'hourly':
+                        fill_key = fill_dt.strftime('%Y-%m-%d-%H')
+                    else:
+                        fill_key = fill_dt.date()
+
+                    if fill_key != current_period_key:
+                        continue
+
+                    logger.debug(
+                        f"Fallback uncovered buy detected via user_deals for {market}: order {fill.get('order_id')} at {fill_dt}"
+                    )
+                    return True
+
+            logger.debug(f"🔍 No uncovered buy fills detected for {market} in current period")
             return False
-            
+
         except Exception as e:
-            logger.warning(f"Error checking today's filled buy orders for {market}: {e}")
-            # On error, assume no filled buys (conservative approach)
+            logger.warning(f"Error checking current-period filled buys for {market}: {e}")
             return False
     
     def _calculate_position_sell_balance(self, market: str) -> Dict[str, Any]:
@@ -1598,11 +1602,24 @@ class DailyRangeBot:
             logger.error(f"Error placing missing sell order for {market}: {e}")
             return False
     
-    def _get_today_pending_sell_orders(self, market: str) -> int:
-        """Count pending sell orders placed today for the given market using proven detection logic"""
+    def _get_period_pending_sell_orders(self, market: str) -> Dict[str, Any]:
+        """Count pending sell orders for the current trading period (day/hour)."""
         from src.utils.safe_conversions import safe_float
-        
-        today = datetime.now(timezone.utc).date()
+
+        from config.settings import TRADING_INTERVAL
+
+        timeframe = (TRADING_INTERVAL or '').lower()
+        is_hourly = timeframe == 'hourly'
+
+        now_utc = datetime.now(timezone.utc)
+        if is_hourly:
+            current_period = now_utc.strftime('%Y-%m-%d-%H')
+            period_label = 'the current hour'
+            descriptor = "this hour's"
+        else:
+            current_period = now_utc.date()
+            period_label = 'today'
+            descriptor = "today's"
         
         try:
             # Use proven direct API call logic from test_race_condition.py
@@ -1611,63 +1628,81 @@ class DailyRangeBot:
                 orders = orders_response.get('data', [])
             else:
                 orders = orders_response if isinstance(orders_response, list) else []
-            
+        
             # Enhanced order analysis logging with detailed information
             if len(orders) > 0:
                 logger.info(f"📊 Analyzing {len(orders)} total pending orders for {market}")
-            
-            # Filter for sell orders placed today using proven timestamp parsing
-            sell_orders_today = []
-            sell_orders_old = []
+        
+            # Filter for sell orders placed during the current period
+            sell_orders_current_period = []
+            sell_orders_previous_period = []
             buy_orders = []
-            
+        
             for order in orders:
                 created_at = order.get('created_at', 0)
                 client_id = order.get('client_id', '')
                 side = order.get('side', '')
                 amount = safe_float(order.get('amount', 0))
                 price = safe_float(order.get('price', 0))
-                
+        
                 # DEBUG: Log raw timestamp data
                 logger.debug(f"🔍 DEBUG Raw order data: created_at={created_at} (type: {type(created_at)}), client_id={client_id}")
-                
+        
                 # Use proven timestamp parsing logic from test
                 if isinstance(created_at, (int, float)):
-                    order_date = datetime.fromtimestamp(created_at / 1000, timezone.utc).date()
-                    logger.debug(f"🔍 DEBUG Timestamp parsed as int/float: {created_at} → {order_date}")
+                    order_datetime = datetime.fromtimestamp(created_at / 1000, timezone.utc)
+                    logger.debug(f"🔍 DEBUG Timestamp parsed as int/float: {created_at} → {order_datetime}")
                 else:
-                    order_date = datetime.fromisoformat(str(created_at).replace('Z', '+00:00')).date()
-                    logger.debug(f"🔍 DEBUG Timestamp parsed as string: {created_at} → {order_date}")
-                
-                is_today = order_date == today
-                
+                    order_datetime = datetime.fromisoformat(str(created_at).replace('Z', '+00:00'))
+                    if order_datetime.tzinfo is None:
+                        order_datetime = order_datetime.replace(tzinfo=timezone.utc)
+                    else:
+                        order_datetime = order_datetime.astimezone(timezone.utc)
+                    logger.debug(f"🔍 DEBUG Timestamp parsed as string: {created_at} → {order_datetime}")
+
+                if is_hourly:
+                    order_period = order_datetime.strftime('%Y-%m-%d-%H')
+                else:
+                    order_period = order_datetime.date()
+
+                is_current_period = order_period == current_period
+                period_display = order_datetime.strftime('%Y-%m-%d %H:%M:%S') if is_hourly else str(order_period)
+
                 # DEBUG: Log detailed comparison
-                logger.debug(f"🔍 DEBUG Date comparison: order_date={order_date}, today={today}, is_today={is_today}")
-                
+                logger.debug(
+                    "🔍 DEBUG Period comparison: order_period=%s, current_period=%s, is_current=%s",
+                    order_period,
+                    current_period,
+                    is_current_period
+                )
+        
                 # Log order details for debugging
-                logger.info(f"📋 Order: {side.upper()} | ${price:.4f} | Amount: {amount:.6f} | {client_id} | {order_date} | {'TODAY' if is_today else 'OLD'}")
-                
+                logger.info(
+                    f"📋 Order: {side.upper()} | ${price:.4f} | Amount: {amount:.6f} | {client_id} | {period_display} | "
+                    f"{'CURRENT_PERIOD' if is_current_period else 'OLD'}"
+                )
+        
                 if side == 'buy':
                     buy_orders.append(order)
                 elif side == 'sell':
-                    if is_today:
-                        sell_orders_today.append(order)
-                        logger.debug(f"🔍 DEBUG Added to sell_orders_today: {client_id}")
+                    if is_current_period:
+                        sell_orders_current_period.append(order)
+                        logger.debug(f"🔍 DEBUG Added to current-period sell orders: {client_id}")
                     else:
-                        sell_orders_old.append(order)
-                        logger.debug(f"🔍 DEBUG Added to sell_orders_old: {client_id}")
-            
+                        sell_orders_previous_period.append(order)
+                        logger.debug(f"🔍 DEBUG Added to previous-period sell orders: {client_id}")
+        
             # Log summary
-            if len(sell_orders_old) > 0:
-                logger.info(f"  └─ {len(sell_orders_old)} sell orders from previous days (ignored)")
+            if len(sell_orders_previous_period) > 0:
+                logger.info(f"  └─ {len(sell_orders_previous_period)} sell orders from previous periods (ignored)")
             if len(buy_orders) > 0:
                 logger.info(f"  └─ {len(buy_orders)} buy orders total")
-            
+        
             # Check for orphaned sell orders by client_id marker - exclude from count
             regular_sell_count = 0
             orphaned_sell_count = 0
-            
-            for order in sell_orders_today:
+        
+            for order in sell_orders_current_period:
                 client_id = order.get('client_id', '')
                 logger.debug(f"🔍 DEBUG Classifying sell order: client_id={client_id}, contains_OS={'_OS_' in client_id}")
                 if "_OS_" in client_id:
@@ -1676,27 +1711,141 @@ class DailyRangeBot:
                 else:
                     regular_sell_count += 1
                     logger.debug(f"🔍 DEBUG Regular sell order detected: {client_id}")
-            
-            sell_count = len(sell_orders_today)
-            
+        
+            sell_count = len(sell_orders_current_period)
+        
             if orphaned_sell_count > 0:
-                logger.info(f"📊 Today's sell orders: {sell_count} total, {orphaned_sell_count} orphaned (ignored), {regular_sell_count} blocking")
+                logger.info(
+                    f"📊 {descriptor.capitalize()} sell orders: {sell_count} total, {orphaned_sell_count} orphaned (ignored), "
+                    f"{regular_sell_count} blocking"
+                )
                 logger.info("✅ Orphaned sell orders do not block new buy orders")
-            
+        
             # Handle edge case of multiple pending sells from today
             if regular_sell_count > 1:
-                logger.warning(f"⚠️ Found {regular_sell_count} pending sell orders from today for {market}")
+                logger.warning(f"⚠️ Found {regular_sell_count} pending sell orders from {period_label} for {market}")
                 logger.warning("This indicates a previous bug occurred - blocking new buy orders")
-                log_trading_event('multiple_sells_detected', f"Found {regular_sell_count} today's pending sells - blocking new buys for {market}")
+                log_trading_event(
+                    'multiple_sells_detected',
+                    f"Found {regular_sell_count} {period_label} pending sells - blocking new buys for {market}"
+                )
             elif regular_sell_count == 1:
-                logger.info("ℹ️ Found 1 pending sell order from today - blocking new buy orders")
-            
-            return regular_sell_count  # Only regular sells block new buys
-            
+                logger.info(f"ℹ️ Found 1 pending sell order from {period_label} - blocking new buy orders")
+
+            return {
+                'count': regular_sell_count,
+                'period_label': period_label,
+                'descriptor': descriptor,
+                'orders': sell_orders_current_period
+            }
+        
         except Exception as e:
-            logger.error(f"Error checking today's pending sell orders for {market}: {e}")
+            logger.error(f"Error checking current-period pending sell orders for {market}: {e}")
             # Return 1 to be safe - block new buy orders if we can't determine state
-            return 1
+            return {
+                'count': 1,
+                'period_label': 'the current period',
+                'descriptor': "current period's",
+                'orders': []
+            }
+
+    def _get_current_period_uncovered_buy_fills(self, market: str) -> List[Dict[str, Any]]:
+        """Return current-period buy fills that lack any filled sell coverage."""
+        results: List[Dict[str, Any]] = []
+
+        if not getattr(self, 'order_tracker', None):
+            logger.debug("Order tracker unavailable - cannot evaluate uncovered buy fills.")
+            return results
+
+        try:
+            from config.settings import TRADING_INTERVAL
+
+            timeframe = (TRADING_INTERVAL or '').lower()
+            is_hourly = timeframe == 'hourly'
+
+            now_utc = datetime.now(timezone.utc)
+            if is_hourly:
+                current_period_key = now_utc.strftime('%Y-%m-%d-%H')
+            else:
+                current_period_key = now_utc.date()
+
+            tolerance = self._get_market_amount_tolerance(market)
+
+            for pair in list(self.order_tracker.order_pairs.values()):
+                buy_order = pair.buy_order
+
+                if buy_order.market != market:
+                    continue
+
+                if buy_order.filled_amount <= tolerance:
+                    continue
+
+                # Determine most recent fill timestamp
+                fills = buy_order.fills or []
+                if fills:
+                    last_fill_time = max((fill.timestamp for fill in fills if fill.timestamp), default=buy_order.created_at)
+                else:
+                    last_fill_time = buy_order.created_at
+
+                if last_fill_time is None:
+                    continue
+
+                if is_hourly:
+                    fill_period_key = last_fill_time.strftime('%Y-%m-%d-%H')
+                else:
+                    fill_period_key = last_fill_time.date()
+
+                if fill_period_key != current_period_key:
+                    continue
+
+                filled_sell_amount = sum(sell.filled_amount for sell in pair.sell_orders)
+                remaining_after_filled = max(0.0, buy_order.filled_amount - filled_sell_amount)
+
+                if remaining_after_filled <= tolerance:
+                    continue
+
+                sell_details = []
+                for sell in pair.sell_orders:
+                    sell_details.append({
+                        'order_id': str(sell.order_id),
+                        'client_id': sell.client_id,
+                        'status': sell.status.value,
+                        'filled_amount': sell.filled_amount,
+                        'remaining_amount': sell.remaining_amount
+                    })
+
+                logger.debug(
+                    "Uncovered buy detected | market=%s buy_id=%s remaining=%.6f filled_sells=%.6f",
+                    market,
+                    buy_order.order_id,
+                    remaining_after_filled,
+                    filled_sell_amount
+                )
+
+                results.append({
+                    'buy_order_id': str(buy_order.order_id),
+                    'buy_client_id': buy_order.client_id,
+                    'filled_amount': buy_order.filled_amount,
+                    'filled_sell_amount': filled_sell_amount,
+                    'remaining_after_filled': remaining_after_filled,
+                    'last_fill_timestamp': last_fill_time,
+                    'sell_orders': sell_details
+                })
+
+            if results:
+                logger.info(f"📊 Current-period uncovered buy fills for {market}: {len(results)}")
+                for entry in results:
+                    ts = entry['last_fill_timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+                    logger.info(
+                        f"   Buy {entry['buy_order_id']} ({entry['buy_client_id']}) remaining {entry['remaining_after_filled']:.6f} "
+                        f"after sells filled {entry['filled_sell_amount']:.6f} | last fill {ts}"
+                    )
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Error gathering current-period uncovered buy fills for {market}: {e}")
+            return results
     
     def _should_place_buy_order(self, market: str, signal: TradingSignal, current_price: float) -> bool:
         """Buy order decision using fresh exchange data with period-start cancellation and funding fee protection"""
@@ -1867,7 +2016,9 @@ class DailyRangeBot:
         logger.info(f"🔄 Checking refined buy conditions for {market}")
         
         # Get fresh data using existing methods
-        pending_sells_today = self._get_today_pending_sell_orders(market)  # Already excludes orphaned
+        period_sell_status = self._get_period_pending_sell_orders(market)  # Already excludes orphaned
+        pending_sells_today = period_sell_status['count']
+        sell_period_label = period_sell_status['period_label']
         
         # Check period and buy conditions based on timeframe
         current_time = datetime.now(timezone.utc)
@@ -1906,9 +2057,15 @@ class DailyRangeBot:
             logger.info(f"   is_new_period: {is_new_period}, has_period_buy: {has_period_buy}, cycle_complete: {cycle_complete}")
             return False
         
-        # If pending sells from today exist, cannot buy
-        if pending_sells_today > 0:
-            logger.info(f"❌ Cannot buy - {pending_sells_today} pending sell order(s) from today for {market}")
+        # If pending sells from current period exist, cannot buy
+        if pending_sells_today > 0 and not cycle_complete:
+            logger.info(
+                f"❌ Cannot buy - {pending_sells_today} pending sell order(s) from {sell_period_label} for {market}"
+            )
+            log_trading_event(
+                'buy_blocked_pending_sells',
+                f"{market}: {pending_sells_today} sells from {sell_period_label}"
+            )
             return False
         
         # CONDITION 2: Position coverage check using existing method
@@ -2078,12 +2235,20 @@ class DailyRangeBot:
         
         # 🚨 CRITICAL EMERGENCY CHECK: Block if ANY pending sells from today exist (excluding orphaned)
         # This prevents duplicate buy orders during bot restarts when sells already exist from today
-        pending_sells_today = self._get_today_pending_sell_orders(market)
-        
+        period_sell_status = self._get_period_pending_sell_orders(market)
+        pending_sells_today = period_sell_status['count']
+        sell_period_label = period_sell_status['period_label']
+
         if pending_sells_today > 0:
-            logger.error(f"🚨 EMERGENCY BLOCK: {pending_sells_today} pending sell orders from today - CANNOT PLACE BUY for {market}")
-            logger.error("   This prevents duplicate buy orders when bot restarts mid-day with existing sells")
-            log_trading_event('emergency_block', f"🚨 Critical safety check blocked buy - {pending_sells_today} today's pending sells for {market}")
+            logger.error(
+                f"🚨 EMERGENCY BLOCK: {pending_sells_today} pending sell orders from {sell_period_label} - "
+                f"CANNOT PLACE BUY for {market}"
+            )
+            logger.error("   This prevents duplicate buy orders when the bot restarts mid-period with existing sells")
+            log_trading_event(
+                'emergency_block',
+                f"🚨 Critical safety check blocked buy - {pending_sells_today} {sell_period_label} pending sells for {market}"
+            )
             return False
         
         # CRITICAL FIX: Check if ANY buy orders were placed today (pending OR filled)
