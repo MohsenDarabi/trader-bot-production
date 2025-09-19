@@ -522,7 +522,9 @@ class CoinExClient:
             Dictionary with orders list and pagination info
         """
         params = {
-            'market_type': 'FUTURES'
+            'market_type': 'FUTURES',
+            'page': page,
+            'limit': limit if limit is not None else 100
         }
 
         response = self._request(

@@ -7442,3 +7442,6 @@ Out of host capacity
 
 **Attempt 36** (2025-09-19 06:55:41 UTC): Clau:EU-FRANKFURT-1-AD-3 - ❌ FAILED
 Out of host capacity
+
+**Attempt 37** (2025-09-19 07:07:39 UTC): Clau:EU-FRANKFURT-1-AD-1 - ❌ FAILED
+Out of host capacity
