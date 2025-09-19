@@ -2535,15 +2535,15 @@ class DailyRangeBot:
                     try:
                         age_hours = (datetime.now(timezone.utc) - order.created_at).total_seconds() / 3600
                         logger.warning(f"🗑️  Cancelling older buy order: {order.client_id} from {order.created_at.time()} ({age_hours:.1f}h old)")
-                        
+
                         # Add small delay to prevent race conditions with rapid order creation
                         await asyncio.sleep(0.1)
-                        
+
                         if self.order_manager.cancel_order(order.client_id):
                             log_trading_event('cleanup', f"Cancelled older buy order {order.client_id}")
                         else:
                             logger.warning(f"⚠️ Cancel returned False for {order.client_id} - order may be processing")
-                            
+
                     except Exception as e:
                         if "invalid argument" in str(e).lower():
                             logger.info(f"⚠️ Order {order.client_id} may already be filled/cancelled: {e}")
@@ -2551,7 +2551,7 @@ class DailyRangeBot:
                         else:
                             logger.error(f"Failed to cancel older order {order.client_id}: {e}")
             elif len(current_period_orders) == 1:
-                # Single order from the current period - KEEP IT (conservative approach)
+                # Sentence changed
                 order = current_period_orders[0]
                 age_hours = (datetime.now(timezone.utc) - order.created_at).total_seconds() / 3600
                 logger.info(f"✅ Keeping single buy order from {interval_label}: {order.client_id} ({age_hours:.1f}h old)")

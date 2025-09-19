@@ -181,37 +181,20 @@ class OrderPairingManager:
                 logger.info(f"Sell price calculation: fill=${fill.price:.2f}, level={sell_price_level}, result=${sell_price:.2f}")
                 
                 try:
-                    # Place sell order
-                    sell_order = self.order_manager.place_sell_order(
+                    sell_order = self.order_manager.place_tracked_sell(
                         market=fill.market,
                         amount=amount_per_level,
                         price=sell_price,
                         position_size=amount_per_level * sell_price,
-                        is_hide=True
+                        source='paired',
+                        link_buy_order_id=fill.order_id
                     )
-                    
+
                     if sell_order:
-                        # Track the sell order
-                        self.order_tracker.track_order(
-                            order_id=str(sell_order.exchange_order_id),
-                            client_id=sell_order.client_id,
-                            market=fill.market,
-                            side=OrderSide.SELL,
-                            amount=amount_per_level,
-                            price=sell_price
-                        )
-                        
-                        # Link sell order to buy order
-                        self.order_tracker.link_sell_order_to_buy(
-                            sell_order_id=str(sell_order.exchange_order_id),
-                            buy_order_id=fill.order_id
-                        )
-                        
                         sell_orders_created.append(sell_order)
                         self.total_sell_orders_placed += 1
-                        
                         logger.info(f"Created sell order: {amount_per_level} {fill.market} @ {sell_price}")
-                    
+
                 except Exception as e:
                     logger.error(f"Failed to create sell order at price {sell_price}: {e}")
                     self.failed_pairings += 1
@@ -264,8 +247,9 @@ class OrderPairingManager:
                         timestamp=datetime.now()
                     )
                     
-                    await self._create_sell_orders_for_fill(synthetic_fill, rule)
-                    processed += 1
+                    sell_created = await self._create_sell_orders_for_fill(synthetic_fill, rule)
+                    if sell_created:
+                        processed += 1
             
             if processed > 0:
                 logger.info(f"Processed {processed} unmatched buy fills")

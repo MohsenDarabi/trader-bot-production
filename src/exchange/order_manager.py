@@ -623,7 +623,46 @@ class OrderManager:
                 # Remove from used IDs since order failed
                 self.used_client_ids.discard(client_id)
                 return None
-    
+
+    def place_tracked_sell(self, *, market: str, amount: float, price: float,
+                           source: str,
+                           position_size: float,
+                           link_buy_order_id: Optional[str] = None) -> Optional[Order]:
+        """Place a sell order, track it, and optionally link to a buy order."""
+        is_orphaned = source == 'orphaned'
+        is_paired = source == 'paired'
+
+        sell_order = self.place_sell_order(
+            market=market,
+            amount=amount,
+            price=price,
+            position_size=position_size,
+            is_hide=True,
+            is_orphaned=is_orphaned,
+            is_paired=is_paired
+        )
+
+        if not sell_order:
+            return None
+
+        if self.order_tracker:
+            self.order_tracker.track_order(
+                order_id=str(sell_order.exchange_order_id),
+                client_id=sell_order.client_id,
+                market=market,
+                side=OrderSide.SELL,
+                amount=amount,
+                price=price
+            )
+
+            if link_buy_order_id:
+                self.order_tracker.link_sell_order_to_buy(
+                    sell_order_id=str(sell_order.exchange_order_id),
+                    buy_order_id=link_buy_order_id
+                )
+
+        return sell_order
+
     @settlement_retry
     def cancel_order(self, client_id: str) -> bool:
         """
