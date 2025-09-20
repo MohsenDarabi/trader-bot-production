@@ -2628,8 +2628,8 @@ class DailyRangeBot:
                     signal.sell_price,
                     signal.range_value,
                     position_size.size_usdt,
-                    signal.previous_high,
-                    signal.previous_low
+                    None,
+                    None
                 )
 
                 if not was_optimized:

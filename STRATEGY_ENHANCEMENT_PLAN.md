@@ -53,7 +53,7 @@ MIN_POSITION_SIZE_PERCENT = float(os.getenv('MIN_POSITION_SIZE_PERCENT', '0.5'))
 ```python
 # Trading Strategy Configuration
 TRADING_INTERVAL = os.getenv('TRADING_INTERVAL', 'hourly')  # hourly vs daily
-MIN_PROFIT_PERCENT = float(os.getenv('MIN_PROFIT_PERCENT', '0.8'))  # Default 0.8%
+MIN_PROFIT_PERCENT = float(os.getenv('MIN_PROFIT_PERCENT', '1.0'))  # Default 1.0%
 LEVERAGE = float(os.getenv('LEVERAGE', '2.0'))  # Default 2x leverage
 ```
 
@@ -134,7 +134,7 @@ TRADING_INTERVAL=hourly
 POSITION_SIZE_PERCENT=1.0
 MAX_POSITION_SIZE_PERCENT=2.5
 MIN_POSITION_SIZE_PERCENT=0.5
-MIN_PROFIT_PERCENT=0.8
+MIN_PROFIT_PERCENT=1.0
 LEVERAGE=2.0
 
 # JSON Reporting

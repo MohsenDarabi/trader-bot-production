@@ -203,7 +203,7 @@ class DailyRangeStrategy:
             
             optimized_buy, optimized_sell, was_optimized = validator.optimize_prices_for_profit(
                 buy_price, sell_price, range_value, typical_margin,
-                ohlc['high'], ohlc['low']
+                None, None
             )
             
             if was_optimized:
@@ -303,7 +303,7 @@ class DailyRangeStrategy:
             
             optimized_buy, optimized_sell, was_optimized = validator.optimize_prices_for_profit(
                 buy_price, sell_price, range_value, typical_margin,
-                ohlc['high'], ohlc['low']
+                None, None
             )
             
             if was_optimized:

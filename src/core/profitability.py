@@ -2,7 +2,7 @@
 Three-Layer Profitability Validation System
 Ensures all trades meet minimum profit requirements
 """
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 from dataclasses import dataclass
 
 from config.settings import (
@@ -38,6 +38,7 @@ class ProfitabilityValidator:
         self.maker_fee = safe_float(MAKER_FEE)
         self.taker_fee = safe_float(TAKER_FEE)
         self.leverage = safe_float(LEVERAGE)
+        self._profit_epsilon = 1e-6  # tolerance for floating point comparisons
     
     # Layer 1: Signal Profitability
     def is_signal_profitable(self, buy_price: float, sell_price: float,
@@ -73,7 +74,7 @@ class ProfitabilityValidator:
         total_fees = (buy_price * quantity * self.taker_fee) + (sell_price * quantity * self.maker_fee)
 
         # Check profitability
-        is_profitable = profit_percent >= self.min_profit_percent
+        is_profitable = (profit_percent + self._profit_epsilon) >= self.min_profit_percent
 
         reason = None
         if not is_profitable:
@@ -94,7 +95,7 @@ class ProfitabilityValidator:
     # Layer 2: Price Optimization
     def optimize_prices_for_profit(self, buy_price: float, sell_price: float,
                                  range_value: float, margin: float,
-                                 high: float, low: float) -> Tuple[float, float, bool]:
+                                 high: Optional[float], low: Optional[float]) -> Tuple[float, float, bool]:
         """
         Layer 2: Optimize prices to meet profit requirements
         
@@ -103,8 +104,8 @@ class ProfitabilityValidator:
             sell_price: Initial sell price
             range_value: Calculated range value
             margin: User's margin/collateral in USDT
-            high: Previous day high
-            low: Previous day low
+            high: Optional upper boundary to keep sell price within
+            low: Optional lower boundary to keep buy price within
             
         Returns:
             Tuple of (optimized_buy_price, optimized_sell_price, was_optimized)
@@ -119,32 +120,73 @@ class ProfitabilityValidator:
         min_profit_decimal = self.min_profit_percent / 100
         required_multiplier = (1 + self.taker_fee + min_profit_decimal) / (1 - self.maker_fee)
 
-        current_ratio = sell_price / buy_price if buy_price > 0 else 0
-        target_ratio = max(current_ratio, required_multiplier)
-
-        if target_ratio <= current_ratio + 1e-6:
-            return buy_price, sell_price, False
-
+        current_ratio = sell_price / buy_price if buy_price > 0 else 0.0
+        target_ratio = max(required_multiplier, current_ratio + 1e-6)
         midpoint = (buy_price + sell_price) / 2
-        if midpoint <= 0:
-            return buy_price, sell_price, False
 
-        delta = midpoint * (target_ratio - 1) / (target_ratio + 1)
-        new_buy = midpoint - delta
-        new_sell = midpoint + delta
+        # Collect candidate adjustments in priority order so the first profitable
+        # option we find becomes the selected spread update.
+        candidates: List[Tuple[str, float, float]] = []
 
-        if new_buy <= 0 or new_sell <= new_buy:
-            return buy_price, sell_price, False
+        # 1) Symmetric expansion around the midpoint (preferred when feasible).
+        if midpoint > 0 and target_ratio > current_ratio:
+            delta = midpoint * (target_ratio - 1) / (target_ratio + 1)
+            candidates.append(("symmetric", midpoint - delta, midpoint + delta))
 
-        final_result = self.is_signal_profitable(new_buy, new_sell, margin)
-        if final_result.is_profitable:
-            logger.info("✅ Optimized prices for profitability (symmetric):")
-            logger.info(f"   Original: Buy=${buy_price:.2f}, Sell=${sell_price:.2f}")
-            logger.info(f"   Optimized: Buy=${new_buy:.2f}, Sell=${new_sell:.2f}")
-            logger.info(f"   Expected profit: {final_result.profit_percent:.2f}%")
-            return new_buy, new_sell, True
+        # 2) Raise only the sell side enough to clear fees + profit target.
+        min_sell_required = max(sell_price, self.calculate_min_profitable_price(buy_price))
+        if high is not None:
+            if min_sell_required <= high:
+                candidates.append(("raise-sell", buy_price, min_sell_required))
+        else:
+            candidates.append(("raise-sell", buy_price, min_sell_required))
 
-        logger.debug("Symmetric optimization could not reach profitability after rounding; keeping original prices.")
+        # 3) Lower only the buy side if there is room above the low bound.
+        if required_multiplier > 0:
+            max_buy_allowed = sell_price / required_multiplier
+            lowered_buy = min(buy_price, max_buy_allowed)
+            if low is not None:
+                if lowered_buy >= low:
+                    candidates.append(("lower-buy", lowered_buy, sell_price))
+            else:
+                candidates.append(("lower-buy", lowered_buy, sell_price))
+
+        # 4) Anchor to the low bound if available, expanding the sell side enough
+        # to satisfy the minimum profit. This keeps spreads within the prior range.
+        if low is not None:
+            low_anchor_sell = max(sell_price, low * required_multiplier)
+            if high is None or low_anchor_sell <= high:
+                candidates.append(("anchor-low", low, low_anchor_sell))
+
+        # 5) Anchor to the high bound where possible.
+        if high is not None and required_multiplier > 0:
+            high_anchor_buy = min(buy_price, high / required_multiplier)
+            if high_anchor_buy > 0 and (low is None or high_anchor_buy >= low):
+                candidates.append(("anchor-high", high_anchor_buy, high))
+
+        tested = set()
+        for label, candidate_buy, candidate_sell in candidates:
+            if candidate_buy <= 0 or candidate_sell <= candidate_buy:
+                continue
+            if low is not None and candidate_buy < low:
+                continue
+            if high is not None and candidate_sell > high:
+                continue
+
+            key = (round(candidate_buy, 10), round(candidate_sell, 10))
+            if key in tested:
+                continue
+            tested.add(key)
+
+            candidate_result = self.is_signal_profitable(candidate_buy, candidate_sell, margin)
+            if candidate_result.is_profitable:
+                logger.info(f"✅ Optimized prices for profitability ({label}):")
+                logger.info(f"   Original: Buy=${buy_price:.2f}, Sell=${sell_price:.2f}")
+                logger.info(f"   Optimized: Buy=${candidate_buy:.2f}, Sell=${candidate_sell:.2f}")
+                logger.info(f"   Expected profit: {candidate_result.profit_percent:.2f}%")
+                return candidate_buy, candidate_sell, True
+
+        logger.debug("No profitable price adjustment found within allowable bounds.")
         return buy_price, sell_price, False
     
     # Layer 3: Position Exit Validation
@@ -179,7 +221,7 @@ class ProfitabilityValidator:
         total_fees = buy_fees + sell_fees
 
         # Check profitability
-        is_profitable = profit_percent >= self.min_profit_percent
+        is_profitable = (profit_percent + self._profit_epsilon) >= self.min_profit_percent
 
         reason = None
         if not is_profitable:
