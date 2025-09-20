@@ -1,12 +1,11 @@
 # Trader Bot Hourly — Comprehensive Project Brief
 
 ## Current Focus & Recent Changes
-- **Completed**: Raised all fallback sell pricing to guarantee ≥1 % profit and clamp to active strategy sell prices; unified pairing + orphaned coverage now log and execute with full precision via `safe_float`/`safe_str_format`.
-- **Completed**: Fixed two production regressions spotted in latest logs: `CoinExClient.get_user_deals()` now accepts optional markets for bulk syncs, and the buy-order timeout logic no longer clashes with strategy signal lookups.
-- **Completed**: Signal display and generation logs now reflect the active trading interval (`HOURLY` vs `DAILY`) so restarts immediately show the correct cadence.
+- **Completed**: Sell coverage is now coordinated via `place_tracked_sell()` so pairing, recovery, and orphan logic all clamp to uncovered amounts and skip redundant sells.
+- **Completed**: Hourly buy expansion uses a deterministic, symmetric futures profitability check; buys and sells adjust together until the fee-adjusted margin is met.
+- **Completed**: Range expansion logs now reflect the actual adjustment instead of reporting “optimization failed”.
 - **In Progress**: Implementing `MarketDataManager.is_new_trading_hour()` and fully wiring hourly signal gating (see §8) remains the top functional gap.
-- **In Progress**: Restart safety refinements underway — orphaned sells are now period-aware and tracked, with completion hooks pending validation.
-- **Next Validation**: Run `make quick-check` (fast lint/syntax gate) before committing; follow with targeted strategy backtests for both intervals once hourly scaffolding is finished.
+- **Next Validation**: Run `make quick-check` before committing; follow with targeted hourly backtests to confirm pairing creates immediate strategy-priced sells.
 
 
 ## 1. Mission & Scope
@@ -47,9 +46,9 @@
 
 ## 4. Safety & Reliability Controls
 - **Circuit Breaker**: Priority-aware cooldowns (`emergency`, `high`, `normal`, `low`); escalated cooldown if coverage violations persist.
-- **Coverage Enforcement**: `_check_and_cover_orphaned_positions()` and `_calculate_position_sell_balance()` make sure every open position has matching sell orders even if manual orders exist.
+- **Coverage Enforcement**: `_check_and_cover_orphaned_positions()` and `_calculate_position_sell_balance()` ensure every long position has matching sell orders; missing coverage routes through `place_tracked_sell()` for consistent clamping.
 - **Duplicate Prevention**: `_ensure_single_buy_order()` cancels extras, `_get_today_pending_sell_orders()` blocks buys when today's sell orders exist, `RecentOrderTracker` filters rapid duplicates.
-- **Profitability Validation**: Every exit uses `ProfitabilityValidator` to guarantee net-positive after fees and required `MIN_PROFIT_PERCENT`.
+- **Profitability Validation**: Every exit uses `ProfitabilityValidator`; hourly entries mirror the same futures profitability logic before placing buys.
 - **Funding Protection**: Startup waits via `settlement_handler` utility to avoid executing during CoinEx funding fee settlement minutes (00:00, 08:00, 16:00 UTC).
 - **Smart Logging**: `log_trading_event()` and `force_log_summaries()` provide structured event logs; `_should_log_state_change()` reduces noise.
 
