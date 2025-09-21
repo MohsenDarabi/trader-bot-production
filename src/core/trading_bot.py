@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from src.exchange.exchange_factory import ExchangeFactory
 from src.exchange.order_manager import OrderManager, OrderStatus
-from src.exchange.order_tracker import OrderTracker, OrderSide
+from src.exchange.order_tracker import OrderTracker, OrderSide, OrderFill
 from src.core.order_pairing_manager import OrderPairingManager
 from src.core.position_manager import PositionManager, PositionSide
 from src.core.profitability import ProfitabilityValidator
@@ -323,6 +323,7 @@ class DailyRangeBot:
 
         # Cycle completion tracking for continuous trading
         self._cycle_completion_flags = {}  # market -> bool (allows immediate new buy after cycle complete)
+        self._processed_cycle_sells: Dict[str, Dict[str, Any]] = {}  # market -> {'period_key': str, 'order_ids': Set[str]}
 
         # Recent order tracking to prevent duplicates and handle phantom orders
         self.recent_order_tracker = RecentOrderTracker(grace_period_seconds=30)
@@ -372,6 +373,9 @@ class DailyRangeBot:
             self.pairing_manager = OrderPairingManager(
                 self.order_tracker, self.order_manager, self.client
             )
+
+            # Track fills to detect cycle completion via REST data
+            self.order_tracker.add_fill_handler(self._on_tracked_fill)
 
             # Connect OrderManager to OrderTracker events for synchronized order cleanup
             self.order_tracker.add_order_complete_handler(self.order_manager.handle_order_completion)
@@ -489,6 +493,7 @@ class DailyRangeBot:
             logger.info(f"Adding {market} to trading markets")
             self.trading_markets.append(market)
             self.status.active_markets.append(market)
+            self._reset_processed_sell_tracking(market)
             
             # Validate market and fetch initial data
             market_info = self.market_data.get_market_info(market)
@@ -2656,6 +2661,7 @@ class DailyRangeBot:
                     if market in self._cycle_completion_flags and self._cycle_completion_flags[market]:
                         self._cycle_completion_flags[market] = False
                         logger.info(f"✅ Cycle completion flag cleared after successful buy order placement for {market}")
+                    self._reset_processed_sell_tracking(market)
             else:
                 # For sell orders, use the traditional approach since this is for closing positions
                 # Note: Normal sell orders don't get price adjustment (as discussed)
@@ -2981,11 +2987,116 @@ class DailyRangeBot:
                 logger.info(f"🔄 Orphaned sell {tracked_order.client_id} filled for {market} - cycle completion flagged")
                 log_trading_event('orphaned_cycle_complete',
                                   f"Cycle completion detected after orphaned sell fill for {market}")
+                self._ensure_processed_cycle_sell_state(market, current_period_key)['order_ids'].add(str(tracked_order.order_id))
             else:
                 logger.info(f"ℹ️ Orphaned sell {tracked_order.client_id} filled for {market} from previous period")
 
         except Exception as e:
             logger.debug(f"Error handling orphaned sell completion for {tracked_order.client_id}: {e}")
+
+    @staticmethod
+    def _ensure_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
+        """Ensure datetime is timezone-aware in UTC."""
+        if not value:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def _ensure_processed_cycle_sell_state(self, market: str, period_key: str) -> Dict[str, Any]:
+        """Ensure processed sell tracking exists and is scoped to the current period."""
+        state = self._processed_cycle_sells.setdefault(market, {
+            'period_key': period_key,
+            'order_ids': set()
+        })
+        if state['period_key'] != period_key:
+            state['period_key'] = period_key
+            state['order_ids'].clear()
+        return state
+
+    def _reset_processed_sell_tracking(self, market: str) -> None:
+        """Reset processed sell tracking for a market using the current period."""
+        from config.settings import TRADING_INTERVAL
+        timeframe = TRADING_INTERVAL
+        period_key = self._get_period_key(datetime.now(timezone.utc), timeframe)
+        state = self._processed_cycle_sells.setdefault(market, {'period_key': period_key, 'order_ids': set()})
+        state['period_key'] = period_key
+        state['order_ids'].clear()
+        # Allow next cycle completion log to fire
+        self._should_log_state_change(market, 'cycle_complete_flag', False)
+
+    def _mark_cycle_complete(self, market: str, period_key: str, sell_order_id: str) -> None:
+        """Mark the trading cycle as complete for the current period."""
+        state = self._ensure_processed_cycle_sell_state(market, period_key)
+        state['order_ids'].add(sell_order_id)
+
+        previously_complete = self._cycle_completion_flags.get(market, False)
+        self._cycle_completion_flags[market] = True
+
+        if self._should_log_state_change(market, 'cycle_complete_flag', True) or not previously_complete:
+            logger.info(f"🔄 Cycle completion confirmed for {market} (period {period_key})")
+            log_trading_event('cycle_complete', f"Cycle completion detected for {market} (period {period_key})")
+
+    def _handle_sell_completion(self,
+                                market: str,
+                                order_id: str,
+                                order_created_at: Optional[datetime],
+                                fill_timestamp: Optional[datetime]) -> None:
+        """Evaluate a completed sell order to determine if the cycle should close."""
+        from config.settings import TRADING_INTERVAL
+
+        timeframe = TRADING_INTERVAL
+        now_key = self._get_period_key(datetime.now(timezone.utc), timeframe)
+
+        fill_dt = self._ensure_utc_datetime(fill_timestamp) or datetime.now(timezone.utc)
+        fill_period_key = self._get_period_key(fill_dt, timeframe)
+        if fill_period_key != now_key:
+            return
+
+        created_dt = self._ensure_utc_datetime(order_created_at) or fill_dt
+        created_period_key = self._get_period_key(created_dt, timeframe)
+        if created_period_key != now_key:
+            logger.debug(f"Sell {order_id} for {market} originated outside current period; ignoring for cycle completion")
+            return
+
+        state = self._ensure_processed_cycle_sell_state(market, now_key)
+        if order_id in state['order_ids']:
+            return
+
+        # Ensure no pending buy orders or uncovered fills remain for current period
+        buy_status = self._get_exchange_buy_status(market)
+        if buy_status.get('current_interval_orders'):
+            logger.debug(f"Sell {order_id} for {market} completed but pending buy orders remain; cycle not closed")
+            return
+
+        if self._has_current_interval_uncovered_buy_fills(market):
+            logger.debug(f"Sell {order_id} for {market} completed but uncovered buys remain; cycle not closed")
+            return
+
+        self._mark_cycle_complete(market, now_key, order_id)
+
+    def _on_tracked_fill(self, fill: OrderFill) -> None:
+        """Handle fills emitted by OrderTracker to drive cycle completion on REST data."""
+        try:
+            if fill.side != OrderSide.SELL:
+                return
+
+            if not self.order_tracker:
+                return
+
+            order = self.order_tracker.get_order(fill.order_id)
+            if not order:
+                return
+
+            if order.status.value != 'filled':
+                return
+
+            order_id = str(order.order_id)
+            market = fill.market
+            self._handle_sell_completion(market, order_id, order.created_at, fill.timestamp)
+
+        except Exception as exc:
+            logger.debug(f"Error processing tracked fill for {getattr(fill, 'market', 'unknown')}: {exc}")
     
     def _get_exchange_buy_status(self, market: str) -> Dict[str, Any]:
         """Get buy status directly from exchange - single source of truth"""
@@ -3591,89 +3702,78 @@ class DailyRangeBot:
             logger.error(f"Error syncing with exchange: {e}")
     
     def _check_for_completed_sell_orders(self):
-        """Check for completed sell orders and set cycle completion flags"""
+        """Check for completed sell orders using REST data and update cycle state."""
         try:
-            # Import and check trading timeframe
             from config.settings import TRADING_INTERVAL
+
             timeframe = TRADING_INTERVAL
-            
-            # Set up period checking based on timeframe
-            now = datetime.now(timezone.utc)
-            if timeframe == 'hourly':
-                current_period = now.strftime('%Y-%m-%d-%H')
-                period_name = "current hour"
-            else:
-                current_period = now.date()
-                period_name = "today"
-            
-            completed_sells = []
-            
-            # Check all active orders for completed sells
+            now_key = self._get_period_key(datetime.now(timezone.utc), timeframe)
+            completed_count = 0
+
             for client_id, order in list(self.order_manager.active_orders.items()):
-                if order.side == OrderSide.SELL:
-                    # Store order data before status update (to avoid race condition)
-                    order_market = order.market
-                    order_created_at = order.created_at
-                    
-                    # Update order status from exchange
-                    updated_order = self.order_manager.update_order_status(client_id)
-                    
-                    # Check if order was completed and removed during status update
-                    if updated_order is None or client_id not in self.order_manager.active_orders:
-                        # Order was removed - verify actual status via API
-                        if timeframe == 'hourly':
-                            order_period = order_created_at.strftime('%Y-%m-%d-%H')
-                            is_current_period = order_period == current_period
-                        else:
-                            order_period = order_created_at.date()
-                            is_current_period = order_period == current_period
-                            
-                        is_orphaned = "_OS_" in client_id
-                        
-                        # Try to verify actual order status
-                        if order.exchange_order_id:
-                            try:
-                                order_data = self.client.get_order_status(
-                                    market=order_market,
-                                    order_id=safe_int(order.exchange_order_id)
-                                )
-                                if order_data:
-                                    status = order_data.get('status', 'unknown')
-                                    fill_time = order_data.get('finished_at', 'unknown')
-                                    avg_price = safe_float(order_data.get('avg_price', 0))
-                                    
-                                    if status == 'filled':
-                                        if is_current_period and not is_orphaned:
-                                            self._cycle_completion_flags[order_market] = True
-                                            completed_sells.append(order)
-                                            logger.info(f"✅ SELL order {client_id} confirmed FILLED at {fill_time} @ ${avg_price:.4f} - cycle complete for {order_market}")
-                                            log_trading_event('cycle_complete', f"Confirmed sell fill for {order_market} - cycle complete ({timeframe} strategy)")
-                                        elif is_current_period and is_orphaned:
-                                            logger.info(f"📌 Orphaned sell order {client_id} confirmed FILLED at {fill_time} @ ${avg_price:.4f}")
-                                        else:
-                                            logger.debug(f"Sell order {client_id} confirmed FILLED from {order_period}")
-                                    elif status in ['cancelled', 'canceled']:
-                                        logger.info(f"❌ Sell order {client_id} confirmed CANCELLED for {order_market}")
-                                    else:
-                                        logger.warning(f"⚠️ Sell order {client_id} has unknown status: {status}")
-                                        
-                            except Exception as e:
-                                logger.warning(f"Could not verify sell order {client_id}: {e}")
-                                # Fallback to old assumption logic
-                                if is_current_period and not is_orphaned:
-                                    self._cycle_completion_flags[order_market] = True
-                                    completed_sells.append(order)
-                                    logger.info(f"🔄 Cycle completion flag set for {order_market} - sell order {client_id} disappeared (assumed filled)")
-                        else:
-                            # No exchange order ID - use fallback
-                            if is_current_period and not is_orphaned:
-                                self._cycle_completion_flags[order_market] = True
-                                completed_sells.append(order)
-                                logger.info(f"🔄 Cycle completion flag set for {order_market} - sell order {client_id} completed (no exchange ID)")
-            
-            if completed_sells:
-                logger.info(f"✅ Detected {len(completed_sells)} completed sell orders from {period_name} ({timeframe} strategy)")
-            
+                if order.side != OrderSide.SELL:
+                    continue
+
+                if "_OS_" in client_id:
+                    # Orphaned sells are handled separately
+                    continue
+
+                order_market = order.market
+                order_created_at = order.created_at
+
+                updated_order = self.order_manager.update_order_status(client_id)
+
+                # If the order remains active and isn't filled yet, skip
+                if updated_order and updated_order.status != OrderStatus.FILLED:
+                    continue
+
+                order_id_ref = str(order.exchange_order_id or client_id)
+
+                # If we still have an order object marked filled, use its updated time
+                if updated_order and updated_order.status == OrderStatus.FILLED:
+                    fill_dt = self._ensure_utc_datetime(updated_order.updated_at) or datetime.now(timezone.utc)
+                    self._handle_sell_completion(order_market, order_id_ref, order_created_at, fill_dt)
+                    completed_count += 1
+                    continue
+
+                # Order removed from active list – verify final status via REST
+                if client_id not in self.order_manager.active_orders and order.exchange_order_id:
+                    try:
+                        order_data = self.client.get_order_status(
+                            market=order_market,
+                            order_id=safe_int(order.exchange_order_id)
+                        )
+                    except Exception as api_error:
+                        logger.warning(f"Could not verify sell order {client_id}: {api_error}")
+                        continue
+
+                    if not order_data:
+                        continue
+
+                    status = order_data.get('status', '').lower()
+                    if status not in {'done', 'filled'}:
+                        continue
+
+                    finished_at_raw = order_data.get('finished_at')
+                    fill_dt: Optional[datetime] = None
+                    if isinstance(finished_at_raw, (int, float)) and finished_at_raw > 0:
+                        # CoinEx returns ms timestamps
+                        fill_dt = datetime.fromtimestamp(finished_at_raw / 1000, timezone.utc)
+                    elif isinstance(finished_at_raw, str) and finished_at_raw:
+                        try:
+                            fill_dt = datetime.fromisoformat(finished_at_raw.replace('Z', '+00:00'))
+                        except ValueError:
+                            fill_dt = None
+
+                    if fill_dt is None:
+                        fill_dt = datetime.now(timezone.utc)
+
+                    self._handle_sell_completion(order_market, order_id_ref, order_created_at, fill_dt)
+                    completed_count += 1
+
+            if completed_count:
+                logger.info(f"✅ Detected {completed_count} completed sell order(s) for period {now_key}")
+
         except Exception as e:
             logger.error(f"Error checking for completed sell orders: {e}")
     
