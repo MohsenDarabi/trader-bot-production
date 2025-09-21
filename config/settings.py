@@ -2,7 +2,6 @@
 Configuration settings for CoinEx Daily Range Accumulation Bot
 """
 import os
-from typing import Optional
 from datetime import datetime
 
 # Load environment variables

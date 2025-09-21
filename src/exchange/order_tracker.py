@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime
 
-from src.exchange.websocket_client import CoinExWebSocketClient
 from src.exchange.coinex_client import CoinExClient
 from src.utils.logger import get_logger
 from src.utils.safe_conversions import safe_float
@@ -106,16 +105,13 @@ class OrderTracker:
     Tracks orders in real-time and manages buy-sell pairing to prevent short positions
     """
     
-    def __init__(self, websocket_client: CoinExWebSocketClient, 
-                 rest_client: CoinExClient):
+    def __init__(self, rest_client: CoinExClient):
         """
         Initialize order tracker
         
         Args:
-            websocket_client: WebSocket client for real-time updates
             rest_client: REST client for API calls
         """
-        self.ws_client = websocket_client
         self.rest_client = rest_client
         
         # Order tracking
@@ -127,14 +123,6 @@ class OrderTracker:
         self.order_complete_handlers: List[Callable[[TrackedOrder], None]] = []
         self.pair_complete_handlers: List[Callable[[OrderPair], None]] = []
         
-        # Register WebSocket handlers
-        self._register_websocket_handlers()
-    
-    def _register_websocket_handlers(self) -> None:
-        """Register handlers for WebSocket messages"""
-        self.ws_client.register_handler("order.update", self._handle_order_update)
-        self.ws_client.register_handler("user_deals.update", self._handle_user_deals_update)
-    
     def add_fill_handler(self, handler: Callable[[OrderFill], None]) -> None:
         """Add a handler for order fills"""
         self.fill_handlers.append(handler)
@@ -220,52 +208,6 @@ class OrderTracker:
         logger.info(f"Linked sell order {sell_order_id} to buy order {buy_order_id}")
         return True
     
-    def _handle_order_update(self, data: Dict[str, Any]) -> None:
-        """Handle order status updates from WebSocket"""
-        try:
-            logger.debug(f"Processing order update: {data}")
-            logger.info("Processing order update")
-            
-            event_type = data.get("event")
-            # CoinEx sends single "order" object, not "orders" array
-            order_data = data.get("order", {})
-            
-            if order_data:
-                order_id = str(order_data.get("order_id"))
-                logger.info(f"Order update for ID {order_id}: event={event_type}")
-                
-                if order_id in self.tracked_orders:
-                    logger.info(f"Updating tracked order {order_id}")
-                    self._update_order_from_data(order_id, order_data, event_type)
-                else:
-                    logger.info(f"Order {order_id} not in tracked orders - might be external order")
-            else:
-                logger.warning("Order update received but no order data found")
-                    
-        except Exception as e:
-            logger.error(f"Error handling order update: {e}", exc_info=True)
-    
-    def _handle_user_deals_update(self, data: Dict[str, Any]) -> None:
-        """Handle user deal/fill updates from WebSocket"""
-        try:
-            logger.debug(f"Processing user deals update: {data}")
-            logger.info("Processing user deals update")
-            
-            # Check both possible structures for deals data
-            deals = data.get("deals", [])
-            if not deals and "deal" in data:
-                # Single deal object
-                deals = [data.get("deal")]
-            
-            for deal_data in deals:
-                if deal_data:
-                    logger.debug(f"Processing deal: {deal_data}")
-                    logger.info(f"Processing deal for order")
-                    self._process_deal(deal_data)
-                
-        except Exception as e:
-            logger.error(f"Error handling user deals update: {e}", exc_info=True)
-    
     def _process_deal(self, deal_data: Dict[str, Any]) -> None:
         """Process a single deal/fill"""
         try:
@@ -327,7 +269,7 @@ class OrderTracker:
     
     def _update_order_from_data(self, order_id: str, order_data: Dict[str, Any], 
                                event_type: str) -> None:
-        """Update order from WebSocket order data"""
+        """Update tracked order with fresh REST data"""
         try:
             order = self.tracked_orders[order_id]
             

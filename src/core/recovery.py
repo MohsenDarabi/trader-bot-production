@@ -2,7 +2,7 @@
 Startup recovery system to safely resume trading after crashes or restarts
 """
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import List, Tuple
 from dataclasses import dataclass
 
 from src.exchange.coinex_client import CoinExClient
@@ -10,7 +10,7 @@ from src.exchange.order_manager import OrderManager, Order, OrderStatus, OrderSi
 from src.core.position_manager import PositionManager, Position, PositionSide
 from src.data.database import DatabaseManager
 from src.data.market_data import MarketDataManager
-from src.core.strategy import DailyRangeStrategy, TradingSignal
+from src.core.strategy import DailyRangeStrategy
 from src.utils.logger import get_logger
 
 
@@ -237,17 +237,6 @@ class StartupRecovery:
             Number of signals loaded
         """
         logger.info("Recovering trading signals...")
-        
-        # Get today's date
-        today = datetime.now(timezone.utc).date().isoformat()
-        
-        # Try to load today's signals for active markets
-        # We'll discover active markets from positions and orders
-        active_markets = set()
-        
-        # Add markets from database (we'll need to query this)
-        # For now, we'll just try to generate fresh signals
-        # The strategy will cache them automatically
         
         signals_loaded = 0
         logger.info(f"Signals recovery: {signals_loaded} loaded (will generate fresh signals)")

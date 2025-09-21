@@ -4,7 +4,7 @@ Retry mechanism for handling transient API errors with exponential backoff
 import time
 import random
 from functools import wraps
-from typing import Dict, Any, Callable, Optional, Type, Tuple, List
+from typing import Any, Callable, Optional, Type, Tuple
 from dataclasses import dataclass
 
 from src.utils.logger import get_logger

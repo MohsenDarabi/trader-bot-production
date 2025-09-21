@@ -96,7 +96,7 @@ class OrderPairingManager:
             fill: Order fill information
         """
         try:
-            logger.info(f"🔄 WebSocket fill received: {fill.side} {fill.amount} {fill.market} @ ${fill.price:.4f} (order_id: {fill.order_id})")
+            logger.info(f"🔄 Fill recorded: {fill.side} {fill.amount} {fill.market} @ ${fill.price:.4f} (order_id: {fill.order_id})")
             
             # Log all fills for debugging purposes
             if fill.side == OrderSide.SELL:

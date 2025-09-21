@@ -351,9 +351,9 @@ class OrderManager:
                 except Exception as e:
                     logger.error(f"❌ Exception during unified immediate pairing for {filled_amount} {market}: {e}")
             
-            # Handle unfilled portion - will be managed by WebSocket events
+            # Handle unfilled portion - deferred to periodic REST reconciliation
             if unfilled_amount > 0:
-                logger.info(f"📊 Unfilled portion {unfilled_amount} {market} will be handled by WebSocket pairing")
+                logger.info(f"📊 Unfilled portion {unfilled_amount} {market} will be handled by REST pairing sync")
             
             # Enhanced validation: verify order exists on exchange with retry logic
             validation_success = False
@@ -396,7 +396,7 @@ class OrderManager:
             # Handle validation failure
             if not validation_success:
                 logger.error(f"🚨 Order validation completely failed - order {client_id} could not be verified on exchange")
-                logger.error("🔄 Removing unverified order from tracking - WebSocket events will detect if order actually exists")
+                logger.error("🔄 Removing unverified order from tracking - periodic REST sync will detect if order actually exists")
                 
                 # Remove from tracking since we can't verify it exists
                 del self.active_orders[client_id]
@@ -601,7 +601,7 @@ class OrderManager:
             # Handle validation failure
             if not validation_success:
                 logger.error(f"🚨 Sell order validation completely failed - order {client_id} could not be verified on exchange")
-                logger.error("🔄 Removing unverified sell order from tracking - WebSocket events will detect if order actually exists")
+                logger.error("🔄 Removing unverified sell order from tracking - periodic REST sync will detect if order actually exists")
                 
                 # Remove from tracking since we can't verify it exists
                 del self.active_orders[client_id]
@@ -856,7 +856,7 @@ class OrderManager:
                         logger.debug(f"Alternative approach also failed for {client_id}: {e2}")
                 
                 logger.debug("This is a known CoinEx API issue - continuing without status update")
-                # Return order without modification - WebSocket updates will handle status changes
+                # Return order without modification - REST reconciliation will handle status changes
                 return order
             elif "Rate limit" in str(e) or "429" in str(e):
                 logger.warning(f"Rate limit hit checking order status for {client_id} - will retry later")
@@ -909,7 +909,7 @@ class OrderManager:
                         logger.info(f"Order {order.client_id} removed during status check")
                         continue
                 else:
-                    logger.debug(f"Skipping status check for {order.client_id} - relying on WebSocket updates")
+                    logger.debug(f"Skipping status check for {order.client_id} - relying on scheduled REST updates")
                 
                 # Re-check if still pending after potential status update
                 if order.client_id in self.active_orders and self.active_orders[order.client_id].status == OrderStatus.PENDING:
@@ -1033,7 +1033,7 @@ class OrderManager:
         Handle order completion events from OrderTracker
         
         This method is called when OrderTracker detects an order is fully filled
-        or cancelled via WebSocket events, ensuring OrderManager's cache stays synchronized.
+        or cancelled via REST-based reconciliation, ensuring OrderManager's cache stays synchronized.
         
         Args:
             tracked_order: TrackedOrder object from OrderTracker

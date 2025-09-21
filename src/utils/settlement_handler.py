@@ -8,10 +8,8 @@ During these periods, order operations are temporarily blocked by the exchange.
 import asyncio
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Callable, Optional, TypeVar
 from functools import wraps
-import logging
-
 from src.utils.logger import logger
 
 # Settlement times (UTC hours)

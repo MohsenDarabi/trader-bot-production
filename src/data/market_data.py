@@ -1,11 +1,10 @@
 """
 Market data fetching and processing for CoinEx futures
 """
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Any
 
 from src.exchange.coinex_client import CoinExClient
-from src.data.websocket_market_data import WebSocketMarketDataProvider
 from src.utils.logger import get_logger
 from src.utils.safe_conversions import safe_float, safe_int
 
@@ -16,22 +15,19 @@ logger = get_logger(__name__)
 class MarketDataManager:
     """Manages market data fetching and processing"""
     
-    def __init__(self, client: Optional[CoinExClient] = None, websocket_provider: Optional[WebSocketMarketDataProvider] = None):
+    def __init__(self, client: Optional[CoinExClient] = None):
         """
         Initialize market data manager
         
         Args:
             client: CoinEx API client instance
-            websocket_provider: WebSocket market data provider for real-time data
         """
         self.client = client or CoinExClient()
-        self.websocket_provider = websocket_provider
         self._market_info_cache = {}
         self._ohlc_cache = {}
         
-        # Statistics for monitoring WebSocket vs HTTP usage
-        self._websocket_hits = 0
-        self._http_fallback_hits = 0
+        # Basic usage statistics for observability
+        self._http_requests = 0
     
     def get_market_info(self, market: str, force_refresh: bool = False) -> Dict:
         """
@@ -110,7 +106,7 @@ class MarketDataManager:
             # Ensure we have the required columns
             required_cols = ['created_at', 'open', 'high', 'low', 'close', 'volume']
             if not klines or not all(col in klines[0] for col in required_cols):
-                raise ValueError(f"Missing required columns in kline data")
+                raise ValueError("Missing required columns in kline data")
             
             # Process each kline with safe conversions
             processed_klines = []
@@ -198,7 +194,7 @@ class MarketDataManager:
             # Ensure we have the required columns
             required_cols = ['created_at', 'open', 'high', 'low', 'close', 'volume']
             if not klines or not all(col in klines[0] for col in required_cols):
-                raise ValueError(f"Missing required columns in kline data")
+                raise ValueError("Missing required columns in kline data")
             
             # Process each kline with safe conversions
             processed_klines = []
@@ -263,7 +259,7 @@ class MarketDataManager:
 
     def get_current_price(self, market: str) -> float:
         """
-        Get current market price, preferring WebSocket data with HTTP fallback
+        Get current market price using the REST ticker endpoint.
         
         Args:
             market: Market symbol
@@ -271,17 +267,8 @@ class MarketDataManager:
         Returns:
             Current price
         """
-        # Try WebSocket data first if provider is available
-        if self.websocket_provider:
-            ws_price = self.websocket_provider.get_current_price(market)
-            if ws_price is not None:
-                self._websocket_hits += 1
-                logger.debug(f"Retrieved WebSocket price for {market}: ${ws_price:.2f}")
-                return ws_price
-        
-        # Fall back to HTTP API
         try:
-            self._http_fallback_hits += 1
+            self._http_requests += 1
             ticker_response = self.client.get_ticker(market)
             # CoinEx ticker returns a list with one item
             if isinstance(ticker_response, list) and ticker_response:
@@ -410,29 +397,13 @@ class MarketDataManager:
             logger.error(f"Failed to fetch available markets: {e}")
             raise
     
-    def set_websocket_provider(self, provider: WebSocketMarketDataProvider):
-        """
-        Set the WebSocket market data provider
-        
-        Args:
-            provider: WebSocket market data provider instance
-        """
-        self.websocket_provider = provider
-        logger.info("WebSocket market data provider connected to MarketDataManager")
-    
     def get_data_source_stats(self) -> Dict[str, int]:
         """
-        Get statistics on data source usage
+        Get statistics on market data usage
         
         Returns:
-            Dictionary with WebSocket hits and HTTP fallback counts
+            Dictionary with HTTP request counts
         """
         return {
-            "websocket_hits": self._websocket_hits,
-            "http_fallback_hits": self._http_fallback_hits,
-            "total_requests": self._websocket_hits + self._http_fallback_hits,
-            "websocket_percentage": (
-                (self._websocket_hits / (self._websocket_hits + self._http_fallback_hits)) * 100
-                if (self._websocket_hits + self._http_fallback_hits) > 0 else 0
-            )
+            "http_requests": self._http_requests,
         }

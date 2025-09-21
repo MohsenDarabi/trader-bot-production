@@ -1,8 +1,7 @@
 """
 Asset selection menu for choosing trading pairs at startup
 """
-from typing import List, Optional, Dict, Tuple
-import sys
+from typing import List, Optional, Dict
 from rich.console import Console
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
@@ -211,7 +210,6 @@ class AssetSelector:
             # Check if tradeable with current capital
             can_trade = available_capital >= min_order
             tradeable_status = "✅ Yes" if can_trade else "❌ No"
-            tradeable_style = "green" if can_trade else "red"
             
             table.add_row(
                 str(i),

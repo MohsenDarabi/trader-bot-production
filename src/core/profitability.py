@@ -2,7 +2,7 @@
 Three-Layer Profitability Validation System
 Ensures all trades meet minimum profit requirements
 """
-from typing import Dict, Tuple, Optional, List
+from typing import Tuple, Optional, List
 from dataclasses import dataclass
 
 from config.settings import (

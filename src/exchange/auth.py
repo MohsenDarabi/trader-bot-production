@@ -105,28 +105,3 @@ class CoinExAuth:
             'Content-Type': 'application/json'
         }
     
-    def sign_websocket_message(self, timestamp: Optional[str] = None) -> Dict[str, str]:
-        """
-        Generate authentication data for WebSocket connection
-        
-        Args:
-            timestamp: Optional timestamp, will generate if not provided
-            
-        Returns:
-            Dictionary with authentication data for WebSocket
-        """
-        if timestamp is None:
-            timestamp = str(int(time.time() * 1000))
-        
-        # For WebSocket, the prepared string is just the timestamp
-        signature = hmac.new(
-            self.secret_key.encode('utf-8'),
-            timestamp.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest().lower()
-        
-        return {
-            'access_id': self.access_id,
-            'signed_str': signature,
-            'timestamp': int(timestamp)  # WebSocket expects integer timestamp
-        }

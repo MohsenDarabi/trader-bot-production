@@ -146,7 +146,7 @@ class CoinExClient:
 
         # Add authentication headers if required
         if auth_required:
-            logger.info("Generating authentication headers...")
+            logger.debug("Generating authentication headers")
             headers = self.auth.get_auth_headers(
                 method=method,
                 path=endpoint,

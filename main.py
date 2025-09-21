@@ -10,7 +10,7 @@ import signal
 import os
 import argparse
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 # Add src to path with absolute resolution for VM compatibility
@@ -24,14 +24,12 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.layout import Layout
-from rich.text import Text
 
 # Import bot components
 from src.core.trading_bot import DailyRangeBot
 from src.utils.logger import get_logger
 from src.utils.smart_logging import force_log_summaries
 from config.settings import validate_config, is_test_mode, get_position_size_mode
-from src.utils.asset_selector import AssetSelector
 from process_lock import ProcessLock
 
 
@@ -231,7 +229,6 @@ class TradingBotManager:
             await self.bot.initialize()
             
             # Select trading market
-            asset_selector = AssetSelector(self.bot.market_data, self.bot.position_sizer)
             account_balance = self.bot.get_account_balance()
             
             self.console.print(f"💰 Account Balance: ${account_balance:.2f} USDT", style="green")

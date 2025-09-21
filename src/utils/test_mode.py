@@ -2,7 +2,7 @@
 Test mode management for 5-day safe testing period
 """
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Tuple
 from dataclasses import dataclass
 
 from config.settings import (
@@ -10,7 +10,7 @@ from config.settings import (
     POSITION_SIZE_PERCENT, is_test_mode, get_position_size_mode
 )
 from src.utils.logger import get_logger
-from src.utils.error_handling import handle_validation_error, ErrorSeverity
+from src.utils.error_handling import handle_validation_error
 
 logger = get_logger(__name__)
 
