@@ -326,6 +326,9 @@ class DailyRangeBot:
         self._processed_cycle_sells: Dict[str, Dict[str, Any]] = {}  # market -> {'period_key': str, 'order_ids': Set[str]}
         self._coverage_state: Dict[str, Dict[str, Any]] = {}  # market -> {'period_key': str, 'buy_id': str, 'pending_sells': Set[str]}
 
+        # Order sync throttling per market (to avoid redundant exchange calls)
+        self._last_orders_sync: Dict[str, datetime] = {}
+
         # Recent order tracking to prevent duplicates and handle phantom orders
         self.recent_order_tracker = RecentOrderTracker(grace_period_seconds=30)
 
@@ -1053,8 +1056,8 @@ class DailyRangeBot:
             from config.settings import TRADING_INTERVAL
             timeframe = TRADING_INTERVAL
             # Force sync with exchange to ensure fresh data and cleanup stale orders
-            log_trading_event('buy_status_sync', f"Forcing order sync with exchange for {market}")
-            self.order_manager.load_existing_orders(market)
+            log_trading_event('buy_status_sync', f"Syncing orders for {market}")
+            self._ensure_recent_order_sync(market)
             
             # Get all pending buy orders using proven endpoint
             pending_orders = self.order_manager.get_pending_orders(market)
@@ -2422,9 +2425,10 @@ class DailyRangeBot:
             logger.info(f"🔍 Enforcing single buy order rule for {market}")
             
             # Force a fresh sync with exchange before cleanup
-            logger.info(f"🔄 Forcing fresh order sync before cleanup for {market}")
-            sync_count = self.order_manager.load_existing_orders(market)
-            logger.info(f"📥 Synced {sync_count} orders from exchange for {market}")
+            logger.info(f"🔄 Syncing orders before cleanup for {market}")
+            self._ensure_recent_order_sync(market, force=True)
+            sync_count = sum(1 for o in self.order_manager.active_orders.values() if o.market == market)
+            logger.info(f"📥 Local cache now tracking {sync_count} orders for {market}")
             
             # Get ALL pending orders for this market
             all_pending_orders = self.order_manager.get_pending_orders(market)
@@ -2514,7 +2518,7 @@ class DailyRangeBot:
             
             # Verify cleanup results with fresh sync
             logger.info(f"🔍 Verifying cleanup results for {market}")
-            self.order_manager.load_existing_orders(market)
+            self._ensure_recent_order_sync(market, force=True)
             final_pending_orders = self.order_manager.get_pending_orders(market)
             final_buy_orders = [o for o in final_pending_orders if o.side.value == 'buy']
             
@@ -3078,6 +3082,22 @@ class DailyRangeBot:
         state['pending_sells'].clear()
         state['buy_id'] = None
         return True
+
+    def _ensure_recent_order_sync(self, market: Optional[str] = None, *, force: bool = False, ttl_seconds: int = 10) -> None:
+        """Load existing orders from the exchange, throttled to avoid redundant calls."""
+        key = market or '_all_'
+        now = datetime.now(timezone.utc)
+        last_sync = self._last_orders_sync.get(key)
+
+        if not force and last_sync and (now - last_sync).total_seconds() < ttl_seconds:
+            return
+
+        if market:
+            self.order_manager.load_existing_orders(market)
+        else:
+            self.order_manager.load_existing_orders()
+
+        self._last_orders_sync[key] = now
 
 
     @staticmethod
@@ -3783,7 +3803,8 @@ class DailyRangeBot:
             
             # CRITICAL: Also sync OrderManager state to prevent stale order issues
             logger.info("Syncing existing orders from exchange...")
-            orders_synced = self.order_manager.load_existing_orders()
+            self._ensure_recent_order_sync(force=True)
+            orders_synced = len(self.order_manager.active_orders)
             logger.info(f"Synced {orders_synced} existing orders")
             
             # Check for completed sell orders to set cycle completion flags
