@@ -681,6 +681,16 @@ class OrderManager:
                     buy_order_id=link_buy_order_id
                 )
 
+            if hasattr(self, '_trading_bot_ref') and self._trading_bot_ref:
+                try:
+                    self._trading_bot_ref.register_coverage_sell(
+                        market=market,
+                        buy_order_id=link_buy_order_id,
+                        sell_order_id=str(sell_order.exchange_order_id)
+                    )
+                except Exception as coverage_error:
+                    logger.debug(f"Coverage tracking notification failed for {market}: {coverage_error}")
+
         return sell_order
 
     @settlement_retry
@@ -883,37 +893,7 @@ class OrderManager:
                 continue
             
             if order.status == OrderStatus.PENDING:
-                # Check for orders older than 24 hours - likely stale
-                order_age = (now - order.created_at).total_seconds()
-                is_old_order = order_age > 86400  # 24 hours
-                
-                # Only perform REST API status check if enabled and enough time has passed, or if order is old
-                should_check_status = is_old_order
-                if not should_check_status and ENABLE_REST_API_STATUS_CHECKS:
-                    last_check = self._last_status_check.get(order.client_id)
-                    if (not last_check or 
-                        (now - last_check).total_seconds() > ORDER_STATUS_CHECK_INTERVAL):
-                        should_check_status = True
-                        self._last_status_check[order.client_id] = now
-                
-                if should_check_status:
-                    if is_old_order:
-                        logger.warning(f"Checking potentially stale order {order.client_id} (age: {order_age:.0f}s)")
-                    else:
-                        logger.debug(f"Performing periodic status check for order {order.client_id}")
-                    
-                    updated_order = self.update_order_status(order.client_id)
-                    
-                    # If order was removed during update (filled/cancelled), skip it
-                    if not updated_order or order.client_id not in self.active_orders:
-                        logger.info(f"Order {order.client_id} removed during status check")
-                        continue
-                else:
-                    logger.debug(f"Skipping status check for {order.client_id} - relying on scheduled REST updates")
-                
-                # Re-check if still pending after potential status update
-                if order.client_id in self.active_orders and self.active_orders[order.client_id].status == OrderStatus.PENDING:
-                    orders.append(self.active_orders[order.client_id])
+                orders.append(order)
         
         return orders
     

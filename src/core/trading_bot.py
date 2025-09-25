@@ -324,6 +324,7 @@ class DailyRangeBot:
         # Cycle completion tracking for continuous trading
         self._cycle_completion_flags = {}  # market -> bool (allows immediate new buy after cycle complete)
         self._processed_cycle_sells: Dict[str, Dict[str, Any]] = {}  # market -> {'period_key': str, 'order_ids': Set[str]}
+        self._coverage_state: Dict[str, Dict[str, Any]] = {}  # market -> {'period_key': str, 'buy_id': str, 'pending_sells': Set[str]}
 
         # Recent order tracking to prevent duplicates and handle phantom orders
         self.recent_order_tracker = RecentOrderTracker(grace_period_seconds=30)
@@ -2994,6 +2995,91 @@ class DailyRangeBot:
         except Exception as e:
             logger.debug(f"Error handling orphaned sell completion for {tracked_order.client_id}: {e}")
 
+    # Coverage tracking helpers ------------------------------------------------
+
+    def _register_buy_fill(self, market: str, buy_order_id: str, client_id: Optional[str], fill_timestamp: datetime) -> None:
+        """Track the most recent buy fill so we can ensure its coverage sell completes."""
+        from config.settings import TRADING_INTERVAL
+
+        period_key = self._get_period_key(fill_timestamp, TRADING_INTERVAL)
+        state = self._coverage_state.setdefault(market, {
+            'period_key': period_key,
+            'buy_id': buy_order_id,
+            'pending_sells': set()
+        })
+
+        state['period_key'] = period_key
+        state['buy_id'] = buy_order_id
+        state['pending_sells'].clear()
+
+        # Reset processed sell tracking and cycle flag for new cycle
+        self._reset_processed_sell_tracking(market)
+        self._cycle_completion_flags[market] = False
+        self._should_log_state_change(market, 'cycle_complete_flag', False)
+
+        # Remove the buy from active orders if still tracked locally
+        if client_id and client_id in self.order_manager.active_orders:
+            self.order_manager.active_orders.pop(client_id, None)
+
+    def register_coverage_sell(self, market: str, buy_order_id: Optional[str], sell_order_id: str) -> None:
+        """Register a coverage sell that should complete the current cycle."""
+        state = self._coverage_state.setdefault(market, {
+            'period_key': None,
+            'buy_id': None,
+            'pending_sells': set()
+        })
+
+        if buy_order_id:
+            state['buy_id'] = str(buy_order_id)
+        state['pending_sells'].add(str(sell_order_id))
+
+    def _handle_coverage_sell_fill(self,
+                                   market: str,
+                                   sell_order_id: str,
+                                   client_id: Optional[str],
+                                   fill_timestamp: datetime) -> bool:
+        """Handle the completion of a tracked coverage sell."""
+        from config.settings import TRADING_INTERVAL
+
+        state = self._coverage_state.get(market)
+        if not state or sell_order_id not in state.get('pending_sells', set()):
+            return False
+
+        state['pending_sells'].discard(sell_order_id)
+
+        # Remove from active orders to avoid repeated polling
+        if client_id and client_id in self.order_manager.active_orders:
+            self.order_manager.active_orders.pop(client_id, None)
+
+        if state['pending_sells']:
+            return True  # Still waiting on other coverage sells
+
+        # All coverage sells for this buy are filled; verify balance before flipping flag
+        if self._has_current_interval_uncovered_buy_fills(market):
+            logger.debug(f"Coverage sells filled for {market} but uncovered fills remain; keeping cycle incomplete")
+            return True
+
+        balance = self._calculate_position_sell_balance(market)
+        if balance['missing_sell'] > self._get_market_amount_tolerance(market):
+            logger.debug(
+                f"Coverage sells filled for {market} but position still missing {balance['missing_sell']:.6f}; waiting"
+            )
+            return True
+
+        buy_status = self._get_exchange_buy_status(market)
+        if buy_status.get('current_interval_orders'):
+            logger.debug(f"Coverage sells filled for {market} but current-period buys still pending; deferring")
+            return True
+
+        period_key = state.get('period_key') or self._get_period_key(fill_timestamp, TRADING_INTERVAL)
+        self._mark_cycle_complete(market, period_key, sell_order_id)
+
+        # Reset coverage state to allow subsequent cycles
+        state['pending_sells'].clear()
+        state['buy_id'] = None
+        return True
+
+
     @staticmethod
     def _ensure_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
         """Ensure datetime is timezone-aware in UTC."""
@@ -3045,6 +3131,15 @@ class DailyRangeBot:
         """Evaluate a completed sell order to determine if the cycle should close."""
         from config.settings import TRADING_INTERVAL
 
+        # Attempt coverage-aware handling first (client id unavailable here)
+        if self._handle_coverage_sell_fill(
+            market,
+            order_id,
+            client_id=None,
+            fill_timestamp=fill_timestamp or datetime.now(timezone.utc)
+        ):
+            return
+
         timeframe = TRADING_INTERVAL
         now_key = self._get_period_key(datetime.now(timezone.utc), timeframe)
 
@@ -3078,21 +3173,28 @@ class DailyRangeBot:
     def _on_tracked_fill(self, fill: OrderFill) -> None:
         """Handle fills emitted by OrderTracker to drive cycle completion on REST data."""
         try:
-            if fill.side != OrderSide.SELL:
-                return
-
             if not self.order_tracker:
                 return
 
             order = self.order_tracker.get_order(fill.order_id)
-            if not order:
+            client_id = order.client_id if order else None
+
+            if fill.side == OrderSide.BUY:
+                timestamp = fill.timestamp or datetime.now(timezone.utc)
+                self._register_buy_fill(fill.market, str(fill.order_id), client_id, timestamp)
                 return
 
-            if order.status.value != 'filled':
+            if fill.side != OrderSide.SELL or not order or order.status.value != 'filled':
                 return
 
             order_id = str(order.order_id)
             market = fill.market
+
+            # Try coverage-aware handling first
+            if self._handle_coverage_sell_fill(market, order_id, client_id, fill.timestamp or datetime.now(timezone.utc)):
+                return
+
+            # Fallback to legacy handling (e.g., orphaned sells)
             self._handle_sell_completion(market, order_id, order.created_at, fill.timestamp)
 
         except Exception as exc:
